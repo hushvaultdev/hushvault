@@ -1,0 +1,34 @@
+{
+  "name": "hushvault",
+  "version": "0.0.1",
+  "description": "HushVault CLI — secrets manager for Cloudflare developers",
+  "type": "module",
+  "bin": {
+    "hushvault": "./dist/index.js",
+    "hv": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts --format esm --target node20",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "keytar": "^7.9.0",
+    "chalk": "^5.3.0",
+    "ora": "^8.1.0",
+    "undici": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

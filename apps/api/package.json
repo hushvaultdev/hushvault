@@ -1,0 +1,26 @@
+{
+  "name": "@hushvault/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "tsc --noEmit",
+    "type-check": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply hushvault-db",
+    "db:migrate:local": "wrangler d1 migrations apply hushvault-db --local"
+  },
+  "dependencies": {
+    "hono": "^4.7.0",
+    "@hono/zod-validator": "^0.4.0",
+    "zod": "^3.24.0",
+    "drizzle-orm": "^0.40.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250322.0",
+    "drizzle-kit": "^0.30.0",
+    "wrangler": "^3.114.0",
+    "typescript": "^5.7.0"
+  }
+}

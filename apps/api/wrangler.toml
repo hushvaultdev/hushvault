@@ -1,0 +1,22 @@
+name = "hushvault-api"
+main = "src/index.ts"
+compatibility_date = "2025-03-31"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hushvault-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[kv_namespaces]]
+binding = "SECRETS_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+ENVIRONMENT = "development"
+
+# Production secrets (set via wrangler secret put or Cloudflare dashboard)
+# ENCRYPTION_MASTER_KEY  — 256-bit base64 key
+# JWT_SECRET             — random 64-byte string
+# STRIPE_SECRET_KEY      — sk_live_...
+# STRIPE_WEBHOOK_SECRET  — whsec_...
