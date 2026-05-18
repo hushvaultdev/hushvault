@@ -73,6 +73,17 @@ cd apps/api && wrangler deploy
 
 GitHub Actions handles this automatically on push to `main` (see `.github/workflows/deploy-api.yml`).
 
+## Beta / Dev Branch Deployment
+
+The `dev` branch is configured as the beta preview path.
+
+- `dev` branch pushes should deploy the API using `wrangler deploy --env dev`.
+- On Cloudflare Pages, map the `dev` branch to the beta preview site and attach the `beta.hush*` custom domain.
+- Use the `N4K4R` Cloudflare account for both the worker and Pages projects.
+- The `main` branch remains the production deployment path with the full custom domain.
+
+This gives you a real beta channel for `dev`, while `main` continues to drive the full production rollout.
+
 ---
 
 ## Secret Rotation Schedule

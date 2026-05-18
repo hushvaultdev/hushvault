@@ -1,0 +1,225 @@
+.page {
+  padding-bottom: 72px;
+}
+
+.heroSection {
+  padding-top: 18px;
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
+  gap: 28px;
+  align-items: center;
+}
+
+.heroCopy {
+  display: grid;
+  gap: 20px;
+}
+
+.heroTitle {
+  margin: 0;
+  font-size: clamp(2.7rem, 6vw, 5.4rem);
+  line-height: 0.95;
+  letter-spacing: -0.05em;
+  max-width: 12ch;
+}
+
+.heroBody {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: 1.04rem;
+  line-height: 1.7;
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.heroStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.productScene {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+}
+
+.sceneToolbar,
+.panelHeader,
+.comparisonRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sceneTitle,
+.panelMeta,
+.workflowIndex {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.scenePanels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.scenePanel,
+.cliPanel,
+.trustCard,
+.workflowCard,
+.pricingIntro,
+.comparisonCard {
+  display: grid;
+  gap: 14px;
+}
+
+.secretRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-strong);
+}
+
+.secretRow code,
+.cliCode {
+  font-family: var(--font-mono);
+}
+
+.activityLine,
+.comparisonRow p,
+.workflowCard p,
+.pricingIntro p,
+.sectionHeader p,
+.comparisonRow span,
+.trustCard p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+
+.cliCode {
+  margin: 0;
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(16, 31, 34, 0.06);
+  white-space: pre-wrap;
+}
+
+.trustBand,
+.workflowGrid,
+.pricingGrid {
+  display: grid;
+  gap: 18px;
+}
+
+.trustBand {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.trustCard p {
+  font-size: 0.95rem;
+}
+
+.sectionHeader {
+  display: grid;
+  gap: 18px;
+  max-width: 62rem;
+  margin-bottom: 20px;
+}
+
+.sectionHeader h2,
+.pricingIntro h2 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+}
+
+.workflowGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.workflowCard {
+  min-height: 240px;
+}
+
+.workflowCard h3 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.pricingGrid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+}
+
+.comparisonRows {
+  display: grid;
+  gap: 14px;
+}
+
+.comparisonRow {
+  align-items: flex-start;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.comparisonRow strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+@media (max-width: 1024px) {
+  .heroGrid,
+  .pricingGrid,
+  .workflowGrid,
+  .trustBand,
+  .scenePanels {
+    grid-template-columns: 1fr;
+  }
+
+  .heroTitle {
+    max-width: 14ch;
+  }
+}
+
+@media (max-width: 720px) {
+  .page {
+    padding-bottom: 48px;
+  }
+
+  .heroTitle {
+    font-size: clamp(2.3rem, 12vw, 3.6rem);
+  }
+
+  .productScene,
+  .scenePanel,
+  .cliPanel,
+  .workflowCard,
+  .pricingIntro,
+  .comparisonCard,
+  .trustCard {
+    padding: 16px;
+  }
+
+  .comparisonRow,
+  .sceneToolbar,
+  .panelHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

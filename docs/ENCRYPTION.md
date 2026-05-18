@@ -94,6 +94,16 @@ To rotate the master key:
 
 The secret values in KV are **not** re-encrypted — only the DEKs are re-wrapped.
 
+## API token rotation
+
+API authentication tokens (for CLI login, GitHub Actions, or automation integrations) are managed separately from encryption keys. To rotate an API token:
+
+1. Issue a replacement token.
+2. Update the consuming workflow or environment to use the new token.
+3. Revoke the old token after confirming the new token works.
+
+This keeps authentication rotation independent from the master key rotation process.
+
 ## Testing
 
 Crypto tests live in `apps/api/src/crypto/envelope.test.ts`.

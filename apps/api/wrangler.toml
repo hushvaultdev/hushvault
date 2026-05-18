@@ -13,10 +13,23 @@ binding = "SECRETS_KV"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
 [vars]
-ENVIRONMENT = "development"
+ENVIRONMENT = "production"
 
 # Production secrets (set via wrangler secret put or Cloudflare dashboard)
 # ENCRYPTION_MASTER_KEY  — 256-bit base64 key
 # JWT_SECRET             — random 64-byte string
 # STRIPE_SECRET_KEY      — sk_live_...
 # STRIPE_WEBHOOK_SECRET  — whsec_...
+
+[env.dev]
+vars = { ENVIRONMENT = "development" }
+
+# Optionally override these for a dedicated dev preview environment:
+# [[env.dev.d1_databases]]
+# binding = "DB"
+# database_name = "hushvault-db-dev"
+# database_id = "REPLACE_WITH_DEV_D1_DATABASE_ID"
+#
+# [[env.dev.kv_namespaces]]
+# binding = "SECRETS_KV"
+# id = "REPLACE_WITH_DEV_KV_NAMESPACE_ID"

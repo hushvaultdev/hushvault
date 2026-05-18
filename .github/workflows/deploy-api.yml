@@ -2,7 +2,7 @@ name: Deploy API
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - 'apps/api/**'
       - 'packages/shared/**'
@@ -11,6 +11,10 @@ jobs:
   deploy:
     name: Deploy to Cloudflare Workers
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GITHUB_REF_NAME: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -22,8 +26,9 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install
       - name: Deploy API
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: apps/api
+        run: |
+          if [ "$GITHUB_REF_NAME" = "dev" ]; then
+            pnpm --dir apps/api exec wrangler deploy --env dev
+          else
+            pnpm --dir apps/api exec wrangler deploy
+          fi

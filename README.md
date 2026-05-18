@@ -21,6 +21,14 @@
 
 ---
 
+## Where HushVault Came From
+
+HushVault started as a developer-first alternative to expensive secrets managers. The goal was to build the workflow features teams actually use — computed secrets, branch inheritance, share links, and first-class Cloudflare integration — while keeping self-hosting easy and affordable on the Cloudflare free tier.
+
+The project is designed for teams that want better value than Doppler, but more polish than open-source projects that feel unfinished.
+
+---
+
 ## Quick Start
 
 ```bash

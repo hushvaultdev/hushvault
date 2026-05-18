@@ -1,0 +1,126 @@
+:root {
+  color-scheme: light;
+  --background: #f4f1ea;
+  --surface: #fbf8f2;
+  --surface-strong: #ffffff;
+  --surface-dark: #18252b;
+  --surface-dark-alt: #21333a;
+  --text: #162126;
+  --text-muted: #55666e;
+  --text-inverse: #eef4f3;
+  --border: rgba(22, 33, 38, 0.12);
+  --border-strong: rgba(22, 33, 38, 0.2);
+  --accent: #0f8a83;
+  --accent-strong: #0b6c67;
+  --accent-soft: rgba(15, 138, 131, 0.12);
+  --success: #207a52;
+  --warning: #b8751a;
+  --danger: #b24636;
+  --shadow: 0 16px 40px rgba(16, 31, 34, 0.08);
+  --radius-sm: 12px;
+  --radius-md: 18px;
+  --radius-lg: 28px;
+  --page-max: 1200px;
+  --font-sans: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at top left, rgba(15, 138, 131, 0.12), transparent 28%),
+    linear-gradient(180deg, #f8f5ef 0%, var(--background) 55%, #efe9df 100%);
+  color: var(--text);
+  font-family: var(--font-sans);
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+::selection {
+  background: rgba(15, 138, 131, 0.18);
+}
+
+.page-shell {
+  min-height: 100vh;
+}
+
+.page-container {
+  width: min(calc(100% - 32px), var(--page-max));
+  margin: 0 auto;
+}
+
+.section {
+  padding: 32px 0;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  letter-spacing: 0.03em;
+}
+
+.eyebrow::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.grid-background {
+  position: relative;
+}
+
+.grid-background::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(22, 33, 38, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(22, 33, 38, 0.05) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.45), transparent 85%);
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  .page-container {
+    width: min(calc(100% - 24px), var(--page-max));
+  }
+
+  .section {
+    padding: 24px 0;
+  }
+}
