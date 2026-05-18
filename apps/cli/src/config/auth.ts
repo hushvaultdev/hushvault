@@ -1,5 +1,5 @@
 import keytar from 'keytar'
-import { getGlobalConfig, saveGlobalConfig } from './project'
+import { getGlobalConfig, saveGlobalConfig } from './project.js'
 
 const KEYCHAIN_SERVICE = 'hushvault'
 

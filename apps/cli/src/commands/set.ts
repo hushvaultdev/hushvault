@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
-import { findProjectConfig } from '../config/project'
-import { getAuthToken } from '../config/auth'
+import { findProjectConfig } from '../config/project.js'
+import { getAuthToken } from '../config/auth.js'
 
 export const setCommand = new Command('set')
   .description('Set a secret value')

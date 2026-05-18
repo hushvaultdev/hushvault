@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander'
-import { loginCommand } from './commands/login'
-import { initCommand } from './commands/init'
-import { runCommand } from './commands/run'
-import { getCommand } from './commands/get'
-import { setCommand } from './commands/set'
-import { shareCommand } from './commands/share'
+import { loginCommand } from './commands/login.js'
+import { initCommand } from './commands/init.js'
+import { runCommand } from './commands/run.js'
+import { getCommand } from './commands/get.js'
+import { setCommand } from './commands/set.js'
+import { shareCommand } from './commands/share.js'
 
 const program = new Command()
 

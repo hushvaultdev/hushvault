@@ -1,33 +1,175 @@
+import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
+import { z } from 'zod'
 import type { Env } from '../index'
+import { createApiKey, createPrefixedId, hashPassword, signJwt, verifyPassword } from '../lib/auth'
+import { loginRateLimit, registerRateLimit, requireAuth } from '../middleware/auth'
+import { getRequestIp, writeAuditLog } from '../lib/security'
 
 export const authRoutes = new Hono<{ Bindings: Env }>()
 
+const registerSchema = z.object({
+  email: z.string().email().max(254),
+  password: z.string().min(12).max(128),
+  organisationName: z.string().min(2).max(120),
+})
+
+const loginSchema = z.object({
+  email: z.string().email().max(254),
+  password: z.string().min(1).max(128),
+})
+
+const apiKeySchema = z.object({
+  name: z.string().min(2).max(80),
+  expiresAt: z.string().datetime().optional(),
+})
+
 // POST /api/auth/register
-authRoutes.post('/register', async (c) => {
-  // TODO: validate email/password, hash password, create user + org
-  return c.json({ message: 'TODO: register' }, 501)
+authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchema), async (c) => {
+  const { email, password, organisationName } = c.req.valid('json')
+  const db = c.env.DB
+
+  const existing = await db.prepare('SELECT id FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<{ id: string }>()
+  if (existing) {
+    return c.json({ error: 'CONFLICT', message: 'Email is already registered' }, 409)
+  }
+
+  const userId = createPrefixedId('usr')
+  const orgId = createPrefixedId('org')
+  const { salt, passwordHash } = await hashPassword(password)
+  const slug = organisationName.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || `org-${userId.slice(-8)}`
+
+  await db.batch([
+    db.prepare('INSERT INTO users (id, email, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)').bind(
+      userId,
+      email.toLowerCase(),
+      passwordHash,
+      salt,
+      new Date().toISOString(),
+    ),
+    db.prepare('INSERT INTO organisations (id, name, slug, plan, created_at) VALUES (?, ?, ?, ?, ?)').bind(
+      orgId,
+      organisationName,
+      `${slug}-${orgId.slice(-6)}`,
+      'free',
+      new Date().toISOString(),
+    ),
+    db.prepare('INSERT INTO members (id, org_id, user_id, role, created_at) VALUES (?, ?, ?, ?, ?)').bind(
+      createPrefixedId('mem'),
+      orgId,
+      userId,
+      'owner',
+      new Date().toISOString(),
+    ),
+  ])
+
+  const token = await signJwt({ sub: userId, orgId, role: 'owner' }, c.env.JWT_SECRET)
+  return c.json({ data: { userId, orgId, token } }, 201)
 })
 
 // POST /api/auth/login
-authRoutes.post('/login', async (c) => {
-  // TODO: validate credentials, issue JWT
-  return c.json({ message: 'TODO: login' }, 501)
+authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async (c) => {
+  const { email, password } = c.req.valid('json')
+  const db = c.env.DB
+
+  const user = await db.prepare('SELECT id, password_hash, salt FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<{
+    id: string
+    password_hash: string
+    salt: string
+  }>()
+
+  if (!user) {
+    return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
+  }
+
+  const isValid = await verifyPassword(password, user.salt, user.password_hash)
+  if (!isValid) {
+    return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
+  }
+
+  const member = await db.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(user.id).first<{
+    org_id: string
+    role: 'owner' | 'admin' | 'member' | 'viewer'
+  }>()
+
+  if (!member) {
+    return c.json({ error: 'UNAUTHORIZED', message: 'Membership not found' }, 401)
+  }
+
+  const token = await signJwt({ sub: user.id, orgId: member.org_id, role: member.role }, c.env.JWT_SECRET)
+  await writeAuditLog(c.env, {
+    orgId: member.org_id,
+    actorId: user.id,
+    actorType: 'user',
+    action: 'auth.login',
+    resourceType: 'user',
+    resourceId: user.id,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+  return c.json({ data: { token, userId: user.id, orgId: member.org_id, role: member.role } })
 })
 
 // POST /api/auth/api-keys
-authRoutes.post('/api-keys', async (c) => {
-  // TODO: generate API key, store HMAC-SHA256 hash
-  return c.json({ message: 'TODO: create api key' }, 501)
+authRoutes.post('/api-keys', requireAuth, zValidator('json', apiKeySchema), async (c) => {
+  const { name, expiresAt } = c.req.valid('json')
+  const auth = c.get('auth')
+  const db = c.env.DB
+  const { rawKey, keyHash } = await createApiKey()
+
+  await db.prepare(
+    'INSERT INTO api_keys (id, user_id, key_hash, name, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).bind(
+    createPrefixedId('key'),
+    auth.userId,
+    keyHash,
+    name,
+    expiresAt ?? null,
+    new Date().toISOString(),
+  ).run()
+
+  await writeAuditLog(c.env, {
+    orgId: auth.orgId,
+    actorId: auth.userId,
+    actorType: auth.actorType,
+    action: 'auth.api_key.create',
+    resourceType: 'api_key',
+    resourceId: auth.userId,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+
+  return c.json({ data: { apiKey: rawKey, name } }, 201)
 })
 
 // DELETE /api/auth/api-keys/:id
-authRoutes.delete('/api-keys/:id', async (c) => {
-  return c.json({ message: 'TODO: revoke api key' }, 501)
+authRoutes.delete('/api-keys/:id', requireAuth, async (c) => {
+  const { id } = c.req.param()
+  const auth = c.get('auth')
+  const db = c.env.DB
+  const result = await db.prepare('DELETE FROM api_keys WHERE id = ? AND user_id = ?').bind(id, auth.userId).run()
+
+  if (!result.success || !result.meta.changes) {
+    return c.json({ error: 'NOT_FOUND', message: 'API key not found' }, 404)
+  }
+
+  await writeAuditLog(c.env, {
+    orgId: auth.orgId,
+    actorId: auth.userId,
+    actorType: auth.actorType,
+    action: 'auth.api_key.revoke',
+    resourceType: 'api_key',
+    resourceId: id,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+
+  return c.json({ data: { revoked: true } })
 })
 
 // POST /api/auth/github-oidc — exchange GitHub OIDC token for HushVault token
 authRoutes.post('/github-oidc', async (c) => {
-  // TODO: verify GitHub OIDC JWT, issue scoped access token for CI
-  return c.json({ message: 'TODO: github oidc exchange' }, 501)
+  return c.json({ error: 'NOT_IMPLEMENTED', message: 'GitHub OIDC exchange is not yet implemented' }, 501)
 })

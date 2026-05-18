@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
-import { writeProjectConfig, DEFAULT_API_URL } from '../config/project'
-import { getAuthToken } from '../config/auth'
+import { writeProjectConfig, DEFAULT_API_URL } from '../config/project.js'
+import { getAuthToken } from '../config/auth.js'
 
 export const initCommand = new Command('init')
   .description('Link current directory to a HushVault project')

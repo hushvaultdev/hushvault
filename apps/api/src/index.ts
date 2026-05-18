@@ -7,6 +7,7 @@ import { projectRoutes } from './routes/projects'
 import { environmentRoutes } from './routes/environments'
 import { secretRoutes } from './routes/secrets'
 import { shareRoutes } from './routes/share'
+import { securityHeaders } from './middleware/security-headers'
 
 export type Env = {
   DB: D1Database
@@ -19,19 +20,28 @@ export type Env = {
 }
 
 const app = new Hono<{ Bindings: Env }>()
+const allowedOrigins = ['https://hushvault.dev', 'https://app.hushvault.dev', 'https://beta.hushvault.dev', 'http://localhost:3000', 'http://127.0.0.1:3000']
 
 // Middleware
 app.use('*', logger())
 app.use('*', prettyJSON())
+app.use('*', securityHeaders)
 app.use('/api/*', cors({
-  origin: ['https://hushvault.dev', 'http://localhost:3000'],
-  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  origin: (origin) => allowedOrigins.includes(origin) ? origin : null,
+  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 86400,
   credentials: true,
 }))
 
 // Health check
 app.get('/', (c) => c.json({ name: 'HushVault API', version: '0.0.1', status: 'ok' }))
+app.get('/.well-known/security.txt', (c) => c.text([
+  'Contact: security@hushvault.dev',
+  'Expires: 2027-03-31T00:00:00.000Z',
+  'Preferred-Languages: en',
+  'Policy: https://hushvault.dev/security/policy',
+].join('\n'), 200, { 'Content-Type': 'text/plain; charset=utf-8' }))
 
 // Routes
 app.route('/api/auth', authRoutes)
@@ -44,8 +54,7 @@ app.route('/api/share', shareRoutes)
 app.notFound((c) => c.json({ error: 'Not found' }, 404))
 
 // Error handler
-app.onError((err, c) => {
-  console.error('Unhandled error:', err.message)
+app.onError((_err, c) => {
   return c.json({ error: 'Internal server error' }, 500)
 })
 

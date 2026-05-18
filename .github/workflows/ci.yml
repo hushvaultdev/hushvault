@@ -52,6 +52,21 @@ jobs:
       - run: pnpm install
       - run: pnpm test
 
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install
+      - run: pnpm audit --audit-level=high
+
   e2e:
     name: E2E
     runs-on: ubuntu-latest

@@ -1,8 +1,8 @@
 import { Command } from 'commander'
 import { spawn } from 'child_process'
 import ora from 'ora'
-import { findProjectConfig } from '../config/project'
-import { getAuthToken } from '../config/auth'
+import { findProjectConfig } from '../config/project.js'
+import { getAuthToken } from '../config/auth.js'
 
 export const runCommand = new Command('run')
   .description('Run a command with secrets injected as environment variables')

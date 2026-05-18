@@ -22,14 +22,14 @@ export async function importKey(base64Key: string): Promise<CryptoKey> {
  * Generate a new random 256-bit AES-GCM key (used as DEK)
  */
 export async function generateDek(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: ALGORITHM, length: KEY_LENGTH }, true, ['encrypt', 'decrypt'])
+  return (await crypto.subtle.generateKey({ name: ALGORITHM, length: KEY_LENGTH }, true, ['encrypt', 'decrypt'])) as CryptoKey
 }
 
 /**
  * Export a CryptoKey to base64 string
  */
 export async function exportKey(key: CryptoKey): Promise<string> {
-  const raw = await crypto.subtle.exportKey('raw', key)
+  const raw = (await crypto.subtle.exportKey('raw', key)) as ArrayBuffer
   return bufferToBase64(raw)
 }
 

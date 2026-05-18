@@ -1,8 +1,8 @@
 import { Command } from 'commander'
 import { createInterface } from 'readline'
 import chalk from 'chalk'
-import { storeToken } from '../config/auth'
-import { saveGlobalConfig, DEFAULT_API_URL } from '../config/project'
+import { storeToken } from '../config/auth.js'
+import { saveGlobalConfig, DEFAULT_API_URL } from '../config/project.js'
 
 export const loginCommand = new Command('login')
   .description('Authenticate with HushVault')
