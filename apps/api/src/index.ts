@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import { prettyJSON } from 'hono/pretty-json'
 import { authRoutes } from './routes/auth'
+import { healthRoutes } from './routes/health'
 import { projectRoutes } from './routes/projects'
 import { environmentRoutes } from './routes/environments'
 import { secretRoutes } from './routes/secrets'
@@ -45,6 +46,7 @@ app.get('/.well-known/security.txt', (c) => c.text([
 
 // Routes
 app.route('/api/auth', authRoutes)
+app.route('/health', healthRoutes)
 app.route('/api/projects', projectRoutes)
 app.route('/api/environments', environmentRoutes)
 app.route('/api/secrets', secretRoutes)
