@@ -19,9 +19,10 @@ const environmentSchema = z.object({
 
 environmentRoutes.get('/', async (c) => {
   const auth = c.get('auth')
+  const projectId = c.req.query('projectId')
   const environments = await c.env.DB.prepare(
-    'SELECT e.id, e.project_id, e.name, e.slug, e.parent_env_id, e.color, e.created_at FROM environments e INNER JOIN projects p ON p.id = e.project_id WHERE p.org_id = ? ORDER BY e.created_at DESC',
-  ).bind(auth.orgId).all()
+    'SELECT e.id, e.project_id, e.name, e.slug, e.parent_env_id, e.color, e.created_at FROM environments e INNER JOIN projects p ON p.id = e.project_id WHERE p.org_id = ? AND (? IS NULL OR e.project_id = ?) ORDER BY e.created_at DESC',
+  ).bind(auth.orgId, projectId ?? null, projectId ?? null).all()
 
   return c.json({ data: environments.results ?? [] })
 })

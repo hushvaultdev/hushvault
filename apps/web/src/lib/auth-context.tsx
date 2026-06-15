@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 import { apiFetch } from './api'
 import { clearSession, readSession, writeSession } from './auth-storage'
-import type { Role, Session } from './types'
+import type { Session } from './types'
 
 interface AuthContextValue {
   session: Session | null
@@ -43,7 +43,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       auth: false,
       body: { email, password, organisationName },
     })
-    const next: Session = { ...result, role: 'owner' as Role }
+    const next: Session = { ...result, role: 'owner' }
     writeSession(next)
     setSession(next)
   }, [])

@@ -1,6 +1,8 @@
 // API DTOs that mirror the JSON returned by the HushVault API.
-// List endpoints return raw D1 rows (snake_case); detail/create endpoints
-// return camelCase objects. Types here match the wire format exactly.
+// The wire format is not uniform: list endpoints AND some detail endpoints
+// (e.g. GET /api/projects, GET /api/projects/:id) return raw D1 rows with
+// snake_case columns, while create responses and GET /api/secrets/:name return
+// camelCase objects. Each type below matches its specific endpoint's shape.
 
 export type Role = 'owner' | 'admin' | 'member' | 'viewer'
 

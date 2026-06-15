@@ -65,5 +65,9 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     throw new ApiError(res.status, err?.error ?? 'ERROR', err?.message ?? `Request failed (${res.status}).`)
   }
 
+  if (payload === null || typeof payload !== 'object' || !('data' in payload)) {
+    throw new ApiError(res.status, 'INVALID_RESPONSE', 'The API returned an unexpected response shape.')
+  }
+
   return (payload as { data: T }).data
 }

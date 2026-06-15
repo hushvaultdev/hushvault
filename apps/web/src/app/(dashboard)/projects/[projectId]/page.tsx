@@ -38,12 +38,11 @@ export default function ProjectPage() {
     try {
       const [proj, envs] = await Promise.all([
         apiFetch<ProjectRow>(`/api/projects/${projectId}`),
-        apiFetch<EnvironmentRow[]>('/api/environments'),
+        apiFetch<EnvironmentRow[]>(`/api/environments?projectId=${encodeURIComponent(projectId)}`),
       ])
       setProject(proj)
-      const scoped = envs.filter((e) => e.project_id === projectId)
-      setEnvironments(scoped)
-      setSelectedEnvId((current) => current ?? scoped[0]?.id ?? null)
+      setEnvironments(envs)
+      setSelectedEnvId((current) => current ?? envs[0]?.id ?? null)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load project.')
     } finally {
