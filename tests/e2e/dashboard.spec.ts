@@ -13,5 +13,6 @@ for (const route of ['/onboarding', '/integrations', '/audit', '/billing']) {
   test(`unauthenticated users are redirected from ${route} to sign-in`, async ({ page }) => {
     await page.goto(route)
     await expect(page).toHaveURL(/\/sign-in$/)
+    await expect(page.getByRole('heading', { name: 'Sign in to HushVault' })).toBeVisible()
   })
 }

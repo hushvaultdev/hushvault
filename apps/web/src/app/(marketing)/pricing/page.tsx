@@ -16,7 +16,10 @@ const MARKETING = {
 } as const
 
 const plans = (Object.keys(MARKETING) as Array<keyof typeof MARKETING>).map((name) => {
-  const def = PLANS.find((plan) => plan.name === name)!
+  const def = PLANS.find((plan) => plan.name === name)
+  if (!def) {
+    throw new Error(`No plan definition found for "${name}" in PLANS`)
+  }
   return { ...def, ...MARKETING[name] }
 })
 
