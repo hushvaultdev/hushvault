@@ -1,0 +1,171 @@
+.pageHeader {
+  margin-bottom: 24px;
+}
+
+.pageTitle {
+  margin: 0 0 6px;
+  font-size: 1.8rem;
+}
+
+.pageSubtitle {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stepBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.stepBadgeActive {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.stepBadgeDone {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+
+.stepLabel {
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.stepLabelActive {
+  color: var(--text);
+}
+
+.stepConnector {
+  flex: 1 1 auto;
+  height: 1px;
+  min-width: 16px;
+  background: var(--border);
+}
+
+.panel {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.panelTitle {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.panelSubtitle {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.form {
+  display: grid;
+  gap: 16px;
+}
+
+.formActions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.subPanel {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.subPanelTitle {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.error {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(178, 70, 54, 0.12);
+  color: var(--danger);
+  font-size: 0.92rem;
+}
+
+.cliList {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cliStep {
+  display: grid;
+  gap: 6px;
+}
+
+.cliStepLabel {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.cliCommand {
+  display: block;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-dark);
+  color: var(--text-inverse);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  overflow-x: auto;
+}
+
+.cliCommand::before {
+  content: '$ ';
+  color: var(--accent);
+}
+
+.doneActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
