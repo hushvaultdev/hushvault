@@ -68,6 +68,11 @@ export default function ProjectPage() {
   }, [loadProjectAndEnvs])
 
   useEffect(() => {
+    // Discard any in-progress edit when switching environments to avoid stale
+    // edit UI or a stuck loading state carrying over to a different env.
+    setEditingId(null)
+    setEditValue('')
+    setSavingEdit(false)
     if (selectedEnvId) void loadSecrets(selectedEnvId)
     else setSecrets([])
   }, [selectedEnvId, loadSecrets])
@@ -284,7 +289,7 @@ export default function ProjectPage() {
                               {isEditing ? (
                                 <>
                                   <Button variant="primary" onClick={() => onSaveEdit(secret)} loading={savingEdit}>Save</Button>
-                                  <Button variant="ghost" onClick={onCancelEdit}>Cancel</Button>
+                                  <Button variant="ghost" onClick={onCancelEdit} disabled={savingEdit}>Cancel</Button>
                                 </>
                               ) : (
                                 <>
