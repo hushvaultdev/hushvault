@@ -20,12 +20,16 @@ export function createRateLimitMiddleware(options: RateLimitOptions): Middleware
     const bucket = Math.floor(Date.now() / options.windowMs)
     const key = getRateLimitKey(options.scope, identity, bucket)
     const stored = await c.env.SECRETS_KV.get(key)
-    const hits = stored ? Number.parseInt(stored, 10) : 0
+    const parsed = stored ? Number.parseInt(stored, 10) : 0
+    // Normalise corrupted/non-numeric values to 0 so a bad KV entry can't
+    // permanently disable the limiter for this key (NaN would bypass the check
+    // and be written back, fail-open forever).
+    const hits = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
     const windowSec = Math.max(1, Math.ceil(options.windowMs / 1000))
 
     c.header('X-RateLimit-Limit', String(options.limit))
 
-    if (Number.isFinite(hits) && hits >= options.limit) {
+    if (hits >= options.limit) {
       const resetMs = (bucket + 1) * options.windowMs
       const retryAfter = Math.max(1, Math.ceil((resetMs - Date.now()) / 1000))
       c.header('X-RateLimit-Remaining', '0')

@@ -120,7 +120,8 @@ coarser perimeter layer **before** requests reach the Worker.
 | `secret-write` | `POST/PATCH/DELETE /api/secrets` | 60 / min |
 | `global-api` | all `/api/*` (safety net) | 600 / min |
 
-All responses carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`; `429`s add
+Rate-limited responses carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`
+(CORS preflight `OPTIONS` requests are skipped, so they do not); `429`s add
 `Retry-After` (seconds) and a JSON body
 `{ "error": "RATE_LIMIT_EXCEEDED", "message": "...", "resetAt": "..." }`.
 
