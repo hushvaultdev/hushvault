@@ -8,6 +8,7 @@ import { projectRoutes } from './routes/projects'
 import { environmentRoutes } from './routes/environments'
 import { secretRoutes } from './routes/secrets'
 import { shareRoutes } from './routes/share'
+import { auditRoutes } from './routes/audit'
 import { securityHeaders } from './middleware/security-headers'
 
 export type Env = {
@@ -51,6 +52,7 @@ app.route('/api/projects', projectRoutes)
 app.route('/api/environments', environmentRoutes)
 app.route('/api/secrets', secretRoutes)
 app.route('/api/share', shareRoutes)
+app.route('/api/audit', auditRoutes)
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404))

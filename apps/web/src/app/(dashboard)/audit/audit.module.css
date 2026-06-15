@@ -1,0 +1,88 @@
+.pageHeader {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.pageTitle {
+  margin: 0 0 6px;
+  font-size: 1.8rem;
+}
+
+.pageSubtitle {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.error {
+  margin: 0 0 20px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(178, 70, 54, 0.12);
+  color: var(--danger);
+  font-size: 0.92rem;
+}
+
+.loading {
+  color: var(--text-muted);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table th {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.action {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.resourceType {
+  font-weight: 600;
+}
+
+.resourceId {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.ip {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.time {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.muted {
+  color: var(--text-muted);
+}
