@@ -39,6 +39,66 @@
   color: var(--text);
 }
 
+.button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.fieldLabel {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.input {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.fieldHint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.emptyState {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding: 32px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.emptyText {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.emptyAction {
+  margin-top: 6px;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
