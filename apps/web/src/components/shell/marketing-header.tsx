@@ -1,3 +1,5 @@
+import Link from 'next/link'
+
 import { Button } from '@/components/ui/button'
 
 import styles from './marketing-shell.module.css'
@@ -8,13 +10,13 @@ export function MarketingHeader() {
   return (
     <header className={s('headerWrap')}>
       <div className={`${s('header')} page-container`}>
-        <a href="/" className={s('brand')}>
+        <Link href="/" className={s('brand')}>
           <span className={s('brandMark')}>H</span>
           <div>
             <strong>HushVault</strong>
             <span>Edge-native secrets</span>
           </div>
-        </a>
+        </Link>
 
         <nav className={s('nav')} aria-label="Primary navigation">
           <a href="#workflows">Product</a>
