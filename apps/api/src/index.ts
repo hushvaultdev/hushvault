@@ -19,9 +19,11 @@ export type Env = {
   JWT_SECRET: string
   STRIPE_SECRET_KEY?: string
   STRIPE_WEBHOOK_SECRET?: string
-  // GitHub OAuth (web sign-in). Optional: routes return 503 until configured.
+  // OAuth (web sign-in). Optional: each provider's routes return 503 until set.
   GITHUB_CLIENT_ID?: string
   GITHUB_CLIENT_SECRET?: string
+  GOOGLE_CLIENT_ID?: string
+  GOOGLE_CLIENT_SECRET?: string
   // Base URL of the dashboard, used as the OAuth success redirect target.
   WEB_APP_URL?: string
 }
