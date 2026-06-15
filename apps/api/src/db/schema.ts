@@ -7,10 +7,12 @@ import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core'
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
   email: text('email').notNull().unique(),
-  passwordHash: text('password_hash').notNull(),
+  passwordHash: text('password_hash').notNull(), // empty string for OAuth-only users
   salt: text('salt').notNull(), // PBKDF2 salt for key derivation
+  provider: text('provider'), // 'github' | 'google' | null (password)
+  providerId: text('provider_id'), // provider's stable user id
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-})
+}, (t) => [index('users_provider_idx').on(t.provider, t.providerId)])
 
 export const apiKeys = sqliteTable('api_keys', {
   id: text('id').primaryKey(),

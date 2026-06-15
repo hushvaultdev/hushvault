@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Field } from '@/components/ui/field'
 import { Section } from '@/components/ui/section'
-import { ApiError } from '@/lib/api'
+import { ApiError, API_BASE } from '@/lib/api'
 import { useAuth } from '@/lib/auth-context'
 
 import styles from '../auth.module.css'
@@ -47,7 +47,7 @@ export default function SignUpPage() {
             Start free and keep your secrets secure as your project grows. Sign up with GitHub, Google, or email.
           </p>
           <div className={s('authActions')}>
-            <Button href="#" variant="secondary">Continue with GitHub</Button>
+            <Button href={`${API_BASE}/api/auth/github`} variant="secondary">Continue with GitHub</Button>
             <Button href="#" variant="secondary">Continue with Google</Button>
           </div>
           <div className={s('divider')}>
