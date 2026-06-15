@@ -1,9 +1,18 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { createApiKey, createPrefixedId, hashPassword, signJwt, verifyPassword } from '../lib/auth'
-import { exchangeGitHubCode, fetchGitHubIdentity, signState, verifyState } from '../lib/oauth'
+import type { OAuthIdentity } from '../lib/oauth'
+import {
+  exchangeGitHubCode,
+  exchangeGoogleCode,
+  fetchGitHubIdentity,
+  fetchGoogleIdentity,
+  signState,
+  verifyState,
+} from '../lib/oauth'
 import { loginRateLimit, oauthRateLimit, registerRateLimit, requireAuth } from '../middleware/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 
@@ -172,6 +181,78 @@ authRoutes.delete('/api-keys/:id', requireAuth, async (c) => {
   return c.json({ data: { revoked: true } })
 })
 
+// Shared OAuth provisioning: find the user by provider identity, fall back to
+// linking by email, otherwise create a fresh user + workspace. Issues a JWT and
+// hands the session back to the dashboard via a URL fragment (no cookies).
+async function completeOAuthLogin(
+  c: Context<{ Bindings: Env }>,
+  provider: 'github' | 'google',
+  identity: OAuthIdentity & { email: string },
+): Promise<Response> {
+  const webBase = (c.env.WEB_APP_URL ?? 'http://localhost:3000').replace(/\/$/, '')
+  const db = c.env.DB
+  const email = identity.email.toLowerCase()
+  const now = new Date().toISOString()
+
+  let userId: string | null = null
+
+  const byProvider = await db.prepare('SELECT id FROM users WHERE provider = ? AND provider_id = ? LIMIT 1')
+    .bind(provider, identity.id).first<{ id: string }>()
+  if (byProvider) {
+    userId = byProvider.id
+  } else {
+    const byEmail = await db.prepare('SELECT id FROM users WHERE email = ? LIMIT 1').bind(email).first<{ id: string }>()
+    if (byEmail) {
+      await db.prepare('UPDATE users SET provider = ?, provider_id = ? WHERE id = ?').bind(provider, identity.id, byEmail.id).run()
+      userId = byEmail.id
+    }
+  }
+
+  let orgId: string
+  let role: MemberRole
+
+  if (userId) {
+    const member = await db.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
+      .bind(userId).first<{ org_id: string; role: MemberRole }>()
+    if (!member) {
+      return c.redirect(`${webBase}/auth/callback#error=${encodeURIComponent('membership_missing')}`, 302)
+    }
+    orgId = member.org_id
+    role = member.role
+  } else {
+    const newUserId = createPrefixedId('usr')
+    orgId = createPrefixedId('org')
+    role = 'owner'
+    const displayName = identity.name?.trim() || identity.login
+    const slugBase = identity.login.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'workspace'
+
+    await db.batch([
+      db.prepare("INSERT INTO users (id, email, password_hash, salt, provider, provider_id, created_at) VALUES (?, ?, '', '', ?, ?, ?)")
+        .bind(newUserId, email, provider, identity.id, now),
+      db.prepare("INSERT INTO organisations (id, name, slug, plan, created_at) VALUES (?, ?, ?, 'free', ?)")
+        .bind(orgId, `${displayName}'s workspace`, `${slugBase}-${orgId.slice(-6)}`, now),
+      db.prepare("INSERT INTO members (id, org_id, user_id, role, created_at) VALUES (?, ?, ?, 'owner', ?)")
+        .bind(createPrefixedId('mem'), orgId, newUserId, now),
+    ])
+    userId = newUserId
+  }
+
+  const token = await signJwt({ sub: userId, orgId, role }, c.env.JWT_SECRET)
+  await writeAuditLog(c.env, {
+    orgId,
+    actorId: userId,
+    actorType: 'user',
+    action: `auth.login.${provider}`,
+    resourceType: 'user',
+    resourceId: userId,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+
+  const params = new URLSearchParams({ token, userId, orgId, role })
+  return c.redirect(`${webBase}/auth/callback#${params.toString()}`, 302)
+}
+
 // GET /api/auth/github — begin the GitHub OAuth sign-in flow
 authRoutes.get('/github', oauthRateLimit, async (c) => {
   const clientId = c.env.GITHUB_CLIENT_ID
@@ -223,67 +304,61 @@ authRoutes.get('/github/callback', oauthRateLimit, async (c) => {
     return fail('no_verified_email')
   }
 
-  const db = c.env.DB
-  const email = identity.email.toLowerCase()
-  const now = new Date().toISOString()
+  return completeOAuthLogin(c, 'github', { ...identity, email: identity.email })
+})
 
-  let userId: string | null = null
-
-  const byProvider = await db.prepare("SELECT id FROM users WHERE provider = 'github' AND provider_id = ? LIMIT 1")
-    .bind(identity.id).first<{ id: string }>()
-  if (byProvider) {
-    userId = byProvider.id
-  } else {
-    const byEmail = await db.prepare('SELECT id FROM users WHERE email = ? LIMIT 1').bind(email).first<{ id: string }>()
-    if (byEmail) {
-      await db.prepare("UPDATE users SET provider = 'github', provider_id = ? WHERE id = ?").bind(identity.id, byEmail.id).run()
-      userId = byEmail.id
-    }
+// GET /api/auth/google — begin the Google OAuth sign-in flow
+authRoutes.get('/google', oauthRateLimit, async (c) => {
+  const clientId = c.env.GOOGLE_CLIENT_ID
+  if (!clientId || !c.env.GOOGLE_CLIENT_SECRET) {
+    return c.json({ error: 'OAUTH_NOT_CONFIGURED', message: 'Google sign-in is not configured' }, 503)
   }
 
-  let orgId: string
-  let role: MemberRole
+  const redirectUri = `${new URL(c.req.url).origin}/api/auth/google/callback`
+  const authorizeUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
+  authorizeUrl.searchParams.set('client_id', clientId)
+  authorizeUrl.searchParams.set('redirect_uri', redirectUri)
+  authorizeUrl.searchParams.set('response_type', 'code')
+  authorizeUrl.searchParams.set('scope', 'openid email profile')
+  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET))
 
-  if (userId) {
-    const member = await db.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
-      .bind(userId).first<{ org_id: string; role: MemberRole }>()
-    if (!member) {
-      return fail('membership_missing')
-    }
-    orgId = member.org_id
-    role = member.role
-  } else {
-    const newUserId = createPrefixedId('usr')
-    orgId = createPrefixedId('org')
-    role = 'owner'
-    const displayName = identity.name?.trim() || identity.login
-    const slugBase = identity.login.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'workspace'
+  return c.redirect(authorizeUrl.toString(), 302)
+})
 
-    await db.batch([
-      db.prepare("INSERT INTO users (id, email, password_hash, salt, provider, provider_id, created_at) VALUES (?, ?, '', '', 'github', ?, ?)")
-        .bind(newUserId, email, identity.id, now),
-      db.prepare("INSERT INTO organisations (id, name, slug, plan, created_at) VALUES (?, ?, ?, 'free', ?)")
-        .bind(orgId, `${displayName}'s workspace`, `${slugBase}-${orgId.slice(-6)}`, now),
-      db.prepare("INSERT INTO members (id, org_id, user_id, role, created_at) VALUES (?, ?, ?, 'owner', ?)")
-        .bind(createPrefixedId('mem'), orgId, newUserId, now),
-    ])
-    userId = newUserId
+// GET /api/auth/google/callback — exchange the code, create/login the user,
+// and hand the session back to the dashboard via a URL fragment (no cookies).
+authRoutes.get('/google/callback', oauthRateLimit, async (c) => {
+  const webBase = (c.env.WEB_APP_URL ?? 'http://localhost:3000').replace(/\/$/, '')
+  const fail = (reason: string) => c.redirect(`${webBase}/auth/callback#error=${encodeURIComponent(reason)}`, 302)
+
+  const clientId = c.env.GOOGLE_CLIENT_ID
+  const clientSecret = c.env.GOOGLE_CLIENT_SECRET
+  if (!clientId || !clientSecret) {
+    return c.json({ error: 'OAUTH_NOT_CONFIGURED', message: 'Google sign-in is not configured' }, 503)
   }
 
-  const token = await signJwt({ sub: userId, orgId, role }, c.env.JWT_SECRET)
-  await writeAuditLog(c.env, {
-    orgId,
-    actorId: userId,
-    actorType: 'user',
-    action: 'auth.login.github',
-    resourceType: 'user',
-    resourceId: userId,
-    ip: getRequestIp(c),
-    userAgent: c.req.header('user-agent'),
-  })
+  if (c.req.query('error')) {
+    return fail('google_denied')
+  }
 
-  const params = new URLSearchParams({ token, userId, orgId, role })
-  return c.redirect(`${webBase}/auth/callback#${params.toString()}`, 302)
+  const code = c.req.query('code')
+  const state = c.req.query('state')
+  if (!code || !state || !(await verifyState(c.env.JWT_SECRET, state))) {
+    return fail('invalid_state')
+  }
+
+  const redirectUri = `${new URL(c.req.url).origin}/api/auth/google/callback`
+  const accessToken = await exchangeGoogleCode(clientId, clientSecret, code, redirectUri)
+  if (!accessToken) {
+    return fail('exchange_failed')
+  }
+
+  const identity = await fetchGoogleIdentity(accessToken)
+  if (!identity || !identity.email) {
+    return fail('no_verified_email')
+  }
+
+  return completeOAuthLogin(c, 'google', { ...identity, email: identity.email })
 })
 
 // POST /api/auth/github-oidc — exchange GitHub Actions OIDC token (CI/CD). Separate

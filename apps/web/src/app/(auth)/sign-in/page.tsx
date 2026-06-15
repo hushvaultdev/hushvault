@@ -47,7 +47,7 @@ export default function SignInPage() {
           </p>
           <div className={s('authActions')}>
             <Button href={`${API_BASE}/api/auth/github`} variant="secondary">Continue with GitHub</Button>
-            <Button href="#" variant="secondary">Continue with Google</Button>
+            <Button href={`${API_BASE}/api/auth/google`} variant="secondary">Continue with Google</Button>
           </div>
           <div className={s('divider')}>
             <span>or</span>

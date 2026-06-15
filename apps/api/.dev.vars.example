@@ -8,5 +8,12 @@ JWT_SECRET=your-dev-jwt-secret
 #   {API_ORIGIN}/api/auth/github/callback
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
+
+# Google OAuth sign-in (optional — /api/auth/google returns 503 until set).
+# Create credentials at https://console.cloud.google.com/apis/credentials with
+# the redirect URI:  {API_ORIGIN}/api/auth/google/callback
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
 # Where to send the user after a successful sign-in (the dashboard origin).
 WEB_APP_URL=http://localhost:3000

@@ -8,9 +8,10 @@ import type { Role } from '@/lib/types'
 
 const ERROR_MESSAGES: Record<string, string> = {
   github_denied: 'GitHub sign-in was cancelled.',
+  google_denied: 'Google sign-in was cancelled.',
   invalid_state: 'The sign-in request expired or was invalid. Please try again.',
-  exchange_failed: 'Could not complete sign-in with GitHub. Please try again.',
-  no_verified_email: 'No verified email was available from GitHub.',
+  exchange_failed: 'Could not complete sign-in. Please try again.',
+  no_verified_email: 'No verified email was available from your account.',
   membership_missing: 'Your account has no workspace. Please contact support.',
 }
 
