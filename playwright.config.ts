@@ -11,7 +11,7 @@ const config: PlaywrightTestConfig = {
     baseURL: 'http://127.0.0.1:3001',
   },
   webServer: {
-    command: 'pnpm --filter @hushvault/web dev -- --port 3001',
+    command: 'pnpm --filter @hushvault/web exec next dev --port 3001',
     port: 3001,
     reuseExistingServer: !process.env.CI,
     timeout: 120 * 1000,
