@@ -1,12 +1,42 @@
+'use client'
+
+import { useRouter } from 'next/navigation'
+import { useState } from 'react'
+
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Field } from '@/components/ui/field'
 import { Section } from '@/components/ui/section'
+import { ApiError } from '@/lib/api'
+import { useAuth } from '@/lib/auth-context'
 
 import styles from '../auth.module.css'
 
 const s = (name: string) => styles[name]
 
 export default function SignUpPage() {
+  const router = useRouter()
+  const { register } = useAuth()
+  const [email, setEmail] = useState('')
+  const [organisationName, setOrganisationName] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setSubmitting(true)
+    try {
+      await register(email, password, organisationName)
+      router.push('/dashboard')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
     <main className={s('authPage')}>
       <Section className={s('authSection')}>
@@ -23,20 +53,39 @@ export default function SignUpPage() {
           <div className={s('divider')}>
             <span>or</span>
           </div>
-          <form className={s('authForm')}>
-            <label>
-              Email
-              <input type="email" placeholder="you@example.com" />
-            </label>
-            <label>
-              Full name
-              <input type="text" placeholder="Jane Doe" />
-            </label>
-            <label>
-              Password
-              <input type="password" placeholder="••••••••" />
-            </label>
-            <Button href="#" variant="primary">Create account</Button>
+          <form className={s('authForm')} onSubmit={onSubmit}>
+            <Field
+              label="Email"
+              name="email"
+              type="email"
+              value={email}
+              onChange={setEmail}
+              placeholder="you@example.com"
+              autoComplete="email"
+              required
+            />
+            <Field
+              label="Organisation name"
+              name="organisationName"
+              type="text"
+              value={organisationName}
+              onChange={setOrganisationName}
+              placeholder="Acme Inc"
+              required
+            />
+            <Field
+              label="Password"
+              name="password"
+              type="password"
+              value={password}
+              onChange={setPassword}
+              placeholder="At least 12 characters"
+              autoComplete="new-password"
+              hint="Use at least 12 characters."
+              required
+            />
+            {error ? <p className={s('authError')} role="alert">{error}</p> : null}
+            <Button type="submit" variant="primary" loading={submitting}>Create account</Button>
           </form>
           <p className={s('authFooter')}>
             Already have an account? <a href="/sign-in">Sign in</a>.
