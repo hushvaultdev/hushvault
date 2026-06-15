@@ -13,6 +13,8 @@ interface AuthContextValue {
   ready: boolean
   login: (email: string, password: string) => Promise<void>
   register: (email: string, password: string, organisationName: string) => Promise<void>
+  // Adopt a session obtained out-of-band (e.g. the OAuth callback redirect).
+  applySession: (session: Session) => void
   logout: () => void
 }
 
@@ -48,14 +50,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSession(next)
   }, [])
 
+  const applySession = useCallback((next: Session) => {
+    writeSession(next)
+    setSession(next)
+  }, [])
+
   const logout = useCallback(() => {
     clearSession()
     setSession(null)
   }, [])
 
   const value = useMemo<AuthContextValue>(
-    () => ({ session, isAuthenticated: Boolean(session), ready, login, register, logout }),
-    [session, ready, login, register, logout],
+    () => ({ session, isAuthenticated: Boolean(session), ready, login, register, applySession, logout }),
+    [session, ready, login, register, applySession, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

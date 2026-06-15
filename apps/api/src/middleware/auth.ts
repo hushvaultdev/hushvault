@@ -86,6 +86,13 @@ export const registerRateLimit = createRateLimitMiddleware({
   windowMs: 60_000,
 })
 
+// OAuth start + callback trigger outbound GitHub calls and DB writes; cap per IP.
+export const oauthRateLimit = createRateLimitMiddleware({
+  scope: 'auth-oauth',
+  limit: 20,
+  windowMs: 60_000,
+})
+
 export const secretReadRateLimit = createRateLimitMiddleware({
   scope: 'secret-read',
   limit: 120,
