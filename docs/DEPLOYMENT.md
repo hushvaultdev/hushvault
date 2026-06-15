@@ -102,6 +102,44 @@ This gives you a real beta channel for `dev`, while `main` continues to drive th
 3. Deploy
 4. All existing JWTs are immediately invalidated — users must log in again
 
+## Rate Limiting & Abuse Prevention
+
+Defence is layered. The Worker enforces per-IP limits in code (see
+`apps/api/src/middleware/rate-limit.ts`); Cloudflare's WAF should enforce a
+coarser perimeter layer **before** requests reach the Worker.
+
+### Worker-enforced limits (already in code)
+
+| Scope | Route(s) | Limit (per IP) |
+|-------|----------|----------------|
+| `auth-login` | `POST /api/auth/login` | 10 / min |
+| `auth-register` | `POST /api/auth/register` | 5 / min |
+| `auth-oauth` | `GET /api/auth/{github,google}{,/callback}` | 20 / min |
+| `share-access` | `GET /api/share/:token` | 20 / min |
+| `secret-read` | `GET /api/secrets`, `GET /api/secrets/:name` | 120 / min |
+| `secret-write` | `POST/PATCH/DELETE /api/secrets` | 60 / min |
+| `global-api` | all `/api/*` (safety net) | 600 / min |
+
+All responses carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`; `429`s add
+`Retry-After` (seconds) and a JSON body
+`{ "error": "RATE_LIMIT_EXCEEDED", "message": "...", "resetAt": "..." }`.
+
+### Cloudflare WAF rules (configure in the dashboard before launch)
+
+These run globally before the Worker executes. Configure under
+**Security → WAF → Rate limiting rules**:
+
+```
+Rule 1 — Login:    (http.request.uri.path eq "/api/auth/login")
+                   → 5 req / IP / min, action: 429 (Retry-After: 60)
+Rule 2 — Register: (http.request.uri.path eq "/api/auth/register")
+                   → 3 req / IP / 10 min
+Rule 3 — Share:    (http.request.uri.path matches "^/api/share/")
+                   → 20 req / IP / min
+Rule 4 — Auth bot: (http.request.uri.path matches "^/api/auth/")
+                   → Turnstile / JS challenge (managed challenge)
+```
+
 ## Monitoring
 
 After each deployment, verify:

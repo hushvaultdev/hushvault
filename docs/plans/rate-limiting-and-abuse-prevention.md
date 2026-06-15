@@ -1,7 +1,10 @@
 # Rate Limiting & Abuse Prevention
 
 **Priority:** P0 — production security baseline before first real user
-**Status:** Design approved, implementation pending
+**Status:** Layer 3 (Hono per-IP middleware) implemented across auth, share, secret,
+and a global `/api/*` safety net, with the `X-RateLimit-*` / `Retry-After` headers
+contract. Layer 1 (CF WAF) documented in `docs/DEPLOYMENT.md`. Layer 2 (per-org
+daily plan limits) and Layer 4 (Turnstile) remain pending.
 
 ---
 

@@ -10,6 +10,7 @@ import { secretRoutes } from './routes/secrets'
 import { shareRoutes } from './routes/share'
 import { auditRoutes } from './routes/audit'
 import { securityHeaders } from './middleware/security-headers'
+import { globalApiRateLimit } from './middleware/auth'
 
 export type Env = {
   DB: D1Database
@@ -42,6 +43,11 @@ app.use('/api/*', cors({
   maxAge: 86400,
   credentials: true,
 }))
+// Coarse per-IP safety net over every API route (skips CORS preflights).
+app.use('/api/*', async (c, next) => {
+  if (c.req.method === 'OPTIONS') return next()
+  return globalApiRateLimit(c, next)
+})
 
 // Health check
 app.get('/', (c) => c.json({ name: 'HushVault API', version: '0.0.1', status: 'ok' }))

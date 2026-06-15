@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
-import { requireAuth } from '../middleware/auth'
+import { requireAuth, shareAccessRateLimit } from '../middleware/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 
 export const shareRoutes = new Hono<{ Bindings: Env }>()
@@ -49,7 +49,7 @@ shareRoutes.post('/', requireAuth, zValidator('json', shareSchema), async (c) =>
 })
 
 // GET /api/share/:token — retrieve share link payload
-shareRoutes.get('/:token', async (c) => {
+shareRoutes.get('/:token', shareAccessRateLimit, async (c) => {
   const token = c.req.param('token')
   const row = await c.env.DB.prepare('SELECT id, encrypted_payload, expires_at, max_views, view_count FROM share_links WHERE token = ? LIMIT 1')
     .bind(token)

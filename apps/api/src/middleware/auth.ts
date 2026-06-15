@@ -99,6 +99,21 @@ export const secretReadRateLimit = createRateLimitMiddleware({
   windowMs: 60_000,
 })
 
+// Unauthenticated share-link reads are a secret-enumeration vector; cap per IP.
+export const shareAccessRateLimit = createRateLimitMiddleware({
+  scope: 'share-access',
+  limit: 20,
+  windowMs: 60_000,
+})
+
+// Coarse safety net across all /api/* traffic to blunt DDoS / scraping. Sits
+// above the per-route limits, which stay tighter for sensitive endpoints.
+export const globalApiRateLimit = createRateLimitMiddleware({
+  scope: 'global-api',
+  limit: 600,
+  windowMs: 60_000,
+})
+
 export const secretWriteRateLimit = createRateLimitMiddleware({
   scope: 'secret-write',
   limit: 60,
