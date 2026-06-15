@@ -5,4 +5,6 @@
 ALTER TABLE users ADD COLUMN provider TEXT;
 ALTER TABLE users ADD COLUMN provider_id TEXT;
 
-CREATE INDEX IF NOT EXISTS users_provider_idx ON users (provider, provider_id);
+-- Unique so a provider identity maps to exactly one user row. In SQLite,
+-- NULLs are distinct, so password users (provider/provider_id NULL) don't clash.
+CREATE UNIQUE INDEX IF NOT EXISTS users_provider_idx ON users (provider, provider_id);

@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core'
 
 // ─────────────────────────────────────────────
 // Users & Auth
@@ -12,7 +12,7 @@ export const users = sqliteTable('users', {
   provider: text('provider'), // 'github' | 'google' | null (password)
   providerId: text('provider_id'), // provider's stable user id
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-}, (t) => [index('users_provider_idx').on(t.provider, t.providerId)])
+}, (t) => [uniqueIndex('users_provider_idx').on(t.provider, t.providerId)])
 
 export const apiKeys = sqliteTable('api_keys', {
   id: text('id').primaryKey(),

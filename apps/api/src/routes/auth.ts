@@ -4,7 +4,7 @@ import { z } from 'zod'
 import type { Env } from '../index'
 import { createApiKey, createPrefixedId, hashPassword, signJwt, verifyPassword } from '../lib/auth'
 import { exchangeGitHubCode, fetchGitHubIdentity, signState, verifyState } from '../lib/oauth'
-import { loginRateLimit, registerRateLimit, requireAuth } from '../middleware/auth'
+import { loginRateLimit, oauthRateLimit, registerRateLimit, requireAuth } from '../middleware/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 
 type MemberRole = 'owner' | 'admin' | 'member' | 'viewer'
@@ -173,7 +173,7 @@ authRoutes.delete('/api-keys/:id', requireAuth, async (c) => {
 })
 
 // GET /api/auth/github — begin the GitHub OAuth sign-in flow
-authRoutes.get('/github', async (c) => {
+authRoutes.get('/github', oauthRateLimit, async (c) => {
   const clientId = c.env.GITHUB_CLIENT_ID
   if (!clientId || !c.env.GITHUB_CLIENT_SECRET) {
     return c.json({ error: 'OAUTH_NOT_CONFIGURED', message: 'GitHub sign-in is not configured' }, 503)
@@ -192,7 +192,7 @@ authRoutes.get('/github', async (c) => {
 
 // GET /api/auth/github/callback — exchange the code, create/login the user,
 // and hand the session back to the dashboard via a URL fragment (no cookies).
-authRoutes.get('/github/callback', async (c) => {
+authRoutes.get('/github/callback', oauthRateLimit, async (c) => {
   const webBase = (c.env.WEB_APP_URL ?? 'http://localhost:3000').replace(/\/$/, '')
   const fail = (reason: string) => c.redirect(`${webBase}/auth/callback#error=${encodeURIComponent(reason)}`, 302)
 
