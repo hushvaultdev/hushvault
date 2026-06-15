@@ -5,23 +5,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState } from '@/components/ui/empty-state'
 import { ApiError, apiFetch } from '@/lib/api'
+import type { AuditRow } from '@/lib/types'
 
 import styles from './audit.module.css'
 
 const s = (name: string) => styles[name]
-
-interface AuditRow {
-  id: string
-  org_id: string
-  actor_id: string | null
-  actor_type: string
-  action: string
-  resource_type: string | null
-  resource_id: string | null
-  ip: string | null
-  user_agent: string | null
-  timestamp: string
-}
 
 function shortId(id: string | null): string {
   if (!id) return '—'
@@ -106,7 +94,7 @@ export default function AuditPage() {
             {entries.map((entry) => (
               <tr key={entry.id}>
                 <td className={s('action')}>{entry.action}</td>
-                <td className={s('resource')}>
+                <td>
                   {entry.resource_type ? (
                     <span>
                       <span className={s('resourceType')}>{entry.resource_type}</span>
@@ -119,7 +107,10 @@ export default function AuditPage() {
                   )}
                 </td>
                 <td>
-                  <Badge tone={actorTone(entry.actor_type)}>{entry.actor_type}</Badge>
+                  <span className={s('actor')}>
+                    <Badge tone={actorTone(entry.actor_type)}>{entry.actor_type}</Badge>
+                    {entry.actor_id ? <span className={s('actorId')}>{shortId(entry.actor_id)}</span> : null}
+                  </span>
                 </td>
                 <td className={s('ip')}>{entry.ip ?? '—'}</td>
                 <td className={s('time')}>{formatTime(entry.timestamp)}</td>

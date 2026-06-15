@@ -163,9 +163,11 @@ export default function OnboardingPage() {
               <Field
                 label="Secret value"
                 name="secretValue"
+                type="password"
                 value={secretValue}
                 onChange={setSecretValue}
                 placeholder="postgres://…"
+                autoComplete="off"
               />
             </div>
             <div className={s('formActions')}>

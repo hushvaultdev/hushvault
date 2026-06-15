@@ -79,7 +79,7 @@ export default function IntegrationsPage() {
               </div>
 
               <div className={s('action')}>
-                <Button href="#" variant={available ? 'primary' : 'secondary'}>
+                <Button type="button" variant={available ? 'primary' : 'secondary'} disabled>
                   {available ? 'Connect' : 'Coming soon'}
                 </Button>
               </div>

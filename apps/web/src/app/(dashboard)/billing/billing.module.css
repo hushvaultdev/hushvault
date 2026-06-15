@@ -145,6 +145,12 @@
   font-size: 0.92rem;
 }
 
+/* On dark-toned plan cards, --text-muted is low-contrast; use inverse-muted. */
+.planCardDark .planAudience,
+.planCardDark .upgradeHint {
+  color: rgba(238, 244, 243, 0.72);
+}
+
 .planFeatures {
   margin: 0;
   padding: 0;

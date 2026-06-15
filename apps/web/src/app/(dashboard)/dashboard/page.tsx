@@ -80,7 +80,8 @@ export default function DashboardPage() {
       ) : projects.length === 0 ? (
         <EmptyState
           title="No projects yet"
-          description="Create your first project above to start storing secrets."
+          description="Create your first project above, or follow the guided setup to add a project, your first secret, and the CLI."
+          action={<Button variant="primary" href="/onboarding">Start guided setup</Button>}
         />
       ) : (
         <div className={s('grid')}>
