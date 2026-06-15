@@ -37,5 +37,10 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 
+# Playwright
+test-results/
+playwright-report/
+.last-run.json
+
 # Turbo
 .turbo/
