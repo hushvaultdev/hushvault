@@ -337,8 +337,11 @@ authRoutes.get('/google/callback', oauthRateLimit, async (c) => {
     return c.json({ error: 'OAUTH_NOT_CONFIGURED', message: 'Google sign-in is not configured' }, 503)
   }
 
-  if (c.req.query('error')) {
-    return fail('google_denied')
+  // Only an explicit user cancellation is "denied"; other error codes
+  // (misconfiguration, server_error, …) are real failures, not a cancellation.
+  const oauthError = c.req.query('error')
+  if (oauthError) {
+    return fail(oauthError === 'access_denied' ? 'google_denied' : 'exchange_failed')
   }
 
   const code = c.req.query('code')
