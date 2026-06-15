@@ -10,9 +10,18 @@ import styles from './dashboard-shell.module.css'
 
 const s = (name: string) => styles[name]
 
-const navItems = [
-  { href: '/dashboard', label: 'Projects' },
+const navItems: ReadonlyArray<{ href: string; label: string; alsoActiveFor?: readonly string[] }> = [
+  { href: '/dashboard', label: 'Projects', alsoActiveFor: ['/projects'] },
+  { href: '/onboarding', label: 'Get started' },
+  { href: '/integrations', label: 'Integrations' },
+  { href: '/audit', label: 'Audit log' },
+  { href: '/billing', label: 'Billing' },
 ]
+
+function isActive(pathname: string, href: string, alsoActiveFor?: readonly string[]): boolean {
+  const prefixes = [href, ...(alsoActiveFor ?? [])]
+  return prefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`))
+}
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -27,7 +36,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
         </Link>
         <nav className={s('nav')} aria-label="Dashboard navigation">
           {navItems.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(`${item.href}/`)
+            const active = isActive(pathname, item.href, item.alsoActiveFor)
             return (
               <Link
                 key={item.href}

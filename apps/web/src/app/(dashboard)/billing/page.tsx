@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { useAuth } from '@/lib/auth-context'
+import { PLANS, type PlanName } from '@/lib/plans'
 
 import styles from './billing.module.css'
 
@@ -27,68 +28,14 @@ const usage: UsageStat[] = [
   { label: 'Team members', value: 1, limit: 3 },
 ]
 
-type Plan = {
-  name: string
-  price: string
-  audience: string
-  features: string[]
-  tone: 'light' | 'dark'
+// Presentation-only tone per plan; the plan data itself comes from the shared
+// PLANS module (also used by the marketing pricing page) to avoid drift.
+const PLAN_TONE: Record<PlanName, 'light' | 'dark'> = {
+  Free: 'light',
+  Pro: 'light',
+  Team: 'dark',
+  Enterprise: 'light',
 }
-
-const plans: Plan[] = [
-  {
-    name: 'Free',
-    price: '$0',
-    audience: 'Solo developers and early projects.',
-    features: [
-      'Computed secrets',
-      'Branch inheritance',
-      'Share links',
-      'Cloudflare Pages sync',
-      'GitHub Actions sync',
-    ],
-    tone: 'light',
-  },
-  {
-    name: 'Pro',
-    price: '$12/mo',
-    audience: 'Active teams that want better operational control.',
-    features: [
-      'Unlimited projects',
-      'Higher secret limits',
-      'Drift detection',
-      'Slack alerts',
-      'Extended audit history',
-    ],
-    tone: 'light',
-  },
-  {
-    name: 'Team',
-    price: '$99/mo',
-    audience: 'Startups that need governance and shared infrastructure.',
-    features: [
-      'RBAC and SSO',
-      'Compliance export',
-      'Custom domain',
-      'Full audit retention',
-      'Priority support',
-    ],
-    tone: 'dark',
-  },
-  {
-    name: 'Enterprise',
-    price: 'Custom',
-    audience: 'Organisations with advanced security and scale needs.',
-    features: [
-      'Self-host at $0',
-      'Dedicated support',
-      'Custom SLAs',
-      'Security review assistance',
-      'Volume pricing',
-    ],
-    tone: 'light',
-  },
-]
 
 function clampPercent(value: number, limit: number): number {
   if (limit <= 0) return 0
@@ -123,33 +70,45 @@ export default function BillingPage() {
       <div className={s('sectionBlock')}>
         <h2 className={s('sectionTitle')}>Usage (illustrative)</h2>
         <div className={s('usageGrid')}>
-          {usage.map((stat) => (
-            <Card key={stat.label} className={s('usageCard')} tone="light">
-              <p className={s('usageLabel')}>{stat.label}</p>
-              <div className={s('usageValue')}>
-                {stat.value}
-                <span>
-                  {' / '}
-                  {stat.limit}
-                  {stat.unit ? ` ${stat.unit}` : ''}
-                </span>
-              </div>
-              <div className={s('meter')}>
-                <div className={s('meterFill')} style={{ width: `${clampPercent(stat.value, stat.limit)}%` }} />
-              </div>
-              <p className={s('usageHint')}>Placeholder figure — not yet connected to live usage.</p>
-            </Card>
-          ))}
+          {usage.map((stat) => {
+            const percent = clampPercent(stat.value, stat.limit)
+            return (
+              <Card key={stat.label} className={s('usageCard')} tone="light">
+                <p className={s('usageLabel')}>{stat.label}</p>
+                <div className={s('usageValue')}>
+                  {stat.value}
+                  <span>
+                    {' / '}
+                    {stat.limit}
+                    {stat.unit ? ` ${stat.unit}` : ''}
+                  </span>
+                </div>
+                <div
+                  className={s('meter')}
+                  role="progressbar"
+                  aria-label={`${stat.label} usage`}
+                  aria-valuenow={percent}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div className={s('meterFill')} style={{ width: `${percent}%` }} />
+                </div>
+                <p className={s('usageHint')}>Placeholder figure — not yet connected to live usage.</p>
+              </Card>
+            )
+          })}
         </div>
       </div>
 
       <div className={s('sectionBlock')}>
         <h2 className={s('sectionTitle')}>Plans</h2>
         <div className={s('plansGrid')}>
-          {plans.map((plan) => {
+          {PLANS.map((plan) => {
             const isCurrent = plan.name === CURRENT_PLAN
+            const tone = PLAN_TONE[plan.name]
+            const cardClass = `${s('planCard')} ${tone === 'dark' ? s('planCardDark') : ''}`.trim()
             return (
-              <Card key={plan.name} className={s('planCard')} tone={plan.tone}>
+              <Card key={plan.name} className={cardClass} tone={tone}>
                 <div className={s('planHeader')}>
                   <span className={s('planName')}>{plan.name}</span>
                   <span className={s('planPrice')}>{plan.price}</span>
@@ -168,7 +127,7 @@ export default function BillingPage() {
                     </Button>
                   ) : (
                     <>
-                      <Button href="#" variant={plan.tone === 'dark' ? 'secondary' : 'primary'}>
+                      <Button type="button" variant={tone === 'dark' ? 'secondary' : 'primary'} disabled>
                         Upgrade
                       </Button>
                       <p className={s('upgradeHint')}>Checkout is not yet active.</p>

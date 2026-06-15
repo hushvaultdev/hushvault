@@ -7,3 +7,11 @@ test('unauthenticated users are redirected from the dashboard to sign-in', async
   await expect(page).toHaveURL(/\/sign-in$/)
   await expect(page.getByRole('heading', { name: 'Sign in to HushVault' })).toBeVisible()
 })
+
+// Every authenticated dashboard route is behind the same guard.
+for (const route of ['/onboarding', '/integrations', '/audit', '/billing']) {
+  test(`unauthenticated users are redirected from ${route} to sign-in`, async ({ page }) => {
+    await page.goto(route)
+    await expect(page).toHaveURL(/\/sign-in$/)
+  })
+}

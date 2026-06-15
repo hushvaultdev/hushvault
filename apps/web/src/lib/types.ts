@@ -52,3 +52,16 @@ export interface SecretValue {
   isComputed: boolean
   template: string | null
 }
+
+export interface AuditRow {
+  id: string
+  org_id: string
+  actor_id: string | null
+  actor_type: string
+  action: string
+  resource_type: string | null
+  resource_id: string | null
+  ip: string | null
+  user_agent: string | null
+  timestamp: string
+}
