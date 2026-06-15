@@ -31,6 +31,9 @@ export default function ProjectPage() {
   const [secretName, setSecretName] = useState('')
   const [secretValue, setSecretValue] = useState('')
   const [busy, setBusy] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
+  const [savingEdit, setSavingEdit] = useState(false)
 
   const loadProjectAndEnvs = useCallback(async () => {
     setLoading(true)
@@ -140,6 +143,49 @@ export default function ProjectPage() {
     }
   }
 
+  async function onStartEdit(secret: SecretRow) {
+    if (!selectedEnvId) return
+    setError(null)
+    // Prefill with the current value, fetching it on demand if not already revealed.
+    let current = revealed[secret.id]
+    if (current === undefined) {
+      try {
+        const detail = await apiFetch<SecretValue>(
+          `/api/secrets/${encodeURIComponent(secret.name)}?envId=${encodeURIComponent(selectedEnvId)}`,
+        )
+        current = detail.value
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not load secret for editing.')
+        return
+      }
+    }
+    setEditValue(current)
+    setEditingId(secret.id)
+  }
+
+  function onCancelEdit() {
+    setEditingId(null)
+    setEditValue('')
+  }
+
+  async function onSaveEdit(secret: SecretRow) {
+    if (!selectedEnvId) return
+    setSavingEdit(true)
+    setError(null)
+    try {
+      await apiFetch(`/api/secrets/${secret.id}`, { method: 'PATCH', body: { value: editValue } })
+      // Keep the freshly saved value visible; the table only shows name/value/type,
+      // none of which change on a value edit, so a full reload is unnecessary.
+      setRevealed((prev) => ({ ...prev, [secret.id]: editValue }))
+      setEditingId(null)
+      setEditValue('')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not update secret.')
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
   return (
     <div>
       <Link href="/dashboard" className={s('backLink')}>← All projects</Link>
@@ -210,25 +256,50 @@ export default function ProjectPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {secrets.map((secret) => (
-                      <tr key={secret.id}>
-                        <td className={s('secretName')}>{secret.name}</td>
-                        <td className={s('secretValue')}>
-                          {revealed[secret.id] !== undefined ? revealed[secret.id] : '••••••••'}
-                        </td>
-                        <td>
-                          {secret.is_computed ? <Badge tone="accent">Computed</Badge> : <Badge tone="neutral">Static</Badge>}
-                        </td>
-                        <td>
-                          <span className={s('rowActions')}>
-                            <Button variant="ghost" onClick={() => onReveal(secret)}>
-                              {revealed[secret.id] !== undefined ? 'Hide' : 'Reveal'}
-                            </Button>
-                            <Button variant="ghost" onClick={() => onDelete(secret)}>Delete</Button>
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {secrets.map((secret) => {
+                      const isEditing = editingId === secret.id
+                      return (
+                        <tr key={secret.id}>
+                          <td className={s('secretName')}>{secret.name}</td>
+                          <td className={s('secretValue')}>
+                            {isEditing ? (
+                              <input
+                                className={s('inlineInput')}
+                                aria-label={`Value for ${secret.name}`}
+                                value={editValue}
+                                onChange={(e) => setEditValue(e.target.value)}
+                                autoFocus
+                              />
+                            ) : revealed[secret.id] !== undefined ? (
+                              revealed[secret.id]
+                            ) : (
+                              '••••••••'
+                            )}
+                          </td>
+                          <td>
+                            {secret.is_computed ? <Badge tone="accent">Computed</Badge> : <Badge tone="neutral">Static</Badge>}
+                          </td>
+                          <td>
+                            <span className={s('rowActions')}>
+                              {isEditing ? (
+                                <>
+                                  <Button variant="primary" onClick={() => onSaveEdit(secret)} loading={savingEdit}>Save</Button>
+                                  <Button variant="ghost" onClick={onCancelEdit}>Cancel</Button>
+                                </>
+                              ) : (
+                                <>
+                                  <Button variant="ghost" onClick={() => onReveal(secret)}>
+                                    {revealed[secret.id] !== undefined ? 'Hide' : 'Reveal'}
+                                  </Button>
+                                  <Button variant="ghost" onClick={() => onStartEdit(secret)}>Edit</Button>
+                                  <Button variant="ghost" onClick={() => onDelete(secret)}>Delete</Button>
+                                </>
+                              )}
+                            </span>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               )}
