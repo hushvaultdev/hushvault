@@ -1,0 +1,180 @@
+.pageHeader {
+  margin-bottom: 24px;
+}
+
+.pageTitle {
+  margin: 0 0 6px;
+  font-size: 1.8rem;
+}
+
+.pageSubtitle {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.summaryCard {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.summaryHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.summaryTitle {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.summaryMeta {
+  display: grid;
+  gap: 6px;
+}
+
+.summaryWorkspace {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.summaryNote {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.88rem;
+}
+
+.sectionTitle {
+  margin: 0 0 14px;
+  font-size: 1.15rem;
+}
+
+.sectionBlock {
+  margin-bottom: 28px;
+}
+
+.usageGrid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.usageCard {
+  display: grid;
+  gap: 10px;
+}
+
+.usageLabel {
+  margin: 0;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.usageValue {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.usageValue span {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.meter {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.meterFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.usageHint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.plansGrid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+
+.planCard {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr auto;
+  gap: 14px;
+}
+
+.planHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.planName {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.planPrice {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.planAudience {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.planFeatures {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.planFeatures li {
+  position: relative;
+  padding-left: 22px;
+  font-size: 0.9rem;
+}
+
+.planFeatures li::before {
+  content: '✓';
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.planAction {
+  display: grid;
+  gap: 6px;
+}
+
+.upgradeHint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-align: center;
+}
