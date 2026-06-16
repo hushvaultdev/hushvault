@@ -1,7 +1,14 @@
 # Audit Log & Compliance
 
 **Priority:** P1 — required for paid plans, differentiator vs Doppler
-**Status:** Schema exists, implementation pending
+**Status:** Core list API + dashboard shipped (PR #8). Compliance pieces shipped:
+retention-filtered list with filters + keyset pagination, per-org retention
+override (`GET`/`PUT /api/audit/retention`), and compliance export
+(`GET /api/audit/export?format=csv|json`, Team/Enterprise only). Still pending:
+daily cron purge (`apps/api/src/cron/purge-audit-log.ts` + `wrangler.toml`
+trigger), `actorEmail` enrichment in responses, and the shared `billing/tiers.ts`
+PLANS module (retention/feature gating currently lives in
+`apps/api/src/lib/audit-retention.ts`).
 
 ---
 
