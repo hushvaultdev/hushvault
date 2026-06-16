@@ -34,6 +34,9 @@ export const organisations = sqliteTable('organisations', {
   slug: text('slug').notNull().unique(),
   plan: text('plan', { enum: ['free', 'pro', 'team', 'enterprise'] }).notNull().default('free'),
   stripeCustomerId: text('stripe_customer_id'),
+  // Optional per-org audit log retention override (days). null = use the plan
+  // default. Can shorten retention below the plan allowance, never extend it.
+  auditRetentionDays: integer('audit_retention_days'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 })
 
