@@ -36,15 +36,20 @@ type AuditRow = {
 
 // Shared query-filter validation for list + export. All optional; org scoping
 // is always applied server-side from the auth context (never from input).
-const listQuerySchema = z.object({
+const baseQuerySchema = z.object({
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   action: z.string().min(1).max(64).optional(),
   actorId: z.string().min(1).max(128).optional(),
+})
+
+// List adds keyset pagination; export returns a single capped file with no
+// cursor, so it must not inherit the pagination param.
+const listQuerySchema = baseQuerySchema.extend({
   cursor: z.string().min(1).max(64).optional(),
 })
 
-const exportQuerySchema = listQuerySchema.extend({
+const exportQuerySchema = baseQuerySchema.extend({
   format: z.enum(['csv', 'json']).default('json'),
 })
 
@@ -87,20 +92,9 @@ function buildFilters(opts: {
   return { clause: clauses.join(' AND '), params }
 }
 
-function toApiRow(row: AuditRow) {
-  return {
-    id: row.id,
-    orgId: row.org_id,
-    actorId: row.actor_id,
-    actorType: row.actor_type,
-    action: row.action,
-    resourceType: row.resource_type,
-    resourceId: row.resource_id,
-    ip: row.ip,
-    userAgent: row.user_agent,
-    timestamp: row.timestamp,
-  }
-}
+// NOTE: list/export responses return the raw snake_case audit columns to stay
+// compatible with the existing dashboard DTO (apps/web .../audit/page.tsx and
+// lib/types.ts). Do not camelCase these without updating the web client too.
 
 // GET /api/audit/retention — current effective retention settings for the org.
 // Registered before GET '/' purely for readability; Hono matches static paths
@@ -125,7 +119,7 @@ auditRoutes.get('/retention', async (c) => {
 
 const retentionUpdateSchema = z.object({
   // null clears the override (revert to plan default); a positive integer sets
-  // a shorter window. Values above the plan cap are clamped on read, not here.
+  // a shorter window. Values above the plan cap are rejected in the handler.
   overrideDays: z.number().int().min(1).max(3650).nullable(),
 })
 
@@ -139,6 +133,21 @@ auditRoutes.put('/retention', zValidator('json', retentionUpdateSchema), async (
 
   const { overrideDays } = c.req.valid('json')
 
+  // Load the plan first so the stored override honours the "can never extend
+  // beyond the plan tier" contract — reject rather than silently clamping, so
+  // clients get a clear error instead of a value that differs from what queries use.
+  const current = await loadOrgRetention(c.env, auth.orgId)
+  if (!current) {
+    return c.json({ error: 'NOT_FOUND', message: 'Organisation not found' }, 404)
+  }
+  const planMaxDays = AUDIT_RETENTION_DAYS[current.plan] ?? DEFAULT_RETENTION_DAYS
+  if (overrideDays !== null && overrideDays > planMaxDays) {
+    return c.json(
+      { error: 'VALIDATION_ERROR', message: `Retention override cannot exceed the plan limit of ${planMaxDays} days` },
+      400,
+    )
+  }
+
   const result = await c.env.DB.prepare('UPDATE organisations SET audit_retention_days = ? WHERE id = ?')
     .bind(overrideDays, auth.orgId)
     .run()
@@ -150,7 +159,6 @@ auditRoutes.put('/retention', zValidator('json', retentionUpdateSchema), async (
   if (!retention) {
     return c.json({ error: 'NOT_FOUND', message: 'Organisation not found' }, 404)
   }
-  const planMaxDays = AUDIT_RETENTION_DAYS[retention.plan] ?? DEFAULT_RETENTION_DAYS
   return c.json({
     data: {
       plan: retention.plan,
@@ -201,7 +209,7 @@ auditRoutes.get('/export', zValidator('query', exportQuerySchema), async (c) => 
   }
 
   const body = JSON.stringify({
-    data: rows.map(toApiRow),
+    data: rows,
     total: rows.length,
     exportedAt: new Date().toISOString(),
   })
@@ -258,7 +266,7 @@ auditRoutes.get('/', zValidator('query', listQuerySchema), async (c) => {
   const page = hasMore ? rows.slice(0, LIST_PAGE_SIZE) : rows
   const nextCursor = hasMore ? (page[page.length - 1]?.id ?? null) : null
 
-  return c.json({ data: page.map(toApiRow), nextCursor, total })
+  return c.json({ data: page, nextCursor, total })
 })
 
 const CSV_COLUMNS: Array<keyof AuditRow> = [
@@ -273,11 +281,15 @@ const CSV_COLUMNS: Array<keyof AuditRow> = [
   'user_agent',
 ]
 
-// RFC 4180 field escaping: wrap in quotes when the value contains a comma,
-// quote, or newline; double any embedded quotes. Guards against breaking the
-// CSV structure with delimiters/newlines from stored user-agent values.
+// RFC 4180 field escaping plus spreadsheet formula-injection mitigation.
+// User-controlled fields (e.g. user_agent) starting with = + - @ (or a leading
+// tab/CR that some apps strip) are prefixed with a single quote so Excel/Sheets
+// treat them as text; then we quote-escape for delimiters/newlines.
 function csvField(value: string | null): string {
-  const s = value ?? ''
+  let s = value ?? ''
+  if (/^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`
+  }
   if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`
   }
