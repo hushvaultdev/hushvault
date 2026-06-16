@@ -21,6 +21,11 @@ export const apiKeys = sqliteTable('api_keys', {
   name: text('name').notNull(),
   lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
   expiresAt: integer('expires_at', { mode: 'timestamp' }),
+  // Soft-revocation audit trail. A revoked key is invalidated by setting
+  // expiresAt to "now" (already honoured by the auth middleware); these columns
+  // record when and why. revokedReason e.g. "leaked_in_github".
+  revokedAt: integer('revoked_at', { mode: 'timestamp' }),
+  revokedReason: text('revoked_reason'),
   createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
 }, (t) => [index('api_keys_user_idx').on(t.userId)])
 

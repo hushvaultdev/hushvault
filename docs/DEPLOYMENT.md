@@ -86,6 +86,29 @@ This gives you a real beta channel for `dev`, while `main` continues to drive th
 
 ---
 
+## GitHub Secret Scanning Partner Registration (Manual)
+
+The `POST /api/integrations/secret-scanner/github` callback is live, but GitHub
+only calls it once HushVault is registered with the GitHub Secret Scanning
+Partner Program. This step is manual and cannot be automated — it requires
+out-of-band coordination with GitHub.
+
+One-time action items:
+
+1. Email GitHub from `security@hushvault.dev` to join the partner program
+   (free): https://docs.github.com/code-security/secret-scanning/secret-scanning-partner-program
+2. Register the token pattern `hv_live_[A-Za-z0-9_-]{43}` (the `hv_live_` prefix
+   plus the base64url-encoded 32 random bytes minted by `createApiKey`).
+3. Provide the callback URL: `https://api.hushvault.dev/api/integrations/secret-scanner/github`
+4. GitHub publishes the ECDSA P-256 signing keys at
+   `https://api.github.com/meta/public_keys/secret_scanning`; the callback fetches
+   and verifies against these automatically — no secret to store on our side.
+
+Until registration completes, the endpoint simply receives no traffic. No
+deploy-time secret or binding is required for this feature.
+
+---
+
 ## Secret Rotation Schedule
 
 | Secret | Rotate Every | Method |
