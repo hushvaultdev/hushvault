@@ -19,7 +19,8 @@
 }
 
 .button:focus-visible {
-  outline: none;
+  /* Keep the global :focus-visible outline as the baseline and layer the
+     component ring on top — do not reset outline (keeps focus consistent). */
   box-shadow: var(--focus-ring);
 }
 
@@ -95,11 +96,8 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .spinner {
-    animation-duration: 1.2s;
-  }
-}
+/* Reduced motion is handled globally in globals.css (animation-duration is set
+   with !important there), so no spinner-specific override is needed here. */
 
 .field {
   display: grid;
