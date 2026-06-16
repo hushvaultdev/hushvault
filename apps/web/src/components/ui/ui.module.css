@@ -2,23 +2,50 @@
 .badge,
 .card,
 .section {
-  transition: all 180ms ease;
+  transition: all var(--transition-base);
 }
 
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: var(--space-2);
   min-height: 48px;
-  padding: 0 18px;
-  border-radius: 999px;
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-pill);
   border: 1px solid transparent;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
 }
 
+.button:focus-visible {
+  /* Keep the global :focus-visible outline as the baseline and layer the
+     component ring on top — do not reset outline (keeps focus consistent). */
+  box-shadow: var(--focus-ring);
+}
+
+/* ---- Button sizes ---- */
+.button_sm {
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.button_md {
+  min-height: 48px;
+  padding: 0 var(--space-5);
+}
+
+.button_lg {
+  min-height: 54px;
+  padding: 0 var(--space-6);
+  font-size: 1.05rem;
+}
+
+/* ---- Button variants ---- */
 .button_primary {
   background: var(--accent);
-  color: #f8fffe;
+  color: var(--accent-contrast);
 }
 
 .button_primary:hover {
@@ -39,26 +66,54 @@
   color: var(--text);
 }
 
+.button_danger {
+  background: var(--danger);
+  color: var(--accent-contrast);
+}
+
+.button_danger:hover {
+  filter: brightness(0.94);
+}
+
 .button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
+.spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: var(--radius-pill);
+  animation: button-spin 0.6s linear infinite;
+}
+
+@keyframes button-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Reduced motion is handled globally in globals.css (animation-duration is set
+   with !important there), so no spinner-specific override is needed here. */
+
 .field {
   display: grid;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .fieldLabel {
   color: var(--text);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .input {
   width: 100%;
   min-height: 48px;
-  padding: 12px 14px;
-  border-radius: 14px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.9);
   color: var(--text);
@@ -67,19 +122,19 @@
 .input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  box-shadow: var(--focus-ring);
 }
 
 .fieldHint {
   color: var(--text-muted);
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
 }
 
 .emptyState {
   display: grid;
-  gap: 10px;
+  gap: var(--space-3);
   justify-items: start;
-  padding: 32px;
+  padding: var(--space-8);
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.5);
@@ -96,18 +151,18 @@
 }
 
 .emptyAction {
-  margin-top: 6px;
+  margin-top: var(--space-2);
 }
 
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   min-height: 36px;
-  padding: 0 12px;
-  border-radius: 999px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border);
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
 }
 
 .badge_accent {
@@ -120,15 +175,25 @@
 }
 
 .badge_success {
-  background: rgba(32, 122, 82, 0.16);
+  background: var(--success-soft);
   color: var(--success);
 }
 
+.badge_warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.badge_danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .card {
-  padding: 22px;
+  padding: var(--space-6);
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-md);
 }
 
 .card_light {

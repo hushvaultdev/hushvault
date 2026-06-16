@@ -1,7 +1,7 @@
 # Frontend Experience & Design System
 
 **Priority:** P1 — required to make product-led growth credible
-**Status:** Design approved, implementation planning ready
+**Status:** Design system foundation formalized — centralized CSS-variable tokens (color, spacing, typography, radius, shadow, focus, motion) and hardened shared UI primitives (Button sizes/variants, Badge tones) applied across existing surfaces. Higher-level screen work from the phased plan remains.
 **Date:** 2026-05-18
 
 ---

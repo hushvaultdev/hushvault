@@ -113,8 +113,8 @@
 .error {
   margin: 0;
   padding: 12px 14px;
-  border-radius: 12px;
-  background: rgba(178, 70, 54, 0.12);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 0.92rem;
 }
