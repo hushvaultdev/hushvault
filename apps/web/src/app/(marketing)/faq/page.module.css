@@ -40,10 +40,10 @@
 
 .card {
   padding: 1.75rem;
-  border-radius: 1.25rem;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 30px 40px rgba(0, 0, 0, 0.04);
+  border-radius: var(--radius-md);
+  background: var(--surface-translucent);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
 }
 
 .card h2 {

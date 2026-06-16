@@ -91,7 +91,7 @@
   gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-md);
   background: var(--surface-strong);
 }
 
@@ -115,7 +115,7 @@
 .cliCode {
   margin: 0;
   padding: 16px;
-  border-radius: 16px;
+  border-radius: var(--radius-md);
   background: rgba(16, 31, 34, 0.06);
   white-space: pre-wrap;
 }

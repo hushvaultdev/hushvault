@@ -25,10 +25,10 @@
   place-items: center;
   width: 34px;
   height: 34px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
-  color: #f8fffe;
-  font-weight: 700;
+  color: var(--accent-contrast);
+  font-weight: var(--weight-bold);
 }
 
 .nav {
@@ -38,9 +38,9 @@
 
 .navItem {
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   color: rgba(238, 244, 243, 0.74);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .navItem:hover {
