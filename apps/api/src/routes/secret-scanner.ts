@@ -16,6 +16,11 @@ export const secretScannerRouter = new Hono<{ Bindings: Env }>()
 const GITHUB_KEYS_URL = 'https://api.github.com/meta/public_keys/secret_scanning'
 const KEY_ID_HEADER = 'GITHUB-PUBLIC-KEY-IDENTIFIER'
 const SIGNATURE_HEADER = 'GITHUB-PUBLIC-KEY-SIGNATURE'
+// Bound work per request: GitHub batches are small; reject implausibly large
+// payloads so a single callback can't tie up the worker with hashes + queries.
+const MAX_MATCHES = 1000
+// Cap the upstream key fetch so a hung GitHub response can't stall the callback.
+const KEY_FETCH_TIMEOUT_MS = 5000
 
 type GitHubSecretMatch = {
   token: string
@@ -97,16 +102,22 @@ function derEcdsaToRaw(der: Uint8Array): Uint8Array | null {
 }
 
 async function fetchGitHubPublicKey(keyId: string): Promise<string | null> {
-  const res = await fetch(GITHUB_KEYS_URL, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'HushVault-SecretScanner',
-    },
-  })
-  if (!res.ok) return null
-  const body = (await res.json()) as GitHubPublicKeysResponse
-  const match = body.public_keys?.find((k) => k.key_identifier === keyId)
-  return match?.key ?? null
+  try {
+    const res = await fetch(GITHUB_KEYS_URL, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'HushVault-SecretScanner',
+      },
+      signal: AbortSignal.timeout(KEY_FETCH_TIMEOUT_MS),
+    })
+    if (!res.ok) return null
+    const body = (await res.json()) as GitHubPublicKeysResponse
+    const match = body.public_keys?.find((k) => k.key_identifier === keyId)
+    return match?.key ?? null
+  } catch {
+    // Network error, non-JSON body, or timeout — treat as unavailable.
+    return null
+  }
 }
 
 // Verify GitHub's ECDSA P-256 / SHA-256 signature over the raw request body.
@@ -162,6 +173,10 @@ secretScannerRouter.post('/github', async (c) => {
     return c.json({ error: 'VALIDATION_ERROR', message: 'Body must be a JSON array of matches' }, 400)
   }
 
+  if (matches.length > MAX_MATCHES) {
+    return c.json({ error: 'PAYLOAD_TOO_LARGE', message: 'Too many matches in a single request' }, 413)
+  }
+
   const db = c.env.DB
   const now = new Date().toISOString()
   const ip = getRequestIp(c)
@@ -178,11 +193,18 @@ secretScannerRouter.post('/github', async (c) => {
     const apiKey = await db
       .prepare('SELECT id, user_id, revoked_at FROM api_keys WHERE key_hash = ? LIMIT 1')
       .bind(keyHash)
-      .first<{ id: string; user_id: string; revoked_at: number | null }>()
+      .first<{ id: string; user_id: string; revoked_at: string | null }>()
 
     if (!apiKey) {
       // Not one of ours (or already rotated out) — report as a false positive.
       results.push({ token_raw: match.token, token_type: match.type, label: 'false_positive' })
+      continue
+    }
+
+    // Already revoked by an earlier callback or a retry — it's still our key
+    // (true positive) but skip the re-stamp + duplicate audit/notify events.
+    if (apiKey.revoked_at) {
+      results.push({ token_raw: match.token, token_type: match.type, label: 'true_positive' })
       continue
     }
 
@@ -193,10 +215,10 @@ secretScannerRouter.post('/github', async (c) => {
       .first<{ org_id: string }>()
 
     // Revoke using the existing expiry mechanism (auth middleware rejects expired
-    // keys), and stamp the soft-revocation audit columns. Idempotent if already
-    // revoked.
+    // keys), and stamp the soft-revocation audit columns. The `revoked_at IS NULL`
+    // guard keeps this a no-op if a concurrent callback already revoked the key.
     await db
-      .prepare('UPDATE api_keys SET expires_at = ?, revoked_at = ?, revoked_reason = ? WHERE id = ?')
+      .prepare('UPDATE api_keys SET expires_at = ?, revoked_at = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL')
       .bind(now, now, 'leaked_in_github', apiKey.id)
       .run()
 
