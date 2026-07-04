@@ -4,6 +4,37 @@
 
 ---
 
+## Session Protocol — Machine ↔ Cloud Convergence
+
+These rules keep every session — local machine or Claude Code on the web — convergent on one
+source of truth, so branches, deployed Workers, and D1 migrations never silently diverge.
+
+### Rules (all sessions, human or AI)
+
+1. **`main` is the single integration branch.** Every session cuts a fresh, short-lived branch
+   FROM `origin/main` before writing code:
+   ```bash
+   git fetch origin main && git checkout -B <branch-name> origin/main
+   ```
+   Never resume a session branch that is behind — rebase or re-cut it first. The SessionStart
+   hook (`.claude/hooks/session-start.sh`) fetches and warns automatically.
+2. **Merge fast, delete branches.** PRs within days, not weeks. A long-lived branch is a drift
+   incident waiting to happen.
+3. **Never deploy uncommitted code.** Deploy ONLY via the guarded wrapper:
+   ```bash
+   ./scripts/deploy.sh api                  # refuses dirty tree / non-tip HEAD
+   ./scripts/deploy.sh api --allow-branch   # explicit hotfix override
+   ```
+4. **Migration numbers are claimed by merge, not by apply.** Sequence: write file in
+   `apps/api/migrations/` → PR → merge → then `wrangler d1 execute`. Run
+   `./scripts/check-migration-drift.sh` before pushing.
+5. **Always `git pull --rebase` before pushing** — remotes that rewrite commits on push change
+   hashes; a stale local ref becomes a rejected push or an accidental fork.
+6. **A deployed artefact must equal a commit on `main`.** If you hotfix live, commit the
+   equivalent change immediately and note it on the tracking issue.
+
+---
+
 ## What We're Building
 
 HushVault manages application secrets with envelope encryption (AES-256-GCM), branch inheritance, computed secrets, and one-click Cloudflare Pages sync. The entire backend runs on Cloudflare Workers + D1 + KV — no servers, no VMs.
