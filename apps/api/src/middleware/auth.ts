@@ -42,7 +42,7 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
   }
 
   const apiKeyHash = await hashApiKey(token)
-  const apiKey = await c.env.DB.prepare('SELECT user_id, key_hash, expires_at FROM api_keys WHERE key_hash = ? LIMIT 1')
+  const apiKey = await c.env.DB.prepare('SELECT user_id, key_hash, expires_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1')
     .bind(apiKeyHash)
     .first<{ user_id: string; key_hash: string; expires_at: string | null }>()
 

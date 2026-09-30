@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
-import { requireAuth, shareAccessRateLimit } from '../middleware/auth'
+import { requireAuth, requireRole, shareAccessRateLimit } from '../middleware/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 
 export const shareRoutes = new Hono<{ Bindings: Env }>()
@@ -15,7 +15,7 @@ const shareSchema = z.object({
 })
 
 // POST /api/share — create a one-time share link
-shareRoutes.post('/', requireAuth, zValidator('json', shareSchema), async (c) => {
+shareRoutes.post('/', requireAuth, requireRole('member'), zValidator('json', shareSchema), async (c) => {
   const auth = c.get('auth')
   const { encryptedPayload, expiresAt, maxViews } = c.req.valid('json')
   const id = createPrefixedId('sh')

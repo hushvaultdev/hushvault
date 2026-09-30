@@ -1,0 +1,222 @@
+import { describe, it, expect, beforeEach } from 'vitest'
+import { createTestEnv, seedUser, seedApiKey, seedProject, seedEnvironment, call, type TestEnv } from './helpers/env'
+
+const PLAINTEXT = 'super-secret-plaintext-value-12345'
+
+// Rate limiter also stores counters in KV, so only look at secret blobs.
+function blobKeys(env: TestEnv) {
+  return [...env.SECRETS_KV.store.keys()].filter((k) => k.startsWith('secret:') || k.startsWith('secrethist:'))
+}
+
+async function setup() {
+  const env = createTestEnv()
+  const owner = await seedUser(env, { role: 'owner' })
+  const member = await seedUser(env, { role: 'member', orgId: owner.orgId })
+  const viewer = await seedUser(env, { role: 'viewer', orgId: owner.orgId })
+  const projectId = await seedProject(env, owner.orgId)
+  const envId = await seedEnvironment(env, projectId)
+  return { env, owner, member, viewer, projectId, envId }
+}
+
+async function create(env: TestEnv, token: string, projectId: string, envId: string, name = 'API_KEY', value = PLAINTEXT) {
+  return call(env, 'POST', '/api/secrets', { token, json: { projectId, envId, name, value } })
+}
+
+describe('secrets routes', () => {
+  let ctx: Awaited<ReturnType<typeof setup>>
+  beforeEach(async () => { ctx = await setup() })
+
+  it('creates and reads back a secret', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    expect(res.status).toBe(201)
+    expect(res.body.data).toMatchObject({ name: 'API_KEY', projectId, envId, isComputed: false, template: null })
+    const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
+    expect(got.status).toBe(200)
+    expect(got.body.data.value).toBe(PLAINTEXT)
+    expect(got.body.data.id).toBe(res.body.data.id)
+  })
+
+  it('stores no plaintext in KV', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    await call(env, 'PATCH', `/api/secrets/${res.body.data.id}`, { token: member.token, json: { value: 'second-plaintext-abc' } })
+    expect(blobKeys(env).length).toBeGreaterThan(0)
+    for (const k of blobKeys(env)) {
+      const v = env.SECRETS_KV.store.get(k) as string
+      expect(v).not.toContain(PLAINTEXT)
+      expect(v).not.toContain('second-plaintext-abc')
+    }
+  })
+
+  it('PATCH with only name keeps the stored value', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    const patch = await call(env, 'PATCH', `/api/secrets/${res.body.data.id}`, { token: member.token, json: { name: 'RENAMED' } })
+    expect(patch.status).toBe(200)
+    const got = await call(env, 'GET', `/api/secrets/RENAMED?envId=${envId}`, { token: member.token })
+    expect(got.status).toBe(200)
+    expect(got.body.data.value).toBe(PLAINTEXT)
+    const hist = await env.DB.prepare('SELECT COUNT(*) AS n FROM secret_history').first<{ n: number }>()
+    expect(hist?.n).toBe(0)
+  })
+
+  it('PATCH with only isComputed keeps the stored value', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    await call(env, 'PATCH', `/api/secrets/${res.body.data.id}`, { token: member.token, json: { isComputed: true } })
+    const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
+    expect(got.body.data.value).toBe(PLAINTEXT)
+    expect(got.body.data.isComputed).toBe(true)
+  })
+
+  it('PATCH value writes history row and old blob', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    const id = res.body.data.id
+    const oldBlob = env.SECRETS_KV.store.get(`secret:${id}`)
+    const oldRow = await env.DB.prepare('SELECT wrapped_dek, key_version FROM secrets WHERE id = ?').bind(id).first<{ wrapped_dek: string; key_version: string }>()
+    const patch = await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'new-value' } })
+    expect(patch.status).toBe(200)
+    const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
+    expect(got.body.data.value).toBe('new-value')
+    const rows = (await env.DB.prepare('SELECT * FROM secret_history WHERE secret_id = ?').bind(id).all<any>()).results
+    expect(rows).toHaveLength(1)
+    expect(rows[0].wrapped_dek).toBe(oldRow?.wrapped_dek)
+    expect(rows[0].key_version).toBe(oldRow?.key_version)
+    expect(rows[0].changed_by).toBe(member.userId)
+    expect(env.SECRETS_KV.store.get(`secrethist:${rows[0].id}`)).toBe(oldBlob)
+    expect(env.SECRETS_KV.store.get(`secret:${id}`)).not.toBe(oldBlob)
+  })
+
+  it('returns 409 on duplicate create and duplicate rename', async () => {
+    const { env, member, projectId, envId } = ctx
+    await create(env, member.token, projectId, envId, 'A')
+    const dup = await create(env, member.token, projectId, envId, 'A')
+    expect(dup.status).toBe(409)
+    expect(dup.body.error).toBe('CONFLICT')
+    const b = await create(env, member.token, projectId, envId, 'B')
+    const ren = await call(env, 'PATCH', `/api/secrets/${b.body.data.id}`, { token: member.token, json: { name: 'A' } })
+    expect(ren.status).toBe(409)
+    expect(ren.body.error).toBe('CONFLICT')
+    // no orphan KV blob from the rejected create
+    expect(blobKeys(env)).toHaveLength(2)
+  })
+
+  it('enforces viewer read-only', async () => {
+    const { env, member, viewer, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    const id = res.body.data.id
+    expect((await create(env, viewer.token, projectId, envId, 'X')).status).toBe(403)
+    expect((await call(env, 'PATCH', `/api/secrets/${id}`, { token: viewer.token, json: { name: 'Y' } })).status).toBe(403)
+    expect((await call(env, 'DELETE', `/api/secrets/${id}`, { token: viewer.token })).status).toBe(403)
+    const list = await call(env, 'GET', `/api/secrets?envId=${envId}`, { token: viewer.token })
+    expect(list.status).toBe(200)
+    expect(list.body.data).toHaveLength(1)
+    expect(list.body.data[0]).toHaveProperty('env_id')
+    const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: viewer.token })
+    expect(got.status).toBe(200)
+    expect(got.body.data.value).toBe(PLAINTEXT)
+  })
+
+  it('isolates organisations', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    const other = await seedUser(env, { role: 'owner' })
+    expect((await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: other.token })).status).toBe(404)
+    expect((await call(env, 'PATCH', `/api/secrets/${res.body.data.id}`, { token: other.token, json: { name: 'Z' } })).status).toBe(404)
+    expect((await call(env, 'DELETE', `/api/secrets/${res.body.data.id}`, { token: other.token })).status).toBe(404)
+    expect((await create(env, other.token, projectId, envId, 'EVIL')).status).toBe(404)
+    const list = await call(env, 'GET', `/api/secrets?envId=${envId}`, { token: other.token })
+    expect(list.body.data).toHaveLength(0)
+  })
+
+  it('rejects invalid names on create and update', async () => {
+    const { env, member, projectId, envId } = ctx
+    for (const bad of ['1ABC', 'has space', 'a-b', 'a.b', '']) {
+      const r = await create(env, member.token, projectId, envId, bad)
+      expect(r.status).toBe(400)
+      expect(r.body.error).toBe('VALIDATION_ERROR')
+    }
+    expect((await create(env, member.token, projectId, envId, 'A'.repeat(129))).status).toBe(400)
+    const ok = await create(env, member.token, projectId, envId, '_ok_1')
+    expect(ok.status).toBe(201)
+    const r = await call(env, 'PATCH', `/api/secrets/${ok.body.data.id}`, { token: member.token, json: { name: 'bad-name' } })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toBe('VALIDATION_ERROR')
+  })
+
+  it('rejects oversize values with 400 (by bytes)', async () => {
+    const { env, member, projectId, envId } = ctx
+    const tooMany = 'x'.repeat(65537)
+    const multibyte = '€'.repeat(30000) // 30000 chars, 90000 bytes
+    for (const value of [tooMany, multibyte]) {
+      const r = await create(env, member.token, projectId, envId, 'BIG', value)
+      expect(r.status).toBe(400)
+      expect(r.body.error).toBe('VALIDATION_ERROR')
+    }
+    const okRes = await create(env, member.token, projectId, envId, 'OK', 'x'.repeat(65536))
+    expect(okRes.status).toBe(201)
+    const p = await call(env, 'PATCH', `/api/secrets/${okRes.body.data.id}`, { token: member.token, json: { value: multibyte } })
+    expect(p.status).toBe(400)
+    const p2 = await call(env, 'PATCH', `/api/secrets/${okRes.body.data.id}`, { token: member.token, json: { value: tooMany } })
+    expect(p2.status).toBe(400)
+  })
+
+  it('delete removes KV blob and history blobs', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    const id = res.body.data.id
+    await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'v2' } })
+    await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'v3' } })
+    const keys = () => blobKeys(env)
+    expect(keys().filter((k) => k.startsWith('secrethist:'))).toHaveLength(2)
+    const del = await call(env, 'DELETE', `/api/secrets/${id}`, { token: member.token })
+    expect(del.status).toBe(200)
+    expect(keys()).toHaveLength(0)
+    const hist = await env.DB.prepare('SELECT COUNT(*) AS n FROM secret_history').first<{ n: number }>()
+    expect(hist?.n).toBe(0)
+    expect((await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })).status).toBe(404)
+  })
+
+  it('returns opaque DECRYPTION_FAILED when the blob is corrupt', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    env.SECRETS_KV.store.set(`secret:${res.body.data.id}`, 'not-a-valid-blob')
+    const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
+    expect(got.status).toBe(500)
+    expect(got.body).toEqual({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' })
+  })
+
+  it('cleans up KV when the D1 insert fails', async () => {
+    const { env, member, projectId, envId } = ctx
+    env.DB.sqlite.exec('CREATE TRIGGER fail_insert BEFORE INSERT ON secrets BEGIN SELECT RAISE(ABORT, \'boom\'); END')
+    const res = await create(env, member.token, projectId, envId)
+    expect(res.status).toBe(500)
+    expect(JSON.stringify(res.body)).not.toContain('boom')
+    expect(blobKeys(env)).toHaveLength(0)
+  })
+
+  it('restores the old KV blob when the D1 update fails', async () => {
+    const { env, member, projectId, envId } = ctx
+    const res = await create(env, member.token, projectId, envId)
+    const id = res.body.data.id
+    const oldBlob = env.SECRETS_KV.store.get(`secret:${id}`)
+    env.DB.sqlite.exec('CREATE TRIGGER fail_update BEFORE UPDATE ON secrets BEGIN SELECT RAISE(ABORT, \'boom\'); END')
+    const p = await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'nope' } })
+    expect(p.status).toBe(500)
+    expect(env.SECRETS_KV.store.get(`secret:${id}`)).toBe(oldBlob)
+    expect([...env.SECRETS_KV.store.keys()].filter((k) => k.startsWith('secrethist:'))).toHaveLength(0)
+    const hist = await env.DB.prepare('SELECT COUNT(*) AS n FROM secret_history').first<{ n: number }>()
+    expect(hist?.n).toBe(0)
+  })
+
+  it('works with API-key bearer auth for a member', async () => {
+    const { env, member, projectId, envId } = ctx
+    const { rawKey } = await seedApiKey(env, member.userId)
+    const res = await create(env, rawKey, projectId, envId, 'VIA_KEY', 'kv')
+    expect(res.status).toBe(201)
+    const got = await call(env, 'GET', `/api/secrets/VIA_KEY?envId=${envId}`, { token: rawKey })
+    expect(got.body.data.value).toBe('kv')
+  })
+})

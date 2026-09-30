@@ -74,16 +74,16 @@ export async function fetchGitHubIdentity(accessToken: string): Promise<OAuthIde
 
   const userRes = await fetch('https://api.github.com/user', { headers })
   if (!userRes.ok) return null
-  const user = (await userRes.json()) as { id: number; login: string; name: string | null; email: string | null }
+  const user = (await userRes.json()) as { id: number; login: string; name: string | null }
 
-  let email = user.email
-  if (!email) {
-    const emailRes = await fetch('https://api.github.com/user/emails', { headers })
-    if (emailRes.ok) {
-      const emails = (await emailRes.json()) as Array<{ email: string; primary: boolean; verified: boolean }>
-      const chosen = emails.find((e) => e.primary && e.verified) ?? emails.find((e) => e.verified)
-      email = chosen?.email ?? null
-    }
+  // Never trust the free-form profile email from /user: account linking keys on
+  // email, so only accept an address GitHub reports as verified.
+  let email: string | null = null
+  const emailRes = await fetch('https://api.github.com/user/emails', { headers })
+  if (emailRes.ok) {
+    const emails = (await emailRes.json()) as Array<{ email: string; primary: boolean; verified: boolean }>
+    const chosen = emails.find((e) => e.primary && e.verified) ?? emails.find((e) => e.verified)
+    email = chosen?.email ?? null
   }
 
   return { id: String(user.id), login: user.login, name: user.name, email }
