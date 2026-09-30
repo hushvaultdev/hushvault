@@ -13,12 +13,12 @@ const workflowSteps = [
     body: 'Create development, staging, and production environments with inheritance built in, so new projects do not start from secret sprawl.',
   },
   {
-    title: 'Sync where teams already deploy',
-    body: 'Push changes to Cloudflare Pages and GitHub Actions without turning secrets management into another release ceremony.',
+    title: 'Inject secrets where you run',
+    body: 'Inject secrets into any command with the CLI today. Cloudflare Pages and GitHub Actions sync are planned and not available yet.',
   },
   {
-    title: 'Upgrade when operations mature',
-    body: 'Keep the features developers love in Free, then add governance, automation, and trust controls when the team actually needs them.',
+    title: 'Grow into governance',
+    body: 'Role-based access and an audit log are built in. SSO, compliance exports, and hosted billing tiers are planned for when teams need them.',
   },
 ]
 
@@ -26,13 +26,13 @@ const trustPoints = [
   'Envelope encryption with AES-256-GCM',
   'Cloudflare Workers, D1, and KV runtime',
   'Open source with self-hosting path',
-  'Free tier designed for real projects',
+  'Free to self-host on the Cloudflare free tier',
 ]
 
 const comparison = [
-  { label: 'Computed secrets', hushvault: 'Included in Free', others: 'Often gated or missing' },
-  { label: 'Branch inheritance', hushvault: 'Built into the core workflow', others: 'Usually a premium feature' },
-  { label: 'Cloudflare-native sync', hushvault: 'First-class use case', others: 'Generic integration story' },
+  { label: 'Computed secrets', hushvault: 'Server-side ${NAME} templates, included', others: 'Varies by vendor' },
+  { label: 'Branch inheritance', hushvault: 'Built into the core workflow', others: 'Varies by vendor' },
+  { label: 'Cloudflare-native runtime', hushvault: 'Workers, D1, and KV; self-host for $0 (Pages sync planned)', others: 'Varies by vendor' },
 ]
 
 export default function HomePage() {
@@ -44,23 +44,24 @@ export default function HomePage() {
             <span className="eyebrow">Secrets management for modern teams</span>
             <h1 className={s('heroTitle')}>Better workflow features than the free tier you have now. Lower friction than the paid tier you are avoiding.</h1>
             <p className={s('heroBody')}>
-              HushVault gives developers the features they actually want on day one: computed secrets, environment inheritance, temporary sharing, and Cloudflare-native delivery without enterprise-first pricing.
+              HushVault gives developers the features they actually want on day one: computed secrets, environment inheritance, one-time share links, and a Cloudflare-native architecture you can self-host for free. HushVault is an early, pre-release project.
             </p>
             <div className={s('heroActions')}>
-              <Button href="#pricing" variant="primary">Start Free</Button>
+              <Button href="/docs" variant="primary">Self-host for Free</Button>
               <Button href="#workflows" variant="secondary">See How It Works</Button>
             </div>
             <div className={s('heroStats')}>
               <Badge tone="neutral">$0 to self-host</Badge>
               <Badge tone="accent">Open source</Badge>
-              <Badge tone="neutral">Built for Cloudflare and GitHub workflows</Badge>
+              <Badge tone="neutral">Built on Cloudflare Workers</Badge>
+              <Badge tone="warning">Pre-release</Badge>
             </div>
           </div>
 
           <Card className={s('productScene')} tone="dark">
             <div className={s('sceneToolbar')}>
               <span className={s('sceneTitle')}>Project: hushvault.dev</span>
-              <Badge tone="success">Sync healthy</Badge>
+              <Badge tone="neutral">Sample data</Badge>
             </div>
 
             <div className={s('scenePanels')}>
@@ -86,11 +87,11 @@ export default function HomePage() {
               <Card className={s('scenePanel')} tone="light">
                 <div className={s('panelHeader')}>
                   <span>Recent activity</span>
-                  <span className={s('panelMeta')}>2 min ago</span>
+                  <span className={s('panelMeta')}>example</span>
                 </div>
                 <p className={s('activityLine')}><strong>APP_ORIGIN</strong> updated for production</p>
-                <p className={s('activityLine')}>Cloudflare Pages synced successfully</p>
-                <p className={s('activityLine')}>Share link created for staging handoff</p>
+                <p className={s('activityLine')}>DATABASE_URL read via the CLI</p>
+                <p className={s('activityLine')}>One-time share link created for staging handoff</p>
               </Card>
             </div>
 
@@ -117,10 +118,10 @@ export default function HomePage() {
 
       <Section id="workflows">
         <div className={`${s('sectionHeader')} page-container`}>
-          <span className="eyebrow">Workflow-first product story</span>
+          <span className="eyebrow">Workflow-first</span>
           <h2>Secrets management that starts simple and scales with operational maturity.</h2>
           <p>
-            The product should feel immediately useful for solo developers, then evolve into shared infrastructure as teams grow into collaboration, governance, and automation needs.
+            HushVault aims to be immediately useful for solo developers, then grow into shared infrastructure as teams need collaboration, governance, and automation.
           </p>
         </div>
         <div className={`${s('workflowGrid')} page-container`}>
@@ -137,18 +138,18 @@ export default function HomePage() {
       <Section id="pricing">
         <div className={`${s('pricingGrid')} page-container`}>
           <Card className={s('pricingIntro')}>
-            <span className="eyebrow">Freemium that stays credible</span>
+            <span className="eyebrow">Planned pricing</span>
             <h2>Give away the features that create product love. Charge for the layers that remove operational pain.</h2>
             <p>
-              HushVault should win on value density, not trial pressure. Free is for real projects. Pro removes friction. Team adds governance. Enterprise handles procurement.
+              Self-hosting is free today. Hosted tiers are planned: Pro to remove friction, Team for governance, Enterprise for procurement. Billing is not live yet and prices are provisional.
             </p>
-            <Button href="/pricing" variant="primary">View Pricing Strategy</Button>
+            <Button href="/pricing" variant="primary">View Planned Pricing</Button>
           </Card>
 
           <Card className={s('comparisonCard')}>
             <div className={s('panelHeader')}>
-              <span>Why teams switch</span>
-              <span className={s('panelMeta')}>positioning</span>
+              <span>Why HushVault</span>
+              <span className={s('panelMeta')}>what you get</span>
             </div>
             <div className={s('comparisonRows')}>
               {comparison.map((row) => (
