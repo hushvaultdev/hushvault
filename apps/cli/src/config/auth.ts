@@ -1,49 +1,86 @@
-import keytar from 'keytar'
 import { getGlobalConfig, saveGlobalConfig } from './project.js'
 
 const KEYCHAIN_SERVICE = 'hushvault'
 
-/**
- * Store auth token securely in OS keychain
- * macOS → Keychain, Windows → Credential Manager, Linux → libsecret
- */
-export async function storeToken(email: string, token: string): Promise<void> {
-  await keytar.setPassword(KEYCHAIN_SERVICE, email, token)
-  await saveGlobalConfig({ currentUser: email })
+export class KeychainUnavailableError extends Error {
+  constructor() {
+    super(
+      'OS keychain is not available (is libsecret installed?). Tokens are never written to plaintext files. ' +
+        'Set the HUSHVAULT_TOKEN environment variable (API key or JWT) instead.',
+    )
+    this.name = 'KeychainUnavailableError'
+  }
+}
+
+interface Keytar {
+  setPassword(service: string, account: string, password: string): Promise<void>
+  getPassword(service: string, account: string): Promise<string | null>
+  deletePassword(service: string, account: string): Promise<boolean>
+}
+
+/** Load keytar lazily so the CLI still starts without the native module. */
+async function loadKeytar(): Promise<Keytar> {
+  try {
+    const mod = (await import('keytar')) as unknown as { default?: Keytar } & Partial<Keytar>
+    const k = (mod.default ?? mod) as Keytar
+    if (typeof k.setPassword !== 'function') throw new Error('keytar missing')
+    return k
+  } catch {
+    throw new KeychainUnavailableError()
+  }
 }
 
 /**
- * Retrieve auth token from OS keychain
+ * Store auth token in the OS keychain.
+ * Throws KeychainUnavailableError if keytar cannot be loaded or the keychain errors.
  */
+export async function storeToken(email: string, token: string): Promise<void> {
+  const keytar = await loadKeytar()
+  try {
+    await keytar.setPassword(KEYCHAIN_SERVICE, email, token)
+  } catch {
+    throw new KeychainUnavailableError()
+  }
+  const existing = await getGlobalConfig()
+  await saveGlobalConfig({ ...existing, currentUser: email })
+}
+
+/** Retrieve auth token from OS keychain (null if none / keychain unavailable). */
 export async function getToken(): Promise<string | null> {
   const config = await getGlobalConfig()
   const email = config['currentUser']
   if (!email) return null
-  return keytar.getPassword(KEYCHAIN_SERVICE, email)
+  try {
+    const keytar = await loadKeytar()
+    return await keytar.getPassword(KEYCHAIN_SERVICE, email)
+  } catch {
+    return null
+  }
 }
 
-/**
- * Get token for CI/CD — prefers HUSHVAULT_TOKEN env var
- */
+/** HUSHVAULT_TOKEN (API key or JWT) takes precedence; otherwise the OS keychain. */
 export async function getAuthToken(): Promise<string> {
-  // CI/CD: use environment variable
   const envToken = process.env['HUSHVAULT_TOKEN']
   if (envToken) return envToken
 
-  // Local dev: use OS keychain
   const token = await getToken()
   if (!token) {
-    throw new Error('Not logged in. Run: hushvault login')
+    throw new Error('Not logged in. Run: hushvault login (or set HUSHVAULT_TOKEN)')
   }
   return token
 }
 
-/**
- * Clear stored credentials (logout)
- */
+/** Clear stored credentials (logout) */
 export async function clearToken(): Promise<void> {
   const config = await getGlobalConfig()
   const email = config['currentUser']
-  if (email) await keytar.deletePassword(KEYCHAIN_SERVICE, email)
+  if (email) {
+    try {
+      const keytar = await loadKeytar()
+      await keytar.deletePassword(KEYCHAIN_SERVICE, email)
+    } catch {
+      // nothing to clear if the keychain is unavailable
+    }
+  }
   await saveGlobalConfig({})
 }

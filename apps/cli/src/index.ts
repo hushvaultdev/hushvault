@@ -11,6 +11,7 @@ import { shareCommand } from './commands/share.js'
 const program = new Command()
 
 program
+  .enablePositionalOptions()
   .name('hushvault')
   .description('HushVault — secrets manager for Cloudflare developers')
   .version('0.0.1')

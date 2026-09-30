@@ -1,44 +1,56 @@
 import { Command } from 'commander'
-import { createInterface } from 'readline'
 import chalk from 'chalk'
-import { storeToken } from '../config/auth.js'
-import { saveGlobalConfig, DEFAULT_API_URL } from '../config/project.js'
+import { ApiClient, ApiError, friendlyError } from '../api.js'
+import { storeToken, KeychainUnavailableError } from '../config/auth.js'
+import { getGlobalConfig, saveGlobalConfig } from '../config/project.js'
+import { resolveApiUrl } from '../lib/context.js'
+import { prompt } from '../lib/prompt.js'
+
+export interface LoginOptions {
+  apiUrl?: string | undefined
+  email?: string | undefined
+  /** Injected for tests; defaults to interactive prompts (password is not echoed). */
+  ask?: (question: string, hidden: boolean) => Promise<string>
+}
+
+export async function loginAction(options: LoginOptions = {}): Promise<{ email: string; userId: string }> {
+  const apiUrl = await resolveApiUrl(options.apiUrl)
+  const ask = options.ask ?? ((q, hidden) => prompt(q, hidden))
+
+  const email = (options.email ?? (await ask('Email: ', false))).trim()
+  const password = await ask('Password: ', true)
+  if (!email || !password) throw new Error('Email and password are required')
+
+  let result
+  try {
+    result = await new ApiClient({ apiUrl }).login(email, password)
+  } catch (err) {
+    const msg = err instanceof ApiError ? err.message : friendlyError(err, 'Login')
+    throw new Error(`Login failed: ${msg}`)
+  }
+
+  // Throws KeychainUnavailableError (with guidance) if the keychain can't be used.
+  await storeToken(email, result.token)
+  const existing = await getGlobalConfig()
+  await saveGlobalConfig({ ...existing, currentUser: email, apiUrl })
+  return { email, userId: result.userId }
+}
 
 export const loginCommand = new Command('login')
   .description('Authenticate with HushVault')
   .option('--api-url <url>', 'API URL (default: https://api.hushvault.dev)')
-  .action(async (options: { apiUrl?: string }) => {
-    const apiUrl = options.apiUrl ?? DEFAULT_API_URL
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-
-    const ask = (q: string): Promise<string> => new Promise((res) => rl.question(q, res))
-
+  .option('--email <email>', 'Email (prompted if omitted)')
+  .action(async (options: { apiUrl?: string; email?: string }) => {
     try {
-      console.log(chalk.bold('\n🔐 HushVault Login\n'))
-      const email = await ask('Email: ')
-      const password = await ask('Password: ')
-      rl.close()
-
-      const response = await fetch(`${apiUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      })
-
-      if (!response.ok) {
-        console.error(chalk.red('✗ Login failed:', response.statusText))
-        process.exit(1)
-      }
-
-      const { token } = await response.json() as { token: string }
-      await storeToken(email, token)
-      await saveGlobalConfig({ currentUser: email, apiUrl })
-
+      console.log(chalk.bold('\nHushVault Login\n'))
+      const { email } = await loginAction(options)
       console.log(chalk.green(`\n✓ Logged in as ${email}`))
       console.log(chalk.gray('  Credentials stored in OS keychain\n'))
     } catch (err) {
-      rl.close()
-      console.error(chalk.red('✗', err instanceof Error ? err.message : 'Login failed'))
+      console.error(chalk.red('✗ ' + (err instanceof Error ? err.message : 'Login failed')))
+      if (err instanceof KeychainUnavailableError) {
+        console.error(chalk.gray('  In CI, skip login and export HUSHVAULT_TOKEN.'))
+      }
       process.exit(1)
     }
   })
