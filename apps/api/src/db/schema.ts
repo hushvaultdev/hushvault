@@ -11,7 +11,8 @@ export const users = sqliteTable('users', {
   salt: text('salt').notNull(), // PBKDF2 salt for key derivation
   provider: text('provider'), // 'github' | 'google' | null (password)
   providerId: text('provider_id'), // provider's stable user id
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),
+  createdAt: text('created_at').notNull(),
 }, (t) => [uniqueIndex('users_provider_idx').on(t.provider, t.providerId)])
 
 export const apiKeys = sqliteTable('api_keys', {
@@ -19,14 +20,14 @@ export const apiKeys = sqliteTable('api_keys', {
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   keyHash: text('key_hash').notNull().unique(), // SHA-256 hash of raw key
   name: text('name').notNull(),
-  lastUsedAt: integer('last_used_at', { mode: 'timestamp' }),
-  expiresAt: integer('expires_at', { mode: 'timestamp' }),
+  lastUsedAt: text('last_used_at'),
+  expiresAt: text('expires_at'),
   // Soft-revocation audit trail. A revoked key is invalidated by setting
   // expiresAt to "now" (already honoured by the auth middleware); these columns
   // record when and why. revokedReason e.g. "leaked_in_github".
-  revokedAt: integer('revoked_at', { mode: 'timestamp' }),
+  revokedAt: text('revoked_at'),
   revokedReason: text('revoked_reason'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  createdAt: text('created_at').notNull(),
 }, (t) => [index('api_keys_user_idx').on(t.userId)])
 
 // ─────────────────────────────────────────────
@@ -42,7 +43,7 @@ export const organisations = sqliteTable('organisations', {
   // Optional per-org audit log retention override (days). null = use the plan
   // default. Can shorten retention below the plan allowance, never extend it.
   auditRetentionDays: integer('audit_retention_days'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  createdAt: text('created_at').notNull(),
 })
 
 export const members = sqliteTable('members', {
@@ -50,7 +51,7 @@ export const members = sqliteTable('members', {
   orgId: text('org_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   role: text('role', { enum: ['owner', 'admin', 'member', 'viewer'] }).notNull().default('member'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  createdAt: text('created_at').notNull(),
 }, (t) => [
   index('members_org_idx').on(t.orgId),
   index('members_user_idx').on(t.userId),
@@ -66,8 +67,8 @@ export const projects = sqliteTable('projects', {
   name: text('name').notNull(),
   slug: text('slug').notNull(),
   description: text('description'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 }, (t) => [index('projects_org_idx').on(t.orgId)])
 
 export const environments = sqliteTable('environments', {
@@ -77,7 +78,7 @@ export const environments = sqliteTable('environments', {
   slug: text('slug').notNull(),
   parentEnvId: text('parent_env_id'), // null = root env; set for branch inheritance
   color: text('color').default('#6366f1'), // UI color hint
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  createdAt: text('created_at').notNull(),
 }, (t) => [index('environments_project_idx').on(t.projectId)])
 
 // ─────────────────────────────────────────────
@@ -96,8 +97,8 @@ export const secrets = sqliteTable('secrets', {
   isComputed: integer('is_computed', { mode: 'boolean' }).notNull().default(false),
   template: text('template'),                   // e.g. "${DB_USER}:${DB_PASS}@host/db"
   dependencies: text('dependencies'),           // JSON array of secret names
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull(),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
   createdBy: text('created_by').references(() => users.id),
 }, (t) => [
   index('secrets_env_idx').on(t.envId),
@@ -110,7 +111,7 @@ export const secretHistory = sqliteTable('secret_history', {
   secretId: text('secret_id').notNull().references(() => secrets.id, { onDelete: 'cascade' }),
   wrappedDek: text('wrapped_dek').notNull(),
   keyVersion: text('key_version').notNull(),
-  changedAt: integer('changed_at', { mode: 'timestamp' }).notNull(),
+  changedAt: text('changed_at').notNull(),
   changedBy: text('changed_by').references(() => users.id),
 }, (t) => [index('secret_history_secret_idx').on(t.secretId)])
 
@@ -122,11 +123,11 @@ export const shareLinks = sqliteTable('share_links', {
   id: text('id').primaryKey(),
   token: text('token').notNull().unique(),       // URL token (random, not the encryption key)
   encryptedPayload: text('encrypted_payload').notNull(), // client-encrypted secret value
-  expiresAt: integer('expires_at', { mode: 'timestamp' }).notNull(),
+  expiresAt: text('expires_at').notNull(),
   maxViews: integer('max_views').notNull().default(1),
   viewCount: integer('view_count').notNull().default(0),
   createdBy: text('created_by').references(() => users.id),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+  createdAt: text('created_at').notNull(),
 }, (t) => [index('share_links_token_idx').on(t.token)])
 
 // ─────────────────────────────────────────────
@@ -143,7 +144,7 @@ export const auditLog = sqliteTable('audit_log', {
   resourceId: text('resource_id'),
   ip: text('ip'),
   userAgent: text('user_agent'),
-  timestamp: integer('timestamp', { mode: 'timestamp' }).notNull(),
+  timestamp: text('timestamp').notNull(),
 }, (t) => [
   index('audit_log_org_idx').on(t.orgId),
   index('audit_log_timestamp_idx').on(t.timestamp),

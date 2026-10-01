@@ -10,8 +10,8 @@ import styles from './billing.module.css'
 
 const s = (name: string) => styles[name]
 
-// No API exists yet to fetch the org's live plan/usage, so the billing page is
-// rendered from static plan definitions and every workspace is shown on Free.
+// Stripe billing and plan-limit enforcement are not implemented, and no API
+// exists to fetch an org's live plan/usage, so every workspace is shown on Free.
 const CURRENT_PLAN = 'Free'
 
 type UsageStat = {
@@ -50,7 +50,7 @@ export default function BillingPage() {
     <div>
       <div className={s('pageHeader')}>
         <h1 className={s('pageTitle')}>Billing</h1>
-        <p className={s('pageSubtitle')}>Review your plan and see what each tier unlocks as your team grows.</p>
+        <p className={s('pageSubtitle')}>Hosted billing is not available yet. Below is a preview of the planned tiers.</p>
       </div>
 
       <Card className={s('summaryCard')} tone="light">
@@ -61,14 +61,14 @@ export default function BillingPage() {
         <div className={s('summaryMeta')}>
           <span className={s('summaryWorkspace')}>Workspace: {workspace}</span>
           <span className={s('pageSubtitle')}>
-            You are on the {CURRENT_PLAN} plan at $0 — full self-host included.
+            You are on the {CURRENT_PLAN} plan at $0. Plan limits (projects, secrets, members) are not enforced yet.
           </span>
         </div>
-        <p className={s('summaryNote')}>Live plan and usage data is coming soon. The figures below are illustrative.</p>
+        <p className={s('summaryNote')}>Live plan and usage data is coming soon. The usage figures below are examples, not your real usage.</p>
       </Card>
 
       <div className={s('sectionBlock')}>
-        <h2 className={s('sectionTitle')}>Usage (illustrative)</h2>
+        <h2 className={s('sectionTitle')}>Usage (example data)</h2>
         <div className={s('usageGrid')}>
           {usage.map((stat) => {
             const percent = clampPercent(stat.value, stat.limit)
@@ -93,7 +93,7 @@ export default function BillingPage() {
                 >
                   <div className={s('meterFill')} style={{ width: `${percent}%` }} />
                 </div>
-                <p className={s('usageHint')}>Placeholder figure — not yet connected to live usage.</p>
+                <p className={s('usageHint')}>Example figure. Not your real usage.</p>
               </Card>
             )
           })}
@@ -113,7 +113,7 @@ export default function BillingPage() {
                   <span className={s('planName')}>{plan.name}</span>
                   <span className={s('planPrice')}>{plan.price}</span>
                 </div>
-                {isCurrent ? <Badge tone="accent">Current plan</Badge> : <Badge tone="neutral">Available</Badge>}
+                {isCurrent ? <Badge tone="accent">Current plan</Badge> : <Badge tone="neutral">Planned</Badge>}
                 <p className={s('planAudience')}>{plan.audience}</p>
                 <ul className={s('planFeatures')}>
                   {plan.features.map((feature) => (
@@ -128,9 +128,9 @@ export default function BillingPage() {
                   ) : (
                     <>
                       <Button type="button" variant={tone === 'dark' ? 'secondary' : 'primary'} disabled>
-                        Upgrade
+                        Coming soon
                       </Button>
-                      <p className={s('upgradeHint')}>Checkout is not yet active.</p>
+                      <p className={s('upgradeHint')}>Checkout is not available yet.</p>
                     </>
                   )}
                 </div>

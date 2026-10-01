@@ -5,7 +5,7 @@ test('marketing homepage loads and shows features', async ({ page }) => {
   await expect(page).toHaveTitle(/HushVault/)
   await expect(page.getByText('Computed secrets', { exact: true })).toBeVisible()
   await expect(page.getByText('Branch inheritance', { exact: true })).toBeVisible()
-  await expect(page.getByText('Cloudflare-native sync', { exact: true })).toBeVisible()
+  await expect(page.getByText('Cloudflare-native runtime', { exact: true })).toBeVisible()
 })
 
 test('faq page is reachable from marketing docs route', async ({ page }) => {

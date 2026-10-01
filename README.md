@@ -1,51 +1,81 @@
 # HushVault
 
-**Secrets manager built for the edge. $0 to self-host. Ships with what Doppler charges extra for.**
+**Secrets manager built for the edge. $0 to self-host on Cloudflare. Pre-release.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/website-hushvault.dev-blue)](https://hushvault.dev)
 
 ---
 
-## Why HushVault?
+## Status
 
-| Feature | HushVault | Infisical | Doppler |
-|---------|-----------|-----------|---------|
-| Computed secrets (`${DB_USER}:${DB_PASS}`) | ✅ | ❌ | ✅ |
-| Branch inheritance (env inherits from parent) | ✅ | ❌ | ✅ |
-| Temporary share URLs (E2E encrypted) | ✅ | ❌ | ✅ |
-| Native Cloudflare Pages sync | ✅ | ✅ | ❌ |
-| Self-host for $0 (Cloudflare free tier) | ✅ | ❌ | ❌ |
-| Open source (MIT) | ✅ | Partial | ❌ |
-| Generous free tier | ✅ | Throttled | Gutted |
+**HushVault is pre-release software. It is not production-ready and has not had an independent security audit.**
+
+**What works today**
+
+- Secrets CRUD with envelope encryption (AES-256-GCM via WebCrypto; KEK wraps a per-secret DEK)
+- Branch inheritance: per-environment parent/child resolution
+- Computed secrets: `${NAME}` templates evaluated server-side
+- Role-based access control (viewer / member / admin / owner) and API keys
+- Audit log API
+- GitHub and Google OAuth sign-in
+- One-time share links (API only; there is no web page for opening a link yet)
+- GitHub secret-scanning callback (revokes leaked HushVault API keys)
+- CLI: `login`, `init`, `set`, `get`, `run`, `share`
+- Web dashboard: sign-in, projects, secrets, audit log
+
+**Planned, not built**
+
+- Cloudflare Pages sync and other integrations (GitHub Actions sync and action, Slack, webhooks)
+- Stripe billing, hosted paid plans, and plan-limit enforcement
+- SSO/SAML
+- Team invites and member management
+- Password reset and email verification flows
+- Secret rotation and automated master-key rotation tooling
+- Public web page for opening share links
+- Compliance attestations (e.g. SOC 2). None are held today.
 
 ---
 
 ## Where HushVault Came From
 
-HushVault started as a developer-first alternative to expensive secrets managers. The goal was to build the workflow features teams actually use — computed secrets, branch inheritance, share links, and first-class Cloudflare integration — while keeping self-hosting easy and affordable on the Cloudflare free tier.
-
-The project is designed for teams that want better value than Doppler, but more polish than open-source projects that feel unfinished.
+HushVault started as a developer-first alternative to expensive secrets managers. The goal is to offer the workflow features teams actually use (computed secrets, branch inheritance, share links, and Cloudflare-native architecture) while keeping self-hosting easy and affordable on the Cloudflare free tier.
 
 ---
 
-## Quick Start
+## Local Development
+
+Requirements: Node.js **>= 22.13** (the API tests use `node:sqlite`, which needs no flags from 22.13) and pnpm >= 9.
 
 ```bash
-# Install CLI
-npm install -g hushvault
+git clone https://github.com/hushvaultdev/hushvault
+cd hushvault
+pnpm install
 
-# Login
+# API: local secrets and local D1 schema
+cd apps/api
+cp .dev.vars.example .dev.vars   # then fill in ENCRYPTION_MASTER_KEY and JWT_SECRET
+wrangler d1 migrations apply hushvault-db --local
+cd ../..
+
+pnpm dev          # starts all apps (API via wrangler dev, web via next dev)
+pnpm test         # API/CLI unit tests (Node >= 22.13)
+pnpm type-check
+pnpm lint
+pnpm build
+```
+
+`ENCRYPTION_MASTER_KEY` must be a base64-encoded 32-byte key (for example `openssl rand -base64 32`). OAuth sign-in is optional and needs the GitHub/Google variables described in `.dev.vars.example`.
+
+## CLI Usage
+
+Build the CLI from source (`pnpm --filter hushvault build`, then `node apps/cli/dist/index.js`):
+
+```bash
 hushvault login
-
-# Link your project
 cd my-project
 hushvault init
-
-# Set a secret
 hushvault set DATABASE_URL "postgres://..."
-
-# Run with secrets injected
 hushvault run -- npm run dev
 ```
 
@@ -74,13 +104,7 @@ base (shared vars)
 
 ## GitHub Actions
 
-```yaml
-- uses: hushvaultdev/secrets-action@v1
-  with:
-    token: ${{ secrets.HUSHVAULT_TOKEN }}
-    project: my-project
-    env: production
-```
+Planned. The `hushvaultdev/secrets-action` action and GitHub Actions sync do not exist yet.
 
 ---
 
@@ -99,7 +123,7 @@ wrangler kv:namespace create SECRETS_KV
 wrangler deploy
 ```
 
-Total cost: **$0/month** on Cloudflare free tier.
+Self-hosting targets the Cloudflare free tier, so it should cost $0/month for small workloads. Also run `wrangler d1 migrations apply hushvault-db` from `apps/api` and set secrets with `wrangler secret put`. Review the status above before relying on it.
 
 ---
 

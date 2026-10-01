@@ -12,6 +12,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   invalid_state: 'The sign-in request expired or was invalid. Please try again.',
   exchange_failed: 'Could not complete sign-in. Please try again.',
   no_verified_email: 'No verified email was available from your account.',
+  account_exists_unverified: 'An account with this email already exists. Sign in with your password instead.',
   membership_missing: 'Your account has no workspace. Please contact support.',
 }
 

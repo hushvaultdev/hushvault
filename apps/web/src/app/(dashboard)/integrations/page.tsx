@@ -6,7 +6,7 @@ import styles from './integrations.module.css'
 
 const s = (name: string) => styles[name]
 
-type IntegrationStatus = 'not-connected' | 'coming-soon'
+type IntegrationStatus = 'coming-soon'
 
 type Integration = {
   id: string
@@ -21,28 +21,28 @@ const integrations: Integration[] = [
     id: 'cf-pages',
     name: 'Cloudflare Pages',
     mark: 'CF',
-    description: 'Push secrets to Pages environment variables on save — no re-deploy required.',
-    status: 'not-connected',
+    description: 'Planned: sync secrets to Cloudflare Pages environment variables.',
+    status: 'coming-soon',
   },
   {
     id: 'github-actions',
     name: 'GitHub Actions',
     mark: 'GH',
-    description: 'Sync secrets to GitHub repository and environment secrets for your CI workflows.',
+    description: 'Planned: sync secrets to GitHub repository and environment secrets for your CI workflows.',
     status: 'coming-soon',
   },
   {
     id: 'slack',
     name: 'Slack',
     mark: 'SL',
-    description: 'Get alerts for expiring secrets, plan limits, and detected configuration drift.',
+    description: 'Planned: alerts for expiring secrets and configuration drift.',
     status: 'coming-soon',
   },
   {
     id: 'webhooks',
     name: 'Webhooks',
     mark: 'WH',
-    description: 'Deliver HMAC-signed event payloads to your endpoints on every secret change.',
+    description: 'Planned: signed event payloads delivered to your endpoints on secret changes.',
     status: 'coming-soon',
   },
 ]
@@ -53,24 +53,19 @@ export default function IntegrationsPage() {
       <div className={s('pageHeader')}>
         <h1 className={s('pageTitle')}>Integrations</h1>
         <p className={s('pageSubtitle')}>
-          Connect HushVault to where your team already deploys and communicates. More integrations are on the way.
+          No integrations are available yet. The integrations below are planned; nothing here is connected.
         </p>
       </div>
 
       <div className={s('grid')}>
         {integrations.map((integration) => {
-          const available = integration.status === 'not-connected'
           return (
             <Card key={integration.id} className={s('card')} tone="light">
               <div className={s('cardTop')}>
                 <span className={s('mark')} aria-hidden="true">
                   {integration.mark}
                 </span>
-                {available ? (
-                  <Badge tone="neutral">Not connected</Badge>
-                ) : (
-                  <Badge tone="accent">Coming soon</Badge>
-                )}
+                <Badge tone="accent">Coming soon</Badge>
               </div>
 
               <div className={s('body')}>
@@ -79,8 +74,8 @@ export default function IntegrationsPage() {
               </div>
 
               <div className={s('action')}>
-                <Button type="button" variant={available ? 'primary' : 'secondary'} disabled>
-                  {available ? 'Connect' : 'Coming soon'}
+                <Button type="button" variant="secondary" disabled>
+                  Coming soon
                 </Button>
               </div>
             </Card>

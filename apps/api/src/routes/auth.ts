@@ -54,7 +54,7 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
     .slice(0, 48) || `org-${userId.slice(-8)}`
 
   await db.batch([
-    db.prepare('INSERT INTO users (id, email, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)').bind(
+    db.prepare('INSERT INTO users (id, email, password_hash, salt, created_at, email_verified) VALUES (?, ?, ?, ?, ?, 0)').bind(
       userId,
       email.toLowerCase(),
       passwordHash,
@@ -92,7 +92,10 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async
     salt: string
   }>()
 
-  if (!user) {
+  // Burn the same PBKDF2 cost for unknown users and OAuth-only users (empty
+  // hash) so response time does not reveal whether an email is registered.
+  if (!user || !user.password_hash || !user.salt) {
+    await hashPassword(password)
     return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
   }
 
@@ -129,12 +132,18 @@ authRoutes.post('/api-keys', requireAuth, zValidator('json', apiKeySchema), asyn
   const { name, expiresAt } = c.req.valid('json')
   const auth = c.get('auth')
   const db = c.env.DB
+
+  if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) {
+    return c.json({ error: 'VALIDATION_ERROR', message: 'expiresAt must be in the future' }, 400)
+  }
+
   const { rawKey, keyHash } = await createApiKey()
+  const id = createPrefixedId('key')
 
   await db.prepare(
     'INSERT INTO api_keys (id, user_id, key_hash, name, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
   ).bind(
-    createPrefixedId('key'),
+    id,
     auth.userId,
     keyHash,
     name,
@@ -148,12 +157,42 @@ authRoutes.post('/api-keys', requireAuth, zValidator('json', apiKeySchema), asyn
     actorType: auth.actorType,
     action: 'auth.api_key.create',
     resourceType: 'api_key',
-    resourceId: auth.userId,
+    resourceId: id,
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),
   })
 
-  return c.json({ data: { apiKey: rawKey, name } }, 201)
+  return c.json({ data: { id, apiKey: rawKey, name, expiresAt: expiresAt ?? null } }, 201)
+})
+
+// GET /api/auth/api-keys — the caller's own keys; never key_hash or raw keys
+authRoutes.get('/api-keys', requireAuth, async (c) => {
+  const auth = c.get('auth')
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, name, created_at, last_used_at, expires_at, revoked_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC',
+  ).bind(auth.userId).all<{
+    id: string
+    name: string
+    created_at: string
+    last_used_at: string | null
+    expires_at: string | null
+    revoked_at: number | string | null
+  }>()
+
+  const data = results.map((row) => ({
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    expiresAt: row.expires_at,
+    // revoked_at is an INTEGER (unix seconds) column; expose ISO like other timestamps.
+    revokedAt: row.revoked_at === null || row.revoked_at === undefined
+      ? null
+      : typeof row.revoked_at === 'number'
+        ? new Date(row.revoked_at * 1000).toISOString()
+        : row.revoked_at,
+  }))
+  return c.json({ data })
 })
 
 // DELETE /api/auth/api-keys/:id
@@ -201,7 +240,27 @@ async function completeOAuthLogin(
   if (byProvider) {
     userId = byProvider.id
   } else {
-    const byEmail = await db.prepare('SELECT id FROM users WHERE email = ? LIMIT 1').bind(email).first<{ id: string }>()
+    const byEmail = await db.prepare('SELECT id, email_verified FROM users WHERE email = ? LIMIT 1').bind(email)
+      .first<{ id: string; email_verified: number }>()
+    if (byEmail && byEmail.email_verified !== 1) {
+      // Pre-account-takeover guard: an unverified (password) account may have been
+      // registered by someone who does not own this address. Never link or log in.
+      const member = await db.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
+        .bind(byEmail.id).first<{ org_id: string }>()
+      if (member) {
+        await writeAuditLog(c.env, {
+          orgId: member.org_id,
+          actorId: null,
+          actorType: 'system',
+          action: 'auth.oauth.link_refused',
+          resourceType: 'user',
+          resourceId: byEmail.id,
+          ip: getRequestIp(c),
+          userAgent: c.req.header('user-agent'),
+        })
+      }
+      return c.redirect(`${webBase}/auth/callback#error=${encodeURIComponent('account_exists_unverified')}`, 302)
+    }
     if (byEmail) {
       await db.prepare('UPDATE users SET provider = ?, provider_id = ? WHERE id = ?').bind(provider, identity.id, byEmail.id).run()
       userId = byEmail.id
@@ -227,7 +286,7 @@ async function completeOAuthLogin(
     const slugBase = identity.login.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'workspace'
 
     await db.batch([
-      db.prepare("INSERT INTO users (id, email, password_hash, salt, provider, provider_id, created_at) VALUES (?, ?, '', '', ?, ?, ?)")
+      db.prepare("INSERT INTO users (id, email, password_hash, salt, provider, provider_id, created_at, email_verified) VALUES (?, ?, '', '', ?, ?, ?, 1)")
         .bind(newUserId, email, provider, identity.id, now),
       db.prepare("INSERT INTO organisations (id, name, slug, plan, created_at) VALUES (?, ?, ?, 'free', ?)")
         .bind(orgId, `${displayName}'s workspace`, `${slugBase}-${orgId.slice(-6)}`, now),

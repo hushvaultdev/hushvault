@@ -42,7 +42,7 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
   }
 
   const apiKeyHash = await hashApiKey(token)
-  const apiKey = await c.env.DB.prepare('SELECT user_id, key_hash, expires_at FROM api_keys WHERE key_hash = ? LIMIT 1')
+  const apiKey = await c.env.DB.prepare('SELECT user_id, key_hash, expires_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1')
     .bind(apiKeyHash)
     .first<{ user_id: string; key_hash: string; expires_at: string | null }>()
 
@@ -55,7 +55,7 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
   }
 
   const member = await c.env.DB.prepare(
-    'SELECT m.org_id, m.role FROM members m WHERE m.user_id = ? LIMIT 1',
+    'SELECT m.org_id, m.role FROM members m WHERE m.user_id = ? ORDER BY m.created_at ASC LIMIT 1',
   ).bind(apiKey.user_id).first<{ org_id: string; role: AuthContext['role'] }>()
 
   if (!member) {
@@ -72,6 +72,19 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
   await c.env.DB.prepare('UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?').bind(new Date().toISOString(), apiKeyHash).run()
 
   return next()
+}
+
+const ROLE_RANK: Record<AuthContext['role'], number> = { viewer: 0, member: 1, admin: 2, owner: 3 }
+
+// Must run after requireAuth. Roles are hierarchical: viewer < member < admin < owner.
+export function requireRole(minimum: AuthContext['role']): MiddlewareHandler<{ Bindings: Env }> {
+  return async (c, next) => {
+    const auth = c.get('auth')
+    if (!auth || ROLE_RANK[auth.role] === undefined || ROLE_RANK[auth.role] < ROLE_RANK[minimum]) {
+      return c.json({ error: 'FORBIDDEN', message: 'You do not have permission to perform this action' }, 403)
+    }
+    return next()
+  }
 }
 
 export const loginRateLimit = createRateLimitMiddleware({
