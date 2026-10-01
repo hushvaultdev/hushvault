@@ -44,8 +44,10 @@ decryptSecret(
   masterKeyBase64: string
 ): Promise<string>
 
-// Derive a key from a password (for user-controlled keys)
-deriveKeyFromPassword(password: string, saltBase64: string): Promise<CryptoKey>
+// Derive a 256-bit key from a password with PBKDF2-SHA256 (100,000 iterations).
+// Returns the derived key as a base64 string (raw key bytes), not a CryptoKey.
+// Not used by any route today; password hashing lives in apps/api/src/lib/auth.ts.
+deriveKeyFromPassword(password: string, saltBase64: string): Promise<string>
 
 // Generate a random salt
 generateSalt(): string  // base64
@@ -64,6 +66,23 @@ abc123def456==:xyz789uvw012==
 ```
 
 The IV and ciphertext+tag are stored together to enable decryption without separate IV storage.
+There is no separate auth-tag segment: WebCrypto appends the 16-byte GCM tag to the ciphertext, so the
+format has exactly two colon-separated parts.
+
+## Where Values Are Stored
+
+There is a single master key (`ENCRYPTION_MASTER_KEY`) for the whole deployment; there are no per-organisation
+or per-project key-encryption keys. Each secret version has its own random DEK.
+
+| What | Where | Key / column |
+|------|-------|--------------|
+| Encrypted value (`iv:ciphertext`) | KV (`SECRETS_KV`), stored as a plain string | `secret:{secretId}` |
+| Wrapped DEK (`iv:wrappedKey`) | D1 `secrets.wrapped_dek` | per secret |
+| Previous encrypted value | KV | `secrethist:{historyId}` |
+| Previous wrapped DEK | D1 `secret_history.wrapped_dek` | per history row |
+
+Updating a secret value generates a new DEK, writes the old blob to `secrethist:{historyId}`, and records the
+old wrapped DEK in `secret_history`. Renames and flag changes do not re-encrypt.
 
 ## Master Key Setup
 
@@ -84,7 +103,7 @@ wrangler secret put ENCRYPTION_MASTER_KEY
 To rotate the master key:
 1. Generate new master key (see above)
 2. Write a migration script that:
-   a. Fetches all `wrappedDek` values from D1
+   a. Fetches all `wrappedDek` values from D1 (both `secrets.wrapped_dek` and `secret_history.wrapped_dek`)
    b. Decrypts each DEK with old master key
    c. Re-encrypts each DEK with new master key
    d. Updates D1 records with new `wrappedDek`

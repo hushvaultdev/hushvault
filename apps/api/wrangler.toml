@@ -1,35 +1,128 @@
+# HushVault API (Cloudflare Worker)
+#
+# Layout
+#   - Top level  : what `wrangler dev` uses (local D1/KV/DO are simulated; the
+#                  placeholder IDs below are never contacted locally).
+#   - [env.staging]    : deployed with `wrangler deploy --env staging`
+#   - [env.production] : deployed with `wrangler deploy --env production`
+#
+# Bindings (d1_databases, kv_namespaces, durable_objects, vars) and `routes`
+# are NON-INHERITABLE: each [env.*] block below declares its own. Anything not
+# repeated in an env block is not deployed there.
+# https://developers.cloudflare.com/workers/wrangler/environments/
+#
+# Env IDs below are placeholders (top-level ones are unused by local dev). CI (deploy-api.yml) refuses to deploy while any
+# REPLACE_WITH_* string remains in this file. See docs/DEPLOYMENT.md.
+#
+# SECRETS (never put in this file; set per env with
+#   `wrangler secret put <NAME> --env <env>`):
+#   ENCRYPTION_MASTER_KEY               required
+#   JWT_SECRET                          required
+#   GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET   optional (GitHub sign-in)
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET   optional (Google sign-in)
+#   STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET optional
+# Local dev: put them in apps/api/.dev.vars (git-ignored).
+
 name = "hushvault-api"
 main = "src/index.ts"
-compatibility_date = "2025-03-31"
-compatibility_flags = ["nodejs_compat"]
+# No nodejs_compat: src/ uses WebCrypto only (verified by grep + dry-run build).
+compatibility_date = "2026-09-29"
+
+# ---------------------------------------------------------------- local dev --
+[vars]
+ENVIRONMENT = "development"
+WEB_APP_URL = "http://localhost:3000"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "hushvault-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_name = "hushvault-db-local"
+database_id = "local-dev-unused"
+migrations_dir = "migrations"
 
 [[kv_namespaces]]
 binding = "SECRETS_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "local-dev-unused"
 
-[vars]
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiter"]
+
+[observability]
+enabled = true
+
+# ------------------------------------------------------------------ staging --
+[env.staging]
+name = "hushvault-api-staging"
+workers_dev = false
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+WEB_APP_URL = "https://staging.hushvault.dev"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "hushvault-db-staging"
+database_id = "REPLACE_WITH_STAGING_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[env.staging.kv_namespaces]]
+binding = "SECRETS_KV"
+id = "REPLACE_WITH_STAGING_KV_NAMESPACE_ID"
+
+[[env.staging.durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
+# Durable Object migrations are applied per environment (each env is a separate
+# Worker with its own DO namespace); env-level migrations override top-level.
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiter"]
+
+[env.staging.observability]
+enabled = true
+
+# Custom domain: Cloudflare creates the DNS record + certificate on deploy. The
+# zone must be in the same account and the API token needs Zone > Workers
+# Routes > Write for it.
+[[env.staging.routes]]
+pattern = "api-staging.hushvault.dev"
+custom_domain = true
+
+# --------------------------------------------------------------- production --
+[env.production]
+name = "hushvault-api"
+workers_dev = false
+
+[env.production.vars]
 ENVIRONMENT = "production"
+WEB_APP_URL = "https://app.hushvault.dev"
 
-# Production secrets (set via wrangler secret put or Cloudflare dashboard)
-# ENCRYPTION_MASTER_KEY  — 256-bit base64 key
-# JWT_SECRET             — random 64-byte string
-# STRIPE_SECRET_KEY      — sk_live_...
-# STRIPE_WEBHOOK_SECRET  — whsec_...
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "hushvault-db"
+database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
+migrations_dir = "migrations"
 
-[env.dev]
-vars = { ENVIRONMENT = "development" }
+[[env.production.kv_namespaces]]
+binding = "SECRETS_KV"
+id = "REPLACE_WITH_PRODUCTION_KV_NAMESPACE_ID"
 
-# Optionally override these for a dedicated dev preview environment:
-# [[env.dev.d1_databases]]
-# binding = "DB"
-# database_name = "hushvault-db-dev"
-# database_id = "REPLACE_WITH_DEV_D1_DATABASE_ID"
-#
-# [[env.dev.kv_namespaces]]
-# binding = "SECRETS_KV"
-# id = "REPLACE_WITH_DEV_KV_NAMESPACE_ID"
+[[env.production.durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiter"]
+
+[env.production.observability]
+enabled = true
+
+[[env.production.routes]]
+pattern = "api.hushvault.dev"
+custom_domain = true

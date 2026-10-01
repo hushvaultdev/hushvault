@@ -1,210 +1,206 @@
 # Deployment Guide
 
+HushVault's API is a Cloudflare Worker (`apps/api`) with a D1 database, a KV
+namespace and a Durable Object (`RateLimiter`). It has two deployed
+environments, defined in `apps/api/wrangler.toml`:
+
+| Env          | Worker name             | D1                     | Domain (configured)         | Deployed from |
+|--------------|-------------------------|------------------------|-----------------------------|---------------|
+| `staging`    | `hushvault-api-staging` | `hushvault-db-staging` | `api-staging.hushvault.dev` | branch `dev`  |
+| `production` | `hushvault-api`         | `hushvault-db`         | `api.hushvault.dev`         | branch `main` |
+
+Top-level config is what `wrangler dev` uses (local simulated D1/KV/DO).
+Wrangler bindings, `vars` and `routes` are **non-inheritable**, so each env block
+declares its own; a block that omits them deploys without them
+(<https://developers.cloudflare.com/workers/wrangler/environments/>).
+
+Runbook for backups, key loss, incidents and monitoring: [OPERATIONS.md](OPERATIONS.md).
+
 ## Prerequisites
 
-- Cloudflare account (free tier sufficient)
-- `wrangler` CLI: `npm install -g wrangler`
-- `pnpm` installed: `npm install -g pnpm`
-- Wrangler authenticated: `wrangler login`
+- Cloudflare account and a zone for `hushvault.dev` in that account (for custom domains).
+- Node 22 and pnpm (`corepack enable`), then `pnpm install` at the repo root.
+- Locally, authenticate with `pnpm --filter @hushvault/api exec wrangler login`
+  (CI uses an API token instead, see below).
 
-## First-Time Setup
+All commands below run from `apps/api` unless noted; `wrangler` means
+`pnpm exec wrangler`.
 
-### 1. Create D1 Database
+## First-time setup checklist
+
+### 1. Create the Cloudflare resources (twice: staging and production)
+
 ```bash
+wrangler d1 create hushvault-db-staging
 wrangler d1 create hushvault-db
-```
-Copy the `database_id` from output. Update `apps/api/wrangler.toml`:
-```toml
-[[d1_databases]]
-binding = "DB"
-database_name = "hushvault-db"
-database_id = "PASTE_ID_HERE"
+wrangler kv namespace create hushvault-secrets-staging
+wrangler kv namespace create hushvault-secrets
 ```
 
-### 2. Create KV Namespace
-```bash
-wrangler kv:namespace create SECRETS_KV
-```
-Copy the `id`. Update `apps/api/wrangler.toml`:
-```toml
-[[kv_namespaces]]
-binding = "SECRETS_KV"
-id = "PASTE_ID_HERE"
-```
+Copy each returned `database_id` / KV `id` into `apps/api/wrangler.toml`,
+replacing the matching `REPLACE_WITH_*` value in `[env.staging]` /
+`[env.production]`. The top-level (local dev) IDs are already the non-placeholder
+`local-dev-unused`; wrangler dev never contacts them. CI refuses to deploy while
+**any** `REPLACE_WITH` string remains in the file.
 
-### 3. Generate and Set Secrets
-```bash
-# Generate master key
-node -e "const k = new Uint8Array(32); crypto.getRandomValues(k); console.log(Buffer.from(k).toString('base64'))"
+Never let staging and production share a D1 or KV id.
 
-# Set in Wrangler
-wrangler secret put ENCRYPTION_MASTER_KEY   # paste generated key
-wrangler secret put JWT_SECRET              # generate another random string
-```
-
-### 4. Run Initial Migrations
-```bash
-cd apps/api
-
-# Apply all migrations in order
-wrangler d1 execute hushvault-db --file=migrations/0001_initial_schema.sql
-```
-
-### 5. Deploy API
-```bash
-cd apps/api
-wrangler deploy
-```
-
-### 6. Deploy Dashboard (Cloudflare Pages)
-Connect `hushvaultdev/hushvault` repo to Cloudflare Pages:
-- Build command: `pnpm --filter @hushvault/web build`
-- Output directory: `apps/web/.next`
-- Root directory: `/` (repo root)
-
----
-
-## Routine Deployments
+### 2. Set secrets (per environment)
 
 ```bash
-# From repo root:
-cd apps/api && wrangler deploy
+# 32 random bytes, base64: the envelope-encryption master key (KEK)
+openssl rand -base64 32          # -> paste into ENCRYPTION_MASTER_KEY
+# 64 random bytes, base64: JWT signing secret
+openssl rand -base64 64 | tr -d '\n'   # -> paste into JWT_SECRET
+
+wrangler secret put ENCRYPTION_MASTER_KEY --env staging
+wrangler secret put JWT_SECRET            --env staging
+# repeat with DIFFERENT values for --env production
 ```
 
-GitHub Actions handles this automatically on push to `main` (see `.github/workflows/deploy-api.yml`).
+Use different values per environment. **Back up the production
+`ENCRYPTION_MASTER_KEY` offline before the first real secret is stored**
+(see OPERATIONS.md: losing it makes all stored secrets unrecoverable).
 
-## Beta / Dev Branch Deployment
+Optional secrets (the OAuth routes return 503 until set):
+`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`.
 
-The `dev` branch is configured as the beta preview path.
+Secrets can only be set on a Worker that exists. If `wrangler secret put` reports
+the Worker does not exist yet, deploy once first (step 5) and then set secrets.
+(Not verified against current docs; `wrangler secret put` may also offer to create it.)
 
-- `dev` branch pushes should deploy the API using `wrangler deploy --env dev`.
-- On Cloudflare Pages, map the `dev` branch to the beta preview site and attach the `beta.hush*` custom domain.
-- Use the `N4K4R` Cloudflare account for both the worker and Pages projects.
-- The `main` branch remains the production deployment path with the full custom domain.
+Local development: copy the names into `apps/api/.dev.vars` (git-ignored).
 
-This gives you a real beta channel for `dev`, while `main` continues to drive the full production rollout.
+### 3. OAuth apps
 
----
+Create one OAuth app per provider per environment.
 
-## GitHub Secret Scanning Partner Registration (Manual)
+| Provider | Redirect / callback URL                                     |
+|----------|-------------------------------------------------------------|
+| GitHub   | `https://<api-host>/api/auth/github/callback`               |
+| Google   | `https://<api-host>/api/auth/google/callback`               |
 
-The `POST /api/integrations/secret-scanner/github` callback is live, but GitHub
-only calls it once HushVault is registered with the GitHub Secret Scanning
-Partner Program. This step is manual and cannot be automated — it requires
-out-of-band coordination with GitHub.
+`<api-host>` is `api.hushvault.dev` (production) or `api-staging.hushvault.dev`
+(staging). Put the client id/secret in the secrets from step 2.
 
-One-time action items:
+### 4. Web app URL, CORS and domains
 
-1. Email GitHub from `security@hushvault.dev` to join the partner program
-   (free): https://docs.github.com/code-security/secret-scanning/secret-scanning-partner-program
-2. Register the token pattern `hv_live_[A-Za-z0-9_-]{43}` (the `hv_live_` prefix
-   plus the base64url-encoded 32 random bytes minted by `createApiKey`).
-3. Provide the callback URL: `https://api.hushvault.dev/api/integrations/secret-scanner/github`
-4. GitHub publishes the ECDSA P-256 signing keys at
-   `https://api.github.com/meta/public_keys/secret_scanning`; the callback fetches
-   and verifies against these automatically — no secret to store on our side.
+- `WEB_APP_URL` (a plain var in `wrangler.toml`) is the post-login redirect target.
+  It is preset to `https://app.hushvault.dev` (production) and
+  `https://staging.hushvault.dev` (staging); change it if your dashboard lives elsewhere.
+- CORS is a hard-coded allow-list in `apps/api/src/index.ts`
+  (`hushvault.dev`, `app.hushvault.dev`, `beta.hushvault.dev`, localhost). A new web
+  origin (including the staging dashboard URL) must be added there; that is a code change.
+- Custom domains are declared with `[[env.*.routes]] custom_domain = true`. On deploy
+  Cloudflare creates the DNS record and certificate; the zone must be in the
+  account and the API token needs *Zone > Workers Routes > Write* for it
+  (<https://developers.cloudflare.com/workers/configuration/routing/custom-domains/>,
+  <https://developers.cloudflare.com/workers/authorization/workers/>).
+  If a hostname already has a conflicting DNS record, delete it first.
+  Don't want custom domains yet? Delete the `routes` blocks and set `workers_dev = true`.
 
-Until registration completes, the endpoint simply receives no traffic. No
-deploy-time secret or binding is required for this feature.
+### 5. First deploy and migrations (manual, once)
 
----
-
-## Secret Rotation Schedule
-
-| Secret | Rotate Every | Method |
-|--------|-------------|--------|
-| `ENCRYPTION_MASTER_KEY` | 12 months | See ENCRYPTION.md — requires re-wrapping DEKs |
-| `JWT_SECRET` | 6 months | `wrangler secret put JWT_SECRET` — invalidates all sessions |
-| `STRIPE_SECRET_KEY` | 12 months | Rotate in Stripe dashboard, then `wrangler secret put` |
-| `STRIPE_WEBHOOK_SECRET` | When rotating Stripe key | Same process |
-
-## Rotating JWT_SECRET
-
-1. Generate new secret
-2. `wrangler secret put JWT_SECRET`
-3. Deploy
-4. All existing JWTs are immediately invalidated — users must log in again
-
-## Rate Limiting & Abuse Prevention
-
-Defence is layered. The Worker enforces per-IP limits in code (see
-`apps/api/src/middleware/rate-limit.ts`); Cloudflare's WAF should enforce a
-coarser perimeter layer **before** requests reach the Worker.
-
-### Worker-enforced limits (already in code)
-
-| Scope | Route(s) | Limit (per IP) |
-|-------|----------|----------------|
-| `auth-login` | `POST /api/auth/login` | 10 / min |
-| `auth-register` | `POST /api/auth/register` | 5 / min |
-| `auth-oauth` | `GET /api/auth/{github,google}{,/callback}` | 20 / min |
-| `share-access` | `GET /api/share/:token` | 20 / min |
-| `secret-read` | `GET /api/secrets`, `GET /api/secrets/:name` | 120 / min |
-| `secret-write` | `POST/PATCH/DELETE /api/secrets` | 60 / min |
-| `global-api` | all `/api/*` (safety net) | 600 / min |
-
-Rate-limited responses carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`
-(CORS preflight `OPTIONS` requests are skipped, so they do not); `429`s add
-`Retry-After` (seconds) and a JSON body
-`{ "error": "RATE_LIMIT_EXCEEDED", "message": "...", "resetAt": "..." }`.
-
-### Cloudflare WAF rules (configure in the dashboard before launch)
-
-These run globally before the Worker executes. Configure under
-**Security → WAF → Rate limiting rules**:
-
-```
-Rule 1 — Login:    (http.request.uri.path eq "/api/auth/login")
-                   → 5 req / IP / min, action: 429 (Retry-After: 60)
-Rule 2 — Register: (http.request.uri.path eq "/api/auth/register")
-                   → 3 req / IP / 10 min
-Rule 3 — Share:    (http.request.uri.path matches "^/api/share/")
-                   → 20 req / IP / min
-Rule 4 — Auth bot: (http.request.uri.path matches "^/api/auth/")
-                   → Turnstile / JS challenge (managed challenge)
-```
-
-## Monitoring
-
-After each deployment, verify:
 ```bash
-curl https://api.hushvault.dev/health
-# Expected: {"status":"ok"}
+pnpm db:migrate:staging                  # wrangler d1 migrations apply DB --remote --env staging
+pnpm deploy:staging                      # wrangler deploy --env staging
+curl -i https://api-staging.hushvault.dev/health
 ```
+
+Repeat with `:production`. The first deploy of each env runs the Durable Object
+migration `v1` (`new_sqlite_classes = ["RateLimiter"]`). New Durable Object
+classes must be SQLite-backed
+(<https://developers.cloudflare.com/changelog/post/2026-07-09-restrict-new-kv-backed-namespaces/>).
+Each env has its own migration entry and its own Worker, hence its own DO namespace;
+each migration tag is applied once per environment
+(<https://developers.cloudflare.com/durable-objects/reference/durable-object-class-migrations-legacy/>).
+
+`/health` runs `SELECT 1` against D1 and returns 503 when the DB is unreachable.
+
+### 6. GitHub configuration (CI/CD)
+
+Settings > Environments: create `staging` and `production`.
+
+For **each** environment add:
+
+- Secret `CLOUDFLARE_API_TOKEN`: an account API token. The Cloudflare Workers
+  GitHub Actions guide says to start from the **Edit Cloudflare Workers** template
+  and scope it to the one account
+  (<https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/>).
+  The pipeline also runs `wrangler d1 migrations apply`, so the token additionally
+  needs D1 edit permission, and Zone > Workers Routes > Write if routes are
+  deployed. *Exact permission names for D1 were not verified in the docs; test on
+  staging first.* Use a separate token per environment.
+- Secret `CLOUDFLARE_ACCOUNT_ID`.
+- Variable `API_BASE_URL` (not a secret), e.g. `https://api.hushvault.dev`; used by the post-deploy smoke test.
+
+On `production` also enable **Required reviewers** (and optionally restrict
+deployment branches to `main`). This cannot be configured from the repo; without
+it production deploys run unattended right after CI passes.
+
+## How CI/CD works
+
+`.github/workflows/deploy-api.yml`:
+
+1. **Pull request touching `apps/api/**` or `packages/shared/**`**: `wrangler deploy --dry-run`
+   for both envs (bundles the Worker and validates config; no credentials, no deploy).
+2. **Push to `main` / `dev`**: the `CI` workflow runs. When it completes
+   successfully, `deploy-api.yml` is triggered via `workflow_run` and:
+   1. checks out the exact commit CI tested (`workflow_run.head_sha`);
+   2. skips if that commit is no longer the branch tip (a newer run will deploy);
+   3. installs with a frozen lockfile;
+   4. **fails if `apps/api/wrangler.toml` still contains `REPLACE_WITH`**;
+   5. fails if the env's token/account/`API_BASE_URL` are missing;
+   6. `wrangler d1 migrations apply DB --remote --env <env>`;
+   7. `wrangler deploy --env <env>`;
+   8. smoke test: `GET $API_BASE_URL/health` must return 200 (12 tries, 10 s apart), otherwise the job fails.
+   Deploys are serialized per environment (`concurrency`, no cancellation).
+   `main` maps to `production`, `dev` to `staging`.
+
+Why `workflow_run`: a plain `push` trigger would race CI and deploy untested code.
+Caveats: `workflow_run` always uses the workflow file from the default branch, so
+edits to `deploy-api.yml` take effect once merged to `main`; only `push` events from
+this repository deploy (forks are excluded).
+
+Migrations run *before* the new code is deployed. Keep every migration
+backward compatible with the currently running code (add columns/tables first;
+remove or rename in a later release).
+Migration files `0001`-`0003` and `0005` use plain `ALTER TABLE`; that is fine
+because wrangler tracks applied migrations in the `d1_migrations` table and never
+re-runs one. Do not edit applied migration files; add a new `NNNN_*.sql`.
+`wrangler d1 migrations apply` captures a backup before applying and, in CI
+(non-interactive), skips the confirmation prompt
+(`wrangler d1 migrations apply --help`, wrangler 4.92.0).
+
+Package scripts (`apps/api/package.json`): `db:migrate` / `db:migrate:local`
+(local), `db:migrate:staging|production`, `db:migrations:list:staging|production`,
+`deploy:dry-run`, `deploy:staging|production`.
 
 ## Rollback
 
+Worker code:
+
 ```bash
-wrangler rollback
+wrangler deployments list --env production   # find a good version
+wrangler rollback [VERSION_ID] --env production --message "reason"
 ```
 
-This reverts to the previous Worker version. Does NOT rollback D1 migrations.
-For D1 rollback, write a compensating migration.
+`wrangler rollback` creates a new deployment of an earlier version, live
+immediately on all routes/domains; only the 100 most recent versions are available.
+It is refused if a Durable Object class lifecycle change happened between the two
+versions, or if a bound KV/R2/queue no longer exists
+(<https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/>,
+<https://developers.cloudflare.com/workers/wrangler/commands/workers/>).
 
----
+**Rollback does not revert D1 migrations.** Because migrations are additive and run
+before deploy, the previous code normally still works against the new schema. If a
+migration itself was destructive or wrong, restore with D1 Time Travel
+(see OPERATIONS.md) or ship a corrective forward migration.
 
-## Local Development
+## Verifying a deploy
 
 ```bash
-# Install deps
-pnpm install
-
-# Set local secrets (git-ignored)
-cat > apps/api/.dev.vars << 'EOF'
-ENCRYPTION_MASTER_KEY=YOUR_LOCAL_TEST_KEY
-JWT_SECRET=local-dev-secret
-ENVIRONMENT=development
-EOF
-
-# Start API locally
-cd apps/api && wrangler dev
-
-# Start dashboard locally
-cd apps/web && pnpm dev
-```
-
-CLI can be tested against local API:
-```bash
-cd apps/cli
-HUSHVAULT_API_URL=http://localhost:8787 node dist/index.js --help
+curl -fsS https://api.hushvault.dev/health
+wrangler tail --env production          # live logs
 ```

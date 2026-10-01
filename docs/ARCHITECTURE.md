@@ -5,16 +5,17 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    CLIENTS                               │
-│  CLI (npm: hushvault)  │  Dashboard (Next.js)  │  CI/CD  │
+│  CLI (apps/cli)         │  Dashboard (Next.js)  │  CI/CD  │
 │  OS Keychain (keytar)  │  Browser session       │  GH Action │
 └──────────────┬─────────────────────────────────────────┘
                │ HTTPS
                ▼
 ┌─────────────────────────────────────────────────────────┐
 │              HONO API (Cloudflare Workers)               │
-│  Auth middleware (JWT)                                   │
+│  Auth middleware (JWT or API key) + per-IP rate limits   │
 │  /api/auth     /api/projects    /api/environments        │
-│  /api/secrets  /api/share                                │
+│  /api/secrets  /api/share       /api/audit               │
+│  /api/integrations/secret-scanner     /health            │
 └──────┬───────────────────────────┬──────────────────────┘
        │                           │
        ▼                           ▼
@@ -23,10 +24,10 @@
 │    D1       │           │   (SECRETS_KV)       │
 │  (metadata) │           │  Encrypted blobs     │
 │  - users    │           │  key: secret:{id}    │
-│  - projects │           │  val: {              │
-│  - envs     │           │    encryptedValue,   │
-│  - secrets  │           │    wrappedDek        │
-│    (no val) │           │  }                   │
+│  - projects │           │  val: iv:ciphertext  │
+│  - envs     │           │  (base64, plain str) │
+│  - secrets  │           │  history key:        │
+│    (no val) │           │  secrethist:{histId} │
 │  - audit    │           └─────────────────────┘
 └─────────────┘
 ```
@@ -45,8 +46,9 @@ Data Encryption Key (DEK, random per secret, AES-256)
 Secret Value (plaintext)
 ```
 
-- `wrappedDek` stored in D1 (alongside secret metadata)
-- `encryptedValue` stored in KV
+- `wrappedDek` stored in D1 (alongside secret metadata; superseded ones in `secret_history`)
+- `encryptedValue` stored in KV as a plain `base64(iv):base64(ciphertext+tag)` string under `secret:{id}` (superseded values under `secrethist:{historyId}`)
+- One master key for the whole deployment (no per-organisation keys)
 - Master key lives in Cloudflare Worker secrets (never in code or D1)
 - To rotate master key: re-encrypt all DEKs with new master key (no re-encryption of values needed)
 
@@ -63,55 +65,46 @@ base (id: env_base)
 ```
 
 Resolution at `GET /api/environments/:id/resolved`:
-1. Walk tree from current env to root, collecting all secrets
-2. Child values override parent values for the same key
-3. Return merged map
+1. Walk tree from current env to root (same project only; max depth 10, cycles rejected with 422)
+2. Child values override parent values for the same name
+3. Return the merged list (with `?values=true`, decrypted and computed values are included)
 
 ## Computed Secrets
 
-Stored with `isComputed = true`, `template = "${DB_USER}:${DB_PASS}@host"`, `dependencies = ["DB_USER", "DB_PASS"]`.
+Stored with `is_computed = true` and `template = "${DB_USER}:${DB_PASS}@host"`.
 
-Resolution: fetch all dependency secrets, substitute `${KEY}` placeholders.
-Executed client-side (CLI) to preserve zero-knowledge property.
+Resolution happens server-side in the Worker (`apps/api/src/lib/resolve.ts`) when `/resolved?values=true`
+is requested: each `${NAME}` placeholder is substituted from the resolved (inherited) set. The server decrypts
+secret values to do this, so secrets are not zero-knowledge with respect to the server. Circular, missing,
+invalid or oversized references return 422 `COMPUTED_SECRET_ERROR`.
 
 ## Zero-Knowledge Share Links
 
 ```
 Client generates:  shareKey = random AES-256 key
-Encrypts value with shareKey → ciphertext
-Sends to API:      POST /api/share { ciphertext }
-API stores:        ciphertext in D1, returns slug
-URL returned:      https://hushvault.dev/share/{slug}#{base64(shareKey)}
+Encrypts value with shareKey → base64url(iv || ciphertext+tag)
+Sends to API:      POST /api/share { encryptedPayload, expiresAt?, maxViews? }
+API stores:        encryptedPayload in D1 (share_links), returns { token, url }
+URL returned:      {url}#{base64url(shareKey)}  (the client appends the fragment)
 
 Recipient opens URL:
   1. Fragment never sent to server
   2. Browser JS extracts shareKey from fragment
-  3. Fetches ciphertext from API using slug
+  3. Fetches ciphertext from GET /api/share/{token}
   4. Decrypts locally with shareKey
 ```
 
 ## API Routes
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | /api/auth/login | No | Email/password → JWT |
-| POST | /api/auth/register | No | Create account |
-| GET | /api/projects | JWT | List user's projects |
-| POST | /api/projects | JWT | Create project |
-| GET | /api/projects/:id/environments | JWT | List environments |
-| GET | /api/environments/:id/secrets | JWT | List secret keys (no values) |
-| GET | /api/environments/:id/resolved | JWT | Resolved secrets map (with values) |
-| POST | /api/secrets | JWT | Create secret |
-| PUT | /api/secrets/:id | JWT | Update secret value |
-| DELETE | /api/secrets/:id | JWT | Delete secret |
-| POST | /api/share | JWT | Create share link |
-| GET | /api/share/:slug | No | Fetch encrypted share payload |
+See [API.md](API.md) for the complete, code-derived reference (methods, roles, bodies, errors, rate limits).
+Mounted prefixes: `/api/auth`, `/api/projects`, `/api/environments`, `/api/secrets`, `/api/share`,
+`/api/audit`, `/api/integrations/secret-scanner`, and `/health`.
 
 ## Data Flow: CLI `hushvault run -- npm dev`
 
 1. CLI reads `.hushvault.json` (project config, walks up dirs)
-2. Gets JWT from OS keychain (node-keytar)
-3. `GET /api/environments/{envId}/resolved` → encrypted secret map
-4. Decrypts each secret value locally
-5. Merges with `process.env`
+2. Gets the token from `HUSHVAULT_TOKEN`, else the OS keychain (node-keytar)
+3. Resolves the environment (id, slug or name) via `GET /api/environments?projectId=...`
+4. `GET /api/environments/{envId}/resolved?values=true` returns plaintext values over HTTPS (inheritance and computed secrets already applied; decrypted by the API, not the CLI)
+5. Merges with `process.env` (unless `--no-inherit`)
 6. Spawns child process with merged env

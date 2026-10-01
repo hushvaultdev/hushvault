@@ -1,32 +1,164 @@
 name: Deploy API
 
+# Two entry points:
+#
+# 1. pull_request touching the API: bundle validation only (`wrangler deploy
+#    --dry-run`). Needs no Cloudflare credentials and gets none.
+#
+# 2. workflow_run of the "CI" workflow: deploys only after CI finished
+#    successfully for a push to main (production) or dev (staging).
+#    Why workflow_run instead of a bare `push` trigger: a push trigger runs in
+#    parallel with CI and would deploy code CI has not approved. Why not fold
+#    deploy into ci.yml as a `needs:` job: ci.yml is owned elsewhere, and a
+#    separate file keeps the Cloudflare secrets out of the PR-facing workflow.
+#    workflow_run gotchas handled below:
+#      - it always runs the workflow file from the DEFAULT branch, so changes
+#        to this file only take effect once merged to main;
+#      - the default checkout would be the default branch, so we check out
+#        `workflow_run.head_sha` explicitly (the exact commit CI tested);
+#      - we require `event == 'push'` so a fork PR from a branch named "main"
+#        can never trigger a deploy;
+#      - a slow older CI run must not overwrite a newer deploy, so we skip if
+#        head_sha is no longer the branch tip.
+
 on:
-  push:
-    branches: [main, dev]
+  pull_request:
     paths:
       - 'apps/api/**'
       - 'packages/shared/**'
+      - '.github/workflows/deploy-api.yml'
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+
+permissions:
+  contents: read
 
 jobs:
-  deploy:
-    name: Deploy to Cloudflare Workers
+  validate:
+    name: Validate bundle (dry run)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      GITHUB_REF_NAME: ${{ github.ref_name }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
-      - run: pnpm install
-      - name: Deploy API
+      - run: pnpm install --frozen-lockfile
+      # --dry-run bundles and checks the config without any API call, so it
+      # works with no credentials. Placeholder IDs are expected on PRs.
+      - name: Dry-run deploy (staging config)
+        run: pnpm --filter @hushvault/api exec wrangler deploy --dry-run --env staging --outdir "$RUNNER_TEMP/bundle-staging"
+      - name: Dry-run deploy (production config)
+        run: pnpm --filter @hushvault/api exec wrangler deploy --dry-run --env production --outdir "$RUNNER_TEMP/bundle-production"
+
+  deploy:
+    name: Deploy (${{ github.event.workflow_run.head_branch == 'main' && 'production' || 'staging' }})
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'dev')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # `production` is a GitHub Environment: enable "Required reviewers" on it
+    # (Settings > Environments) to gate production deploys on a human approval.
+    # Environment-scoped secrets/variables below resolve per environment.
+    environment: ${{ github.event.workflow_run.head_branch == 'main' && 'production' || 'staging' }}
+    # One deploy per environment at a time; never cancel a deploy mid-flight
+    # (a half-applied migration/deploy is worse than waiting).
+    concurrency:
+      group: deploy-api-${{ github.event.workflow_run.head_branch == 'main' && 'production' || 'staging' }}
+      cancel-in-progress: false
+    env:
+      DEPLOY_ENV: ${{ github.event.workflow_run.head_branch == 'main' && 'production' || 'staging' }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Skip if a newer commit exists on the branch
+        id: tip
         run: |
-          if [ "$GITHUB_REF_NAME" = "dev" ]; then
-            pnpm --dir apps/api exec wrangler deploy --env dev
-          else
-            pnpm --dir apps/api exec wrangler deploy
+          tip="$(git ls-remote origin "refs/heads/${HEAD_BRANCH}" | cut -f1)"
+          if [ "$tip" != "$HEAD_SHA" ]; then
+            echo "::warning::${HEAD_SHA} is no longer the tip of ${HEAD_BRANCH} (${tip}); a newer CI run will deploy. Skipping."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - uses: pnpm/action-setup@v5
+        if: steps.tip.outputs.stale != 'true'
+      - uses: actions/setup-node@v5
+        if: steps.tip.outputs.stale != 'true'
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: Install
+        if: steps.tip.outputs.stale != 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Refuse to deploy with placeholder IDs
+        if: steps.tip.outputs.stale != 'true'
+        run: |
+          if grep -n 'REPLACE_WITH' apps/api/wrangler.toml; then
+            echo "::error file=apps/api/wrangler.toml::wrangler.toml still contains REPLACE_WITH_* placeholders. Create the D1/KV resources and paste their IDs (docs/DEPLOYMENT.md)."
+            exit 1
+          fi
+
+      - name: Check required deploy settings
+        if: steps.tip.outputs.stale != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          missing=0
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID API_BASE_URL; do
+            if [ -z "${!v}" ]; then
+              echo "::error::${v} is not set for GitHub Environment '${DEPLOY_ENV}' (secret or variable)."
+              missing=1
+            fi
+          done
+          exit $missing
+
+      # Migrations run BEFORE the code deploy, so every migration must stay
+      # compatible with the previously deployed code (additive changes first).
+      # wrangler captures a D1 backup automatically before applying.
+      - name: Apply D1 migrations
+        if: steps.tip.outputs.stale != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm --filter @hushvault/api exec wrangler d1 migrations apply DB --remote --env "$DEPLOY_ENV"
+
+      - name: Deploy Worker
+        if: steps.tip.outputs.stale != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm --filter @hushvault/api exec wrangler deploy --env "$DEPLOY_ENV"
+
+      - name: Smoke test /health
+        if: steps.tip.outputs.stale != 'true'
+        env:
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          url="${API_BASE_URL%/}/health"
+          # New custom domains can take a short while to resolve/issue certs.
+          for i in $(seq 1 12); do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)"
+            echo "attempt ${i}: GET ${url} -> ${code}"
+            if [ "$code" = "200" ]; then
+              echo "Smoke test passed."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Smoke test FAILED: ${url} did not return 200. Investigate, or roll back: wrangler rollback --env ${DEPLOY_ENV} (docs/DEPLOYMENT.md)."
+          exit 1

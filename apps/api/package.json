@@ -8,9 +8,15 @@
     "build": "tsc --noEmit",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
-    "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply hushvault-db",
-    "db:migrate:local": "wrangler d1 migrations apply hushvault-db --local"
+    "deploy:dry-run": "wrangler deploy --dry-run --env staging --outdir .wrangler/dry-run",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:staging": "wrangler d1 migrations apply DB --remote --env staging",
+    "db:migrate:production": "wrangler d1 migrations apply DB --remote --env production",
+    "db:migrations:list:staging": "wrangler d1 migrations list DB --remote --env staging",
+    "db:migrations:list:production": "wrangler d1 migrations list DB --remote --env production"
   },
   "dependencies": {
     "hono": "^4.7.0",
