@@ -1,0 +1,7 @@
+.next
+.open-next
+.wrangler
+.dev.vars
+.env.local
+.env*.local
+cloudflare-env.d.ts

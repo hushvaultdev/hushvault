@@ -1,0 +1,107 @@
+name: Deploy Web
+
+# Production deploys run only after the CI workflow succeeded on main, against the
+# exact commit CI validated (head_sha). Manual runs can target staging or production.
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'GitHub Environment / Worker to deploy'
+        type: choice
+        options: [staging, production]
+        default: staging
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - 'apps/web/**'
+      - 'packages/shared/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/deploy-web.yml'
+
+# No default token permissions; each job grants only what it needs.
+permissions: {}
+
+jobs:
+  # PR check: prove the OpenNext bundle builds. No credentials, no deploy.
+  build-check:
+    name: OpenNext build (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Build with the OpenNext adapter
+        env:
+          NEXT_PUBLIC_API_URL: https://api.example.invalid
+        run: pnpm --filter @hushvault/web exec opennextjs-cloudflare build
+      - name: Verify bundle output
+        run: |
+          test -f apps/web/.open-next/worker.js
+          test -d apps/web/.open-next/assets
+
+  deploy:
+    name: Deploy to Cloudflare Workers
+    # workflow_run: only when CI passed for a push to main. Manual: always allowed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+    permissions:
+      contents: read
+    concurrency:
+      group: deploy-web-${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Inlined into the client bundle at build time (not a wrangler var).
+      NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+      DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}
+      WEB_URL: ${{ vars.WEB_URL }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # workflow_run checks out the default branch by default; pin to the CI-tested commit.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Require build configuration
+        run: |
+          test -n "$NEXT_PUBLIC_API_URL" || { echo "::error::Set the NEXT_PUBLIC_API_URL variable on the '$DEPLOY_ENV' environment"; exit 1; }
+          test -n "$WEB_URL" || { echo "::error::Set the WEB_URL variable on the '$DEPLOY_ENV' environment"; exit 1; }
+      - name: Build (OpenNext)
+        run: pnpm --filter @hushvault/web exec opennextjs-cloudflare build
+      - name: Deploy
+        run: pnpm --filter @hushvault/web exec opennextjs-cloudflare deploy --env "$DEPLOY_ENV"
+      - name: Smoke test
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$WEB_URL/sign-in" || true)
+            echo "attempt $i: HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "::error::Smoke test failed for $WEB_URL/sign-in"
+          exit 1
