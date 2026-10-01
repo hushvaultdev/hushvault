@@ -61,7 +61,7 @@ describe('share links', () => {
     expect((await b.create()).body.data.url).toMatch(/^http:\/\/localhost:3000\/share\/tok_/)
 
     const c = await setup({ ENVIRONMENT: 'production' })
-    expect((await c.create()).body.data.url).toMatch(/^https:\/\/hushvault\.dev\/share\/tok_/)
+    expect((await c.create()).body.data.url).toMatch(/^https:\/\/hushvault\.com\/share\/tok_/)
   })
 
   it('validates expiresAt: future and at most 7 days', async () => {

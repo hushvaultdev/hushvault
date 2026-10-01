@@ -10,7 +10,9 @@
     "lint": "next lint",
     "build:cf": "opennextjs-cloudflare build",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "verify": "pnpm run type-check && pnpm run lint",
+    "deploy:dev": "opennextjs-cloudflare deploy --env dev",
+    "deploy:production": "opennextjs-cloudflare deploy --env production",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   },
   "dependencies": {

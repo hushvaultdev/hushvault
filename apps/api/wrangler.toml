@@ -1,21 +1,25 @@
 # HushVault API (Cloudflare Worker)
 #
 # Layout
-#   - Top level  : what `wrangler dev` uses (local D1/KV/DO are simulated; the
-#                  placeholder IDs below are never contacted locally).
-#   - [env.staging]    : deployed with `wrangler deploy --env staging`
+#   - Top level        : what `wrangler dev` uses (local D1/KV/DO are simulated;
+#                        the "local-dev-unused" IDs are never contacted locally).
+#   - [env.dev]        : deployed with `wrangler deploy --env dev`
 #   - [env.production] : deployed with `wrangler deploy --env production`
+#
+# Deploys run on Cloudflare Workers Builds (no GitHub/GitLab CI minutes): one
+# Worker per environment, each connected to this repo. See docs/DEPLOYMENT.md.
 #
 # Bindings (d1_databases, kv_namespaces, durable_objects, vars) and `routes`
 # are NON-INHERITABLE: each [env.*] block below declares its own. Anything not
 # repeated in an env block is not deployed there.
 # https://developers.cloudflare.com/workers/wrangler/environments/
 #
-# Env IDs below are placeholders (top-level ones are unused by local dev). CI (deploy-api.yml) refuses to deploy while any
-# REPLACE_WITH_* string remains in this file. See docs/DEPLOYMENT.md.
+# Resource IDs below are identifiers, not credentials. Created 2026-10-01
+# (tracked in GitHub issue #21).
 #
 # SECRETS (never put in this file; set per env with
-#   `wrangler secret put <NAME> --env <env>`):
+#   `wrangler secret put <NAME> --env <env>` or in the dashboard under
+#   Settings > Variables & Secrets):
 #   ENCRYPTION_MASTER_KEY               required
 #   JWT_SECRET                          required
 #   GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET   optional (GitHub sign-in)
@@ -54,43 +58,48 @@ new_sqlite_classes = ["RateLimiter"]
 [observability]
 enabled = true
 
-# ------------------------------------------------------------------ staging --
-[env.staging]
-name = "hushvault-api-staging"
-workers_dev = false
+# ---------------------------------------------------------------------- dev --
+# Worker name resolves to `hushvault-api-dev` (set explicitly so the dashboard
+# Worker name always matches this file, which Workers Builds requires).
+[env.dev]
+name = "hushvault-api-dev"
+# Keep the *.workers.dev URL as a fallback while the custom domain is set up.
+workers_dev = true
 
-[env.staging.vars]
-ENVIRONMENT = "staging"
-WEB_APP_URL = "https://staging.hushvault.dev"
+[env.dev.vars]
+ENVIRONMENT = "development"
+# Used for OAuth redirects, share-link URLs and as an allowed CORS origin.
+WEB_APP_URL = "https://beta.hushvault.com"
 
-[[env.staging.d1_databases]]
+[[env.dev.d1_databases]]
 binding = "DB"
-database_name = "hushvault-db-staging"
-database_id = "REPLACE_WITH_STAGING_D1_DATABASE_ID"
+database_name = "hushvault-db-dev"
+database_id = "3bab0adc-c28b-474f-8e39-810657ecae0b"
 migrations_dir = "migrations"
 
-[[env.staging.kv_namespaces]]
+[[env.dev.kv_namespaces]]
 binding = "SECRETS_KV"
-id = "REPLACE_WITH_STAGING_KV_NAMESPACE_ID"
+id = "1b201413240a4b1583d06d135d0c5ee9"
 
-[[env.staging.durable_objects.bindings]]
+[[env.dev.durable_objects.bindings]]
 name = "RATE_LIMITER"
 class_name = "RateLimiter"
 
 # Durable Object migrations are applied per environment (each env is a separate
 # Worker with its own DO namespace); env-level migrations override top-level.
-[[env.staging.migrations]]
+[[env.dev.migrations]]
 tag = "v1"
 new_sqlite_classes = ["RateLimiter"]
 
-[env.staging.observability]
+[env.dev.observability]
 enabled = true
 
-# Custom domain: Cloudflare creates the DNS record + certificate on deploy. The
-# zone must be in the same account and the API token needs Zone > Workers
-# Routes > Write for it.
-[[env.staging.routes]]
-pattern = "api-staging.hushvault.dev"
+# Single-level subdomain on purpose: I believe Cloudflare's free universal
+# certificate covers only one subdomain level (api.beta.hushvault.com could need
+# a paid certificate) — unverified, please check. The zone must be in the same
+# account and the deploy token needs Zone > Workers Routes > Edit.
+[[env.dev.routes]]
+pattern = "api-beta.hushvault.com"
 custom_domain = true
 
 # --------------------------------------------------------------- production --
@@ -100,17 +109,17 @@ workers_dev = false
 
 [env.production.vars]
 ENVIRONMENT = "production"
-WEB_APP_URL = "https://app.hushvault.dev"
+WEB_APP_URL = "https://hushvault.com"
 
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "hushvault-db"
-database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
+database_id = "f160554b-5c2e-4cdd-89e3-7f4315ce351c"
 migrations_dir = "migrations"
 
 [[env.production.kv_namespaces]]
 binding = "SECRETS_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_NAMESPACE_ID"
+id = "51f1ef71e8c540509a782c858fb025e8"
 
 [[env.production.durable_objects.bindings]]
 name = "RATE_LIMITER"
@@ -123,6 +132,10 @@ new_sqlite_classes = ["RateLimiter"]
 [env.production.observability]
 enabled = true
 
+# Custom domain: Cloudflare creates the DNS record + certificate on deploy. The
+# zone must be in the same account and the deploy token needs Zone > Workers
+# Routes > Edit for it. Remove this block (and set workers_dev = true above) if
+# hushvault.com is not in the account.
 [[env.production.routes]]
-pattern = "api.hushvault.dev"
+pattern = "api.hushvault.com"
 custom_domain = true

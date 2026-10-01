@@ -83,8 +83,9 @@ pnpm lint             # ESLint across monorepo
 
 # API (apps/api)
 wrangler dev          # Local Workers dev server
-wrangler deploy       # Deploy to production
-wrangler d1 execute hushvault-db --file=migrations/xxxx.sql  # Run migration
+pnpm deploy:dry-run   # Validate the Worker bundle + bindings (no credentials)
+pnpm db:migrate:dev   # Apply D1 migrations to the dev database (needs wrangler login)
+# Deploys are NOT manual: pushing to `dev`/`main` triggers Cloudflare Workers Builds.
 
 # CLI (apps/cli)
 pnpm --filter @hushvault/cli build  # Build CLI
@@ -164,6 +165,28 @@ Read the skills for specialised tasks:
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Deploy, migrate, rotate keys
 
 ---
+
+## Work Tracking (ALWAYS)
+
+**Every activity is tracked in GitHub Issues** in `hushvaultdev/hushvault` — no exceptions.
+- Before starting work, find or create the issue for it (search first to avoid duplicates);
+  attach it to the roadmap epic (#18) as a sub-issue when it belongs to go-live work.
+- Record decisions, discovered problems, "not verified" items and follow-ups as issues,
+  not only in chat or PR descriptions. Reference the issue in commits and PRs
+  (`Closes #N` in the PR body).
+- Update the issue's checklist/body as work lands; close it when done.
+- Labels available: `go-live`, `enhancement`, `documentation`, `question`, `bug` (put the finer
+  category in the title prefix: `[Security]`, `[API]`, `[CI/CD]`, `[Infra]`, `[Docs]`, ...).
+- The GitHub MCP tools cannot add issues to a GitHub Project board or create labels; attach
+  items to the project in the GitHub UI (or via an auto-add workflow in the project settings).
+
+## CI/CD
+
+All CI/CD runs on **Cloudflare Workers Builds** (GitHub-connected; GitLab later) — we do not
+use GitHub or GitLab CI minutes. Do not add GitHub Actions/GitLab CI workflows. The build
+command runs type-check + tests; a failing build does not deploy. See `docs/DEPLOYMENT.md`.
+Environments: `dev` (`beta.hushvault.com`, `api-beta.hushvault.com`) and `production`
+(`hushvault.com`, `api.hushvault.com`).
 
 ## What NOT to Do
 

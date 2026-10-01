@@ -38,7 +38,7 @@ export async function loginAction(options: LoginOptions = {}): Promise<{ email: 
 
 export const loginCommand = new Command('login')
   .description('Authenticate with HushVault')
-  .option('--api-url <url>', 'API URL (default: https://api.hushvault.dev)')
+  .option('--api-url <url>', 'API URL (default: https://api.hushvault.com)')
   .option('--email <email>', 'Email (prompted if omitted)')
   .action(async (options: { apiUrl?: string; email?: string }) => {
     try {

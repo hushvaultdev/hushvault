@@ -3,7 +3,7 @@
 **Secrets manager built for the edge. $0 to self-host on Cloudflare. Pre-release.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/website-hushvault.dev-blue)](https://hushvault.dev)
+[![Website](https://img.shields.io/badge/website-hushvault.com-blue)](https://hushvault.com)
 
 ---
 

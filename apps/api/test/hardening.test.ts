@@ -104,11 +104,26 @@ describe('CORS', () => {
   it('excludes localhost in production', async () => {
     const env = createTestEnv({ ENVIRONMENT: 'production' })
     expect((await preflight(env, 'http://localhost:3000')).headers.get('access-control-allow-origin')).toBeNull()
-    expect((await preflight(env, 'https://app.hushvault.dev')).headers.get('access-control-allow-origin')).toBe('https://app.hushvault.dev')
+    expect((await preflight(env, 'https://hushvault.com')).headers.get('access-control-allow-origin')).toBe('https://hushvault.com')
+    // The dev dashboard must not be trusted by a production API.
+    expect((await preflight(env, 'https://beta.hushvault.com')).headers.get('access-control-allow-origin')).toBeNull()
   })
 
   it('allows localhost outside production', async () => {
     const env = createTestEnv({ ENVIRONMENT: 'development' })
     expect((await preflight(env, 'http://localhost:3000')).headers.get('access-control-allow-origin')).toBe('http://localhost:3000')
+  })
+
+  it('trusts the origin of the configured WEB_APP_URL, and only that origin', async () => {
+    const env = createTestEnv({ ENVIRONMENT: 'production', WEB_APP_URL: 'https://hushvault-web-dev.example.workers.dev/some/path' })
+    expect((await preflight(env, 'https://hushvault-web-dev.example.workers.dev')).headers.get('access-control-allow-origin')).toBe('https://hushvault-web-dev.example.workers.dev')
+    expect((await preflight(env, 'https://evil.example.workers.dev')).headers.get('access-control-allow-origin')).toBeNull()
+  })
+
+  it('ignores an unset or malformed WEB_APP_URL', async () => {
+    for (const WEB_APP_URL of [undefined, 'not a url']) {
+      const env = createTestEnv({ ENVIRONMENT: 'production', WEB_APP_URL })
+      expect((await preflight(env, 'https://evil.example')).headers.get('access-control-allow-origin')).toBeNull()
+    }
   })
 })

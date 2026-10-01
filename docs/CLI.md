@@ -185,7 +185,7 @@ Resolved in this order:
 2. `apiUrl` in `.hushvault.json` (used by `set`, `get`, `run`, `share`; not consulted by `login` or `init`)
 3. `HUSHVAULT_API_URL`
 4. `apiUrl` in the global config (saved by `login`)
-5. Default `https://api.hushvault.dev`
+5. Default `https://api.hushvault.com`
 
 If you self-host, pass `--api-url` to `login` and `init` (or set `HUSHVAULT_API_URL`); the URL is then saved for
 later runs.

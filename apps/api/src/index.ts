@@ -41,7 +41,9 @@ declare module 'hono' {
 }
 
 const app = new Hono<{ Bindings: Env }>()
-const productionOrigins = ['https://hushvault.dev', 'https://app.hushvault.dev', 'https://beta.hushvault.dev']
+// Fixed production dashboard origins. Other environments (e.g. beta.hushvault.com for
+// dev) are trusted via their own WEB_APP_URL, so the dev dashboard is NOT allowed here.
+const productionOrigins = ['https://hushvault.com', 'https://www.hushvault.com']
 const devOrigins = ['http://localhost:3000', 'http://127.0.0.1:3000']
 
 // Middleware
@@ -63,10 +65,21 @@ app.use('*', async (c, next) => {
   }))
 })
 app.use('*', securityHeaders)
+function originOf(url: string | undefined): string | null {
+  if (!url) return null
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
+}
+
 app.use('/api/*', cors({
   origin: (origin, c) => {
     const allowed = c.env.ENVIRONMENT === 'production' ? productionOrigins : [...productionOrigins, ...devOrigins]
-    return allowed.includes(origin) ? origin : null
+    // Each deployment also trusts the dashboard origin it is configured with, so a
+    // new environment (e.g. dev on workers.dev) needs a WEB_APP_URL, not a code change.
+    return allowed.includes(origin) || origin === originOf(c.env.WEB_APP_URL) ? origin : null
   },
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
@@ -82,10 +95,10 @@ app.use('/api/*', async (c, next) => {
 // Health check
 app.get('/', (c) => c.json({ name: 'HushVault API', version: '0.0.1', status: 'ok' }))
 app.get('/.well-known/security.txt', (c) => c.text([
-  'Contact: security@hushvault.dev',
+  'Contact: security@hushvault.com',
   'Expires: 2027-03-31T00:00:00.000Z',
   'Preferred-Languages: en',
-  'Policy: https://hushvault.dev/security/policy',
+  'Policy: https://hushvault.com/security/policy',
 ].join('\n'), 200, { 'Content-Type': 'text/plain; charset=utf-8' }))
 
 // Routes
