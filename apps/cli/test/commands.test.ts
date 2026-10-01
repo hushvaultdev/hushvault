@@ -161,7 +161,7 @@ describe('share', () => {
   it('encrypts client-side and keeps the key out of the request', async () => {
     const link = await shareAction(new ApiClient({ apiUrl: 'https://api.test', token: 't' }), 'hunter2', { views: '2', hours: '1' }, () => 0)
     const [url, key] = link.split('#')
-    expect(url).toBe('https://hushvault.dev/share/tok_1')
+    expect(url).toBe('https://hushvault.com/share/tok_1')
     expect(key).toBeTruthy()
     const call = server.calls.find((c) => c.path === '/api/share')!
     const body = call.body as { encryptedPayload: string; maxViews: number; expiresAt: string }

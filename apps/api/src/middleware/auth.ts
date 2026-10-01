@@ -16,6 +16,8 @@ declare module 'hono' {
   }
 }
 
+const LAST_USED_THROTTLE_MS = 5 * 60_000
+
 export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   const authorization = c.req.header('authorization')
   if (!authorization?.startsWith('Bearer ')) {
@@ -42,9 +44,9 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
   }
 
   const apiKeyHash = await hashApiKey(token)
-  const apiKey = await c.env.DB.prepare('SELECT user_id, key_hash, expires_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1')
+  const apiKey = await c.env.DB.prepare('SELECT user_id, key_hash, expires_at, last_used_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1')
     .bind(apiKeyHash)
-    .first<{ user_id: string; key_hash: string; expires_at: string | null }>()
+    .first<{ user_id: string; key_hash: string; expires_at: string | null; last_used_at: string | null }>()
 
   if (!apiKey) {
     return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
@@ -69,7 +71,11 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
     actorType: 'api_key',
   })
 
-  await c.env.DB.prepare('UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?').bind(new Date().toISOString(), apiKeyHash).run()
+  // Throttled: avoid a D1 write on every request. Only touch when never used or stale.
+  const lastUsed = apiKey.last_used_at ? new Date(apiKey.last_used_at).getTime() : Number.NaN
+  if (!Number.isFinite(lastUsed) || Date.now() - lastUsed > LAST_USED_THROTTLE_MS) {
+    await c.env.DB.prepare('UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?').bind(new Date().toISOString(), apiKeyHash).run()
+  }
 
   return next()
 }
@@ -91,12 +97,14 @@ export const loginRateLimit = createRateLimitMiddleware({
   scope: 'auth-login',
   limit: 10,
   windowMs: 60_000,
+  failClosed: true,
 })
 
 export const registerRateLimit = createRateLimitMiddleware({
   scope: 'auth-register',
   limit: 5,
   windowMs: 60_000,
+  failClosed: true,
 })
 
 // OAuth start + callback trigger outbound GitHub calls and DB writes; cap per IP.
@@ -104,6 +112,7 @@ export const oauthRateLimit = createRateLimitMiddleware({
   scope: 'auth-oauth',
   limit: 20,
   windowMs: 60_000,
+  failClosed: true,
 })
 
 export const secretReadRateLimit = createRateLimitMiddleware({
@@ -117,6 +126,7 @@ export const shareAccessRateLimit = createRateLimitMiddleware({
   scope: 'share-access',
   limit: 20,
   windowMs: 60_000,
+  failClosed: true,
 })
 
 // Coarse safety net across all /api/* traffic to blunt DDoS / scraping. Sits

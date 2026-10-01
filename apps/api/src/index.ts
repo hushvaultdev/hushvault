@@ -1,7 +1,6 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { logger } from 'hono/logger'
-import { prettyJSON } from 'hono/pretty-json'
+import { HTTPException } from 'hono/http-exception'
 import { authRoutes } from './routes/auth'
 import { healthRoutes } from './routes/health'
 import { projectRoutes } from './routes/projects'
@@ -12,10 +11,15 @@ import { auditRoutes } from './routes/audit'
 import { secretScannerRouter } from './routes/secret-scanner'
 import { securityHeaders } from './middleware/security-headers'
 import { globalApiRateLimit } from './middleware/auth'
+import { RateLimiter } from './lib/rate-limiter-do'
+import { SecretTooLargeError, redactPath } from './lib/security'
+
+export { RateLimiter }
 
 export type Env = {
   DB: D1Database
   SECRETS_KV: KVNamespace
+  RATE_LIMITER: DurableObjectNamespace<RateLimiter>
   ENVIRONMENT: string
   ENCRYPTION_MASTER_KEY: string
   JWT_SECRET: string
@@ -30,15 +34,53 @@ export type Env = {
   WEB_APP_URL?: string
 }
 
+declare module 'hono' {
+  interface ContextVariableMap {
+    requestId: string
+  }
+}
+
 const app = new Hono<{ Bindings: Env }>()
-const allowedOrigins = ['https://hushvault.dev', 'https://app.hushvault.dev', 'https://beta.hushvault.dev', 'http://localhost:3000', 'http://127.0.0.1:3000']
+// Fixed production dashboard origins. Other environments (e.g. beta.hushvault.com for
+// dev) are trusted via their own WEB_APP_URL, so the dev dashboard is NOT allowed here.
+const productionOrigins = ['https://hushvault.com', 'https://www.hushvault.com']
+const devOrigins = ['http://localhost:3000', 'http://127.0.0.1:3000']
 
 // Middleware
-app.use('*', logger())
-app.use('*', prettyJSON())
+// Minimal request logger: method + redacted path + status + duration only. Never
+// URLs with query strings (share tokens), headers or bodies.
+app.use('*', async (c, next) => {
+  const requestId = crypto.randomUUID()
+  c.set('requestId', requestId)
+  c.header('X-Request-Id', requestId)
+  const start = Date.now()
+  await next()
+  console.log(JSON.stringify({
+    level: 'info',
+    requestId,
+    method: c.req.method,
+    path: redactPath(new URL(c.req.url).pathname),
+    status: c.res.status,
+    durationMs: Date.now() - start,
+  }))
+})
 app.use('*', securityHeaders)
+function originOf(url: string | undefined): string | null {
+  if (!url) return null
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
+}
+
 app.use('/api/*', cors({
-  origin: (origin) => allowedOrigins.includes(origin) ? origin : null,
+  origin: (origin, c) => {
+    const allowed = c.env.ENVIRONMENT === 'production' ? productionOrigins : [...productionOrigins, ...devOrigins]
+    // Each deployment also trusts the dashboard origin it is configured with, so a
+    // new environment (e.g. dev on workers.dev) needs a WEB_APP_URL, not a code change.
+    return allowed.includes(origin) || origin === originOf(c.env.WEB_APP_URL) ? origin : null
+  },
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
   maxAge: 86400,
@@ -53,10 +95,10 @@ app.use('/api/*', async (c, next) => {
 // Health check
 app.get('/', (c) => c.json({ name: 'HushVault API', version: '0.0.1', status: 'ok' }))
 app.get('/.well-known/security.txt', (c) => c.text([
-  'Contact: security@hushvault.dev',
+  'Contact: security@hushvault.com',
   'Expires: 2027-03-31T00:00:00.000Z',
   'Preferred-Languages: en',
-  'Policy: https://hushvault.dev/security/policy',
+  'Policy: https://hushvault.com/security/policy',
 ].join('\n'), 200, { 'Content-Type': 'text/plain; charset=utf-8' }))
 
 // Routes
@@ -72,9 +114,27 @@ app.route('/api/integrations/secret-scanner', secretScannerRouter)
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404))
 
-// Error handler
-app.onError((_err, c) => {
-  return c.json({ error: 'Internal server error' }, 500)
+// Error handler. Logs ONE structured line: never bodies, headers, query strings or values.
+app.onError((err, c) => {
+  if (err instanceof SecretTooLargeError) {
+    return c.json({ error: 'VALIDATION_ERROR', message: 'Secret value exceeds 64KB limit' }, 400)
+  }
+  if (err instanceof HTTPException && err.status < 500) {
+    return err.getResponse()
+  }
+  const requestId = c.get('requestId') ?? crypto.randomUUID()
+  const e = err instanceof Error ? err : undefined
+  console.error(JSON.stringify({
+    level: 'error',
+    requestId,
+    method: c.req.method,
+    path: redactPath(new URL(c.req.url).pathname),
+    status: 500,
+    errorName: e?.name ?? 'UnknownError',
+    errorMessage: (e?.message ?? '').slice(0, 200),
+  }))
+  c.header('X-Request-Id', requestId)
+  return c.json({ error: 'INTERNAL_ERROR', message: 'Something went wrong', requestId }, 500)
 })
 
 export default app

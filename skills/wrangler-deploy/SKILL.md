@@ -1,79 +1,56 @@
 # Wrangler Deploy Skill
 
-Deploy the HushVault API to Cloudflare Workers.
+Deploy the HushVault API/web to Cloudflare. **Normal deploys are not manual:**
+pushing to `dev` or `main` triggers Cloudflare Workers Builds, which verifies and
+deploys (see `docs/DEPLOYMENT.md`). Use this skill for first-time setup, manual
+migrations, dry runs and rollbacks.
 
-## When to Use
+## Environments
 
-Use `/wrangler-deploy` to:
-- Deploy a new version of `apps/api` to production
-- Deploy to a staging environment for testing
-- Apply D1 migrations before deploying a schema change
+| Env | API Worker | Branch | API domain | Web domain |
+|---|---|---|---|---|
+| `dev` | `hushvault-api-dev` | `dev` | `api-beta.hushvault.com` | `beta.hushvault.com` |
+| `production` | `hushvault-api` | `main` | `api.hushvault.com` | `hushvault.com` |
 
-## Pre-Deploy Checklist
+Wrangler config: `apps/api/wrangler.toml` (`[env.dev]`, `[env.production]`).
+Bindings are non-inheritable, so each env block declares its own D1/KV/Durable Object.
 
-Before deploying, verify:
-1. All tests pass: `pnpm test` from repo root
-2. TypeScript compiles: `pnpm type-check`
-3. No `.dev.vars` secrets accidentally added to source
-4. `wrangler.toml` has correct `database_id` and KV `id`
-5. Any new secrets are set via `wrangler secret put` (not in toml)
+## Pre-deploy checklist
 
-## Deploy Steps
+1. `pnpm type-check` and `pnpm test` pass (the Workers Builds build command runs
+   `pnpm run verify`, so a failing test blocks the deploy).
+2. No secrets in source (`.dev.vars` is git-ignored).
+3. New secrets set per environment (dashboard Variables & Secrets, or
+   `wrangler secret put NAME --env <env>`), never in `wrangler.toml`.
+4. A new migration file `apps/api/migrations/NNNN_*.sql` if the schema changed
+   (never edit applied ones; migrations must be backward compatible).
 
-### 1. Build
+## Commands (from `apps/api`)
+
 ```bash
-cd apps/api
-pnpm build
+pnpm deploy:dry-run                 # bundle + validate bindings, no credentials needed
+pnpm db:migrate:local               # apply migrations to the local simulated D1
+pnpm db:migrations:list:dev         # what is pending on dev
+pnpm db:migrate:dev                 # apply migrations to the dev D1 (needs wrangler login)
+pnpm deploy:dev                     # migrate + deploy dev (what Workers Builds runs)
+pnpm deploy:dev:code-only           # deploy without migrating
+pnpm deploy:production              # same for production
 ```
 
-### 2. Apply migrations (if schema changed)
-```bash
-# Check pending migrations
-ls migrations/
-
-# Apply to production D1
-wrangler d1 execute hushvault-db --file=migrations/NNNN_description.sql
-```
-
-### 3. Set any new secrets
-```bash
-# Only needed when adding NEW secrets — not on every deploy
-wrangler secret put NEW_SECRET_NAME
-```
-
-### 4. Deploy
-```bash
-wrangler deploy
-```
-
-### 5. Verify
-```bash
-# Health check
-curl https://api.hushvault.dev/health
-
-# Expected: {"status":"ok","version":"x.y.z"}
-```
+Verify: `curl https://api.hushvault.com/health` (dev: `https://api-beta.hushvault.com/health`).
 
 ## Rollback
 
-Cloudflare keeps previous deployment versions. To rollback:
 ```bash
-wrangler rollback
+wrangler deployments list --env production
+wrangler rollback [VERSION_ID] --env production --message "reason"
 ```
 
-## Staging Environment
+Rollback does not revert D1 migrations; ship a corrective forward migration or use
+D1 Time Travel (see `docs/OPERATIONS.md`).
 
-If a `[env.staging]` block exists in `wrangler.toml`:
-```bash
-wrangler deploy --env staging
-```
+## Secrets
 
-## Secrets Management
-
-Production secrets are set once via `wrangler secret put` and stored in Cloudflare's encrypted secret store. They are NOT in `wrangler.toml` or `.dev.vars`.
-
-Current production secrets:
-- `ENCRYPTION_MASTER_KEY` — AES-256 master key (base64)
-- `JWT_SECRET` — JWT signing secret
-- `STRIPE_SECRET_KEY` — Stripe payments (Phase 3)
-- `STRIPE_WEBHOOK_SECRET` — Stripe webhooks (Phase 3)
+Required per environment: `ENCRYPTION_MASTER_KEY` (AES-256 master key, base64; **back up
+the production value offline**) and `JWT_SECRET`. Optional: GitHub/Google OAuth client
+id+secret, `STRIPE_*`. Use different values for dev and production.

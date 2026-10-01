@@ -1,0 +1,47 @@
+# HushVault web dashboard — Next.js on Cloudflare Workers via @opennextjs/cloudflare.
+# Docs: https://developers.cloudflare.com/workers/framework-guides/web-apps/opennext/
+#
+# Deploys run on Cloudflare Workers Builds (no GitHub/GitLab CI minutes): one
+# Worker per environment, each connected to this repo with root directory
+# apps/web. See docs/DEPLOYMENT.md and apps/web/DEPLOY.md.
+#
+# NOTE: NEXT_PUBLIC_* variables are inlined at BUILD time by `next build`.
+# Set NEXT_PUBLIC_API_URL as a Workers Builds *build variable* per Worker, NOT in
+# [vars] here (build variables are not available at runtime, and vice versa).
+
+# Top level = local `preview` only. Deployed Workers use [env.dev] / [env.production].
+name = "hushvault-web-local"
+main = ".open-next/worker.js"
+compatibility_date = "2026-09-30"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[observability]
+enabled = true
+
+# Non-inheritable keys (assets, observability) must be repeated per environment.
+# Worker names are set explicitly so the dashboard Worker name always matches
+# this file (required by Workers Builds).
+
+[env.dev]
+name = "hushvault-web-dev"
+
+[env.dev.assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[env.dev.observability]
+enabled = true
+
+[env.production]
+name = "hushvault-web"
+
+[env.production.assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[env.production.observability]
+enabled = true

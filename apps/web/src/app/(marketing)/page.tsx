@@ -60,7 +60,7 @@ export default function HomePage() {
 
           <Card className={s('productScene')} tone="dark">
             <div className={s('sceneToolbar')}>
-              <span className={s('sceneTitle')}>Project: hushvault.dev</span>
+              <span className={s('sceneTitle')}>Project: hushvault.com</span>
               <Badge tone="neutral">Sample data</Badge>
             </div>
 
