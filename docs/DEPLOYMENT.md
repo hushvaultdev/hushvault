@@ -190,7 +190,7 @@ Package scripts (`apps/api/package.json`): `db:migrate` / `db:migrate:local`,
 
 ## What is *not* covered by this pipeline
 
-- **Playwright e2e** and **`pnpm audit`** no longer run in CI (issue #29): e2e needs
+- **Playwright e2e** and **`pnpm audit`** no longer run in CI (issue #32): e2e needs
   browsers that Workers Builds probably cannot provide (unverified), and the audit
   fails on advisory-database drift unrelated to a change, so it must not gate deploys.
   Run `pnpm test:e2e` locally before merging to `main`.
