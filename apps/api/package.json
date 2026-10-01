@@ -19,7 +19,7 @@
     "db:migrations:list:production": "wrangler d1 migrations list DB --remote --env production"
   },
   "dependencies": {
-    "hono": "^4.7.0",
+    "hono": "^4.12.25",
     "@hono/zod-validator": "^0.4.0",
     "zod": "^3.24.0",
     "drizzle-orm": "0.45.2"

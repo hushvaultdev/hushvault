@@ -36,7 +36,7 @@ export async function shareAction(
   const views = Number(options.views ?? '1')
   const hours = Number(options.hours ?? '24')
   if (!Number.isInteger(views) || views < 1 || views > 100) throw new Error('--views must be an integer between 1 and 100')
-  if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 365) throw new Error('--hours must be a positive number')
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 7) throw new Error('--hours must be between 0 and 168 (share links expire after at most 7 days)')
   if (value.length === 0) throw new Error('Nothing to share: value is empty')
 
   const { encryptedPayload, key } = await encryptForShare(value)
