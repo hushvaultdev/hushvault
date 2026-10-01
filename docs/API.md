@@ -48,8 +48,8 @@ Clients should treat any 400 as "invalid input".
 IDs are prefixed random strings: `usr_`, `org_`, `prj_`, `env_`, `sec_`, `sech_` (history), `key_`, `sh_`,
 `tok_`, `audit_`.
 
-CORS (`/api/*`): allowed origins are `https://hushvault.com`, `https://hushvault.com`,
-`https://beta.hushvault.com`, plus `http://localhost:3000` and `http://127.0.0.1:3000` when the deployment's
+CORS (`/api/*`): allowed origins are `https://hushvault.dev`, `https://www.hushvault.dev`,
+`https://beta.hushvault.dev`, plus `http://localhost:3000` and `http://127.0.0.1:3000` when the deployment's
 `ENVIRONMENT` is not `production` **(may change)**; allowed headers are
 `Content-Type` and `Authorization`. The CLI and curl are not subject to CORS.
 

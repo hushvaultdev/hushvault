@@ -9,8 +9,8 @@ migrations, dry runs and rollbacks.
 
 | Env | API Worker | Branch | API domain | Web domain |
 |---|---|---|---|---|
-| `dev` | `hushvault-api-dev` | `dev` | `api-beta.hushvault.com` | `beta.hushvault.com` |
-| `production` | `hushvault-api` | `main` | `api.hushvault.com` | `hushvault.com` |
+| `dev` | `hushvault-api-dev` | `dev` | `api-beta.hushvault.dev` | `beta.hushvault.dev` |
+| `production` | `hushvault-api` | `main` | `api.hushvault.dev` | `hushvault.dev` |
 
 Wrangler config: `apps/api/wrangler.toml` (`[env.dev]`, `[env.production]`).
 Bindings are non-inheritable, so each env block declares its own D1/KV/Durable Object.
@@ -37,7 +37,7 @@ pnpm deploy:dev:code-only           # deploy without migrating
 pnpm deploy:production              # same for production
 ```
 
-Verify: `curl https://api.hushvault.com/health` (dev: `https://api-beta.hushvault.com/health`).
+Verify: `curl https://api.hushvault.dev/health` (dev: `https://api-beta.hushvault.dev/health`).
 
 ## Rollback
 

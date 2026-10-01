@@ -99,7 +99,7 @@ export class FakeServer {
       return this.json(200, { data: { environmentId: envId, values: query['values'] === 'true', secrets } })
     }
     if (p === '/api/share' && method === 'POST') {
-      return this.json(201, { data: { token: 'tok_1', url: 'https://hushvault.com/share/tok_1' } })
+      return this.json(201, { data: { token: 'tok_1', url: 'https://hushvault.dev/share/tok_1' } })
     }
     return this.json(404, { error: 'NOT_FOUND', message: 'No route' })
   }

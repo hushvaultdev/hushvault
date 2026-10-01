@@ -10,15 +10,15 @@ There are two deployable apps and two environments, so **four Workers**:
 
 | App | Env | Worker name | Production branch | Root directory | Domain |
 |---|---|---|---|---|---|
-| API | `dev` | `hushvault-api-dev` | `dev` | `apps/api` | `api-beta.hushvault.com` (in `wrangler.toml`) |
-| API | `production` | `hushvault-api` | `main` | `apps/api` | `api.hushvault.com` (in `wrangler.toml`) |
-| Web | `dev` | `hushvault-web-dev` | `dev` | `apps/web` | `beta.hushvault.com` (dashboard, manual) |
-| Web | `production` | `hushvault-web` | `main` | `apps/web` | `hushvault.com` (dashboard, manual) |
+| API | `dev` | `hushvault-api-dev` | `dev` | `apps/api` | `api-beta.hushvault.dev` (in `wrangler.toml`) |
+| API | `production` | `hushvault-api` | `main` | `apps/api` | `api.hushvault.dev` (in `wrangler.toml`) |
+| Web | `dev` | `hushvault-web-dev` | `dev` | `apps/web` | `beta.hushvault.dev` (dashboard, manual) |
+| Web | `production` | `hushvault-web` | `main` | `apps/web` | `hushvault.dev` (dashboard, manual) |
 
-Domains: production is `hushvault.com`, dev is `beta.hushvault.com`. The web
+Domains: production is `hushvault.dev`, dev is `beta.hushvault.dev`. The web
 domains are added by hand in the dashboard rather than in `wrangler.toml`, because
 attaching a Custom Domain to the apex can replace existing DNS records for it.
-The `hushvault.com` zone must be in the same Cloudflare account (not verified).
+The `hushvault.dev` zone is in the same Cloudflare account (N4K4R; checked via the API 2026-10-01).
 
 Per environment, the API uses its own D1 database and KV namespace (created
 2026-10-01, IDs in `apps/api/wrangler.toml`, tracked in issue #21):
@@ -151,9 +151,9 @@ secret is stored**: losing it makes all stored secrets unrecoverable (OPERATIONS
   redirect target, the share-link host and an **allowed CORS origin**: the API trusts
   the origin of its own `WEB_APP_URL` in addition to the fixed production list, so a
   new environment needs the variable, not a code change.
-  Dev is `https://beta.hushvault.com`, production is `https://hushvault.com`.
-- API routes (`api-beta.hushvault.com`, `api.hushvault.com`) are declared with
-  `custom_domain = true`; the `hushvault.com` zone must be in the same account. If it
+  Dev is `https://beta.hushvault.dev`, production is `https://hushvault.dev`.
+- API routes (`api-beta.hushvault.dev`, `api.hushvault.dev`) are declared with
+  `custom_domain = true`; the `hushvault.dev` zone must be in the same account. If it
   is not, delete the route blocks and set `workers_dev = true`. `api-beta` is a
   single-level subdomain on purpose: I believe Cloudflare's free universal certificate
   covers only one subdomain level (unverified, please check)

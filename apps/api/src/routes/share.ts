@@ -20,7 +20,7 @@ const MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000
 function webBaseUrl(env: Env): string {
   const configured = env.WEB_APP_URL?.trim()
   if (configured) return configured.replace(/\/+$/, '')
-  return env.ENVIRONMENT === 'production' ? 'https://hushvault.com' : 'http://localhost:3000'
+  return env.ENVIRONMENT === 'production' ? 'https://hushvault.dev' : 'http://localhost:3000'
 }
 
 // POST /api/share — create a one-time share link

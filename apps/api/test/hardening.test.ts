@@ -104,9 +104,9 @@ describe('CORS', () => {
   it('excludes localhost in production', async () => {
     const env = createTestEnv({ ENVIRONMENT: 'production' })
     expect((await preflight(env, 'http://localhost:3000')).headers.get('access-control-allow-origin')).toBeNull()
-    expect((await preflight(env, 'https://hushvault.com')).headers.get('access-control-allow-origin')).toBe('https://hushvault.com')
+    expect((await preflight(env, 'https://hushvault.dev')).headers.get('access-control-allow-origin')).toBe('https://hushvault.dev')
     // The dev dashboard must not be trusted by a production API.
-    expect((await preflight(env, 'https://beta.hushvault.com')).headers.get('access-control-allow-origin')).toBeNull()
+    expect((await preflight(env, 'https://beta.hushvault.dev')).headers.get('access-control-allow-origin')).toBeNull()
   })
 
   it('allows localhost outside production', async () => {

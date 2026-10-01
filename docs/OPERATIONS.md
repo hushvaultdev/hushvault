@@ -89,7 +89,7 @@ deliberately. Logs must never contain secret values; the app does not log them.
 Watch:
 
 - `/health` returning non-200 (503 means D1 unreachable). CI smoke-tests it after
-  each deploy; add an external uptime check against `https://api.hushvault.com/health`
+  each deploy; add an external uptime check against `https://api.hushvault.dev/health`
   (no monitor is configured by this repo).
 - Error-rate and 5xx spikes, especially `DECRYPTION_FAILED` (possible wrong or
   rotated master key) and 429 spikes (abuse or a misbehaving client).

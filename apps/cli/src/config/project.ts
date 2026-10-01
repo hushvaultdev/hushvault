@@ -65,4 +65,4 @@ export async function saveGlobalConfig(config: Record<string, string>): Promise<
   await fs.writeFile(globalConfigFile(), JSON.stringify(config, null, 2), 'utf8')
 }
 
-export const DEFAULT_API_URL = 'https://api.hushvault.com'
+export const DEFAULT_API_URL = 'https://api.hushvault.dev'

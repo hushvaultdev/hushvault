@@ -69,7 +69,7 @@ workers_dev = true
 [env.dev.vars]
 ENVIRONMENT = "development"
 # Used for OAuth redirects, share-link URLs and as an allowed CORS origin.
-WEB_APP_URL = "https://beta.hushvault.com"
+WEB_APP_URL = "https://beta.hushvault.dev"
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -95,11 +95,11 @@ new_sqlite_classes = ["RateLimiter"]
 enabled = true
 
 # Single-level subdomain on purpose: I believe Cloudflare's free universal
-# certificate covers only one subdomain level (api.beta.hushvault.com could need
+# certificate covers only one subdomain level (api.beta.hushvault.dev could need
 # a paid certificate) — unverified, please check. The zone must be in the same
 # account and the deploy token needs Zone > Workers Routes > Edit.
 [[env.dev.routes]]
-pattern = "api-beta.hushvault.com"
+pattern = "api-beta.hushvault.dev"
 custom_domain = true
 
 # --------------------------------------------------------------- production --
@@ -109,7 +109,7 @@ workers_dev = false
 
 [env.production.vars]
 ENVIRONMENT = "production"
-WEB_APP_URL = "https://hushvault.com"
+WEB_APP_URL = "https://hushvault.dev"
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -135,7 +135,7 @@ enabled = true
 # Custom domain: Cloudflare creates the DNS record + certificate on deploy. The
 # zone must be in the same account and the deploy token needs Zone > Workers
 # Routes > Edit for it. Remove this block (and set workers_dev = true above) if
-# hushvault.com is not in the account.
+# hushvault.dev is not in the account.
 [[env.production.routes]]
-pattern = "api.hushvault.com"
+pattern = "api.hushvault.dev"
 custom_domain = true

@@ -185,8 +185,8 @@ Read the skills for specialised tasks:
 All CI/CD runs on **Cloudflare Workers Builds** (GitHub-connected; GitLab later) — we do not
 use GitHub or GitLab CI minutes. Do not add GitHub Actions/GitLab CI workflows. The build
 command runs type-check + tests; a failing build does not deploy. See `docs/DEPLOYMENT.md`.
-Environments: `dev` (`beta.hushvault.com`, `api-beta.hushvault.com`) and `production`
-(`hushvault.com`, `api.hushvault.com`).
+Environments: `dev` (`beta.hushvault.dev`, `api-beta.hushvault.dev`) and `production`
+(`hushvault.dev`, `api.hushvault.dev`).
 
 ## What NOT to Do
 

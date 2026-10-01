@@ -25,8 +25,8 @@ OpenNext is the documented path for an existing Next 15 app with dynamic routes
 
 | Worker | Env | Branch | Build variable `NEXT_PUBLIC_API_URL` |
 |---|---|---|---|
-| `hushvault-web-dev` | `dev` | `dev` | `https://api-beta.hushvault.com` |
-| `hushvault-web` | `production` | `main` | `https://api.hushvault.com` |
+| `hushvault-web-dev` | `dev` | `dev` | `https://api-beta.hushvault.dev` |
+| `hushvault-web` | `production` | `main` | `https://api.hushvault.dev` |
 
 Worker names must match `apps/web/wrangler.toml` exactly. Root directory: `apps/web`.
 
