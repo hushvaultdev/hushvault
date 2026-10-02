@@ -171,4 +171,18 @@ describe('short-lived access tokens + rotating refresh tokens', () => {
     const after = await env.DB.prepare('SELECT COUNT(*) AS n FROM refresh_tokens WHERE used_at IS NOT NULL AND used_at < ?').bind(Math.floor(Date.now() / 1000) - 10).first<{ n: number }>()
     expect(after?.n).toBe(0)
   })
+
+  it('names why a refresh failed (fixed vocabulary, no secrets)', async () => {
+    const env = createTestEnv()
+    const reg = await register(env)
+    const noHeader = await call(env, 'POST', '/api/auth/refresh', { headers: { cookie: cookieOf(reg) } })
+    expect(noHeader.body).toMatchObject({ error: 'INVALID_REFRESH', reason: 'no_client_header' })
+    const noCookie = await call(env, 'POST', '/api/auth/refresh', { headers: WEB })
+    expect(noCookie.body.reason).toBe('no_cookie')
+    const unknown = await call(env, 'POST', '/api/auth/refresh', { headers: { ...WEB, cookie: 'hv_refresh=hvr_notarealtokennotarealtoken' } })
+    expect(unknown.body.reason).toBe('unknown')
+    await env.DB.prepare('UPDATE refresh_tokens SET expires_at = 1').run()
+    const expired = await call(env, 'POST', '/api/auth/refresh', { headers: { ...WEB, cookie: cookieOf(reg) } })
+    expect(expired.body.reason).toBe('expired')
+  })
 })
