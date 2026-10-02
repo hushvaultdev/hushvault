@@ -175,6 +175,8 @@ The first deploy of each env runs the Durable Object migration `v1`
 
 ## Migrations
 
+**Migration `0006_key_rotation.sql`** (key rotation tables, issue #27) must be applied to each database. The `*:code-only` deploy commands do not run migrations, so apply it by hand with a token that has D1 edit (`pnpm --filter @hushvault/api db:migrate:dev` / `db:migrate:production`). Until it is applied the new cron handler logs `key_rotation.tick_failed` and does nothing, and `GET /api/security/key-rotation` returns 500; everything else works.
+
 Migrations run *before* the new code is deployed: keep each one backward compatible
 with the code that is currently running (add first; remove or rename in a later
 release). `0001`-`0003` and `0005` use plain `ALTER TABLE`; that is fine because

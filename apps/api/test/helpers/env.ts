@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { signJwt, createPrefixedId, hashPassword, createApiKey } from '../../src/lib/auth'
-import app from '../../src/index'
+import { app } from '../../src/index'
 
 type Bindable = string | number | boolean | null | Uint8Array
 

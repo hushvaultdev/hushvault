@@ -100,18 +100,26 @@ wrangler secret put ENCRYPTION_MASTER_KEY
 
 ## Key Rotation
 
-To rotate the master key:
-1. Generate new master key (see above)
-2. Write a migration script that:
-   a. Fetches all `wrappedDek` values from D1 (both `secrets.wrapped_dek` and `secret_history.wrapped_dek`)
-   b. Decrypts each DEK with old master key
-   c. Re-encrypts each DEK with new master key
-   d. Updates D1 records with new `wrappedDek`
-3. Set new `ENCRYPTION_MASTER_KEY` secret in Wrangler
-4. Deploy
-5. Verify a sample secret decrypts correctly
+Rotation replaces the key (KEK) that wraps each secret's DEK. It is operator-driven (a deploy), not an API call, and it never decrypts or rewrites secret values: only the wrapped DEKs in D1 are re-wrapped, so KV is untouched. Issue #27.
 
-The secret values in KV are **not** re-encrypted — only the DEKs are re-wrapped.
+**Key ring.** Each key version is its own Worker secret: `v1` is the existing `ENCRYPTION_MASTER_KEY` (kept as is), `v2` is `ENCRYPTION_KEY_V2`, and so on. `ENCRYPTION_ACTIVE_KEY_VERSION` (a plain var in `wrangler.toml`, default `v1`) selects the key for new writes. Every read uses the key named by the row's `key_version`. A missing key returns the opaque `DECRYPTION_FAILED` error and logs only the version label (`KEY_VERSION_UNAVAILABLE`).
+
+**Order matters (this is what makes it zero downtime):** add the key, then activate it, then re-wrap, then retire the old key last.
+
+1. Generate the new key on a trusted machine (`openssl rand -base64 32`) and **back it up offline in two places first**. A Worker secret cannot be read back (unverified), so the backup is the only copy.
+2. `wrangler secret put ENCRYPTION_KEY_V2 --env <env>`. Every isolate can now decrypt v2; nothing changes yet.
+3. Safety point: `wrangler d1 export` and note the `d1 time-travel info` bookmark (OPERATIONS.md section 2).
+4. Set `ENCRYPTION_ACTIVE_KEY_VERSION = "v2"` for that env in `wrangler.toml` and deploy. New writes use v2.
+5. Within a minute the Cron Trigger notices the active version changed. It verifies both keys against their stored check values (fail closed on a mistyped key), marks v1 `decrypt_only`, starts a job, and writes `key.rotation.started` to every organisation's audit log.
+6. The job re-wraps `secrets` then `secret_history` in small batches (default 100 per tick, `ROTATION_BATCH_SIZE`), each row with a compare-and-swap update, and repeats a convergence pass for rows written by a stale isolate. It finishes as `completed` or `completed_with_errors` (rows it could not unwrap are listed in `key_rotation_failures`; keep the old key until they are resolved).
+7. Check progress with `GET /api/security/key-rotation` (org admins/owners; per-version row counts for their own organisation).
+8. Retire v1 only when no row uses it **and** every backup or export you might restore has aged out (at least the 30-day Time Travel window, longer for retained exports). Then `wrangler secret delete ENCRYPTION_MASTER_KEY` and keep the offline copy as long as any backup needs it.
+
+**Rollback:** every row is always decryptable (old or new key), so set `ENCRYPTION_ACTIVE_KEY_VERSION` back and deploy. The job pauses and a reverse rotation starts.
+
+**Limit:** re-wrapping does not help if an attacker already holds D1 wraps, KV ciphertext and the old key, because the DEKs are unchanged. In that case rotate the underlying secrets at their source (OPERATIONS.md section 5). A re-encrypt mode is not built (issue #70).
+
+Internals: `apps/api/src/crypto/envelope.ts` (key ring, `rewrapDek`, key checks), `apps/api/src/lib/key-rotation.ts` (engine), migration `0006_key_rotation.sql`.
 
 ## API token rotation
 
@@ -125,7 +133,7 @@ This keeps authentication rotation independent from the master key rotation proc
 
 ## Testing
 
-Crypto tests live in `apps/api/src/crypto/envelope.test.ts`.
+Crypto tests live in `apps/api/test/envelope.test.ts`; rotation tests in `apps/api/test/key-rotation.test.ts` and `apps/api/test/key-ring-routes.test.ts`.
 
 Tests must cover:
 - Encrypt → decrypt roundtrip (same value returned)

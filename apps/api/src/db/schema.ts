@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, text, integer, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core'
 
 // ─────────────────────────────────────────────
 // Users & Auth
@@ -149,3 +149,42 @@ export const auditLog = sqliteTable('audit_log', {
   index('audit_log_org_idx').on(t.orgId),
   index('audit_log_timestamp_idx').on(t.timestamp),
 ])
+
+// ─────────────────────────────────────────────
+// Key rotation (KEK versions; migration 0006, issue #27)
+// ─────────────────────────────────────────────
+
+export const encryptionKeys = sqliteTable('encryption_keys', {
+  version: text('version').primaryKey(),        // "v1", "v2", ...
+  checkValue: text('check_value').notNull(),    // encryption of a fixed canary; no key material
+  status: text('status', { enum: ['active', 'decrypt_only', 'retired'] }).notNull(),
+  createdAt: text('created_at').notNull(),
+  activatedAt: text('activated_at'),
+  retiredAt: text('retired_at'),
+})
+
+export const keyRotations = sqliteTable('key_rotations', {
+  id: text('id').primaryKey(),
+  fromVersion: text('from_version').notNull(),
+  toVersion: text('to_version').notNull(),
+  status: text('status', { enum: ['running', 'paused', 'completed', 'completed_with_errors', 'failed'] }).notNull(),
+  phase: text('phase', { enum: ['secrets', 'history'] }).notNull().default('secrets'),
+  secretsCursor: text('secrets_cursor'),
+  historyCursor: text('history_cursor'),
+  rewrapped: integer('rewrapped').notNull().default(0),
+  skipped: integer('skipped').notNull().default(0),
+  failed: integer('failed').notNull().default(0),
+  leaseUntil: text('lease_until'),
+  leaseOwner: text('lease_owner'),
+  lastErrorCode: text('last_error_code'),
+  startedAt: text('started_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  completedAt: text('completed_at'),
+})
+
+export const keyRotationFailures = sqliteTable('key_rotation_failures', {
+  rotationId: text('rotation_id').notNull(),
+  tableName: text('table_name', { enum: ['secrets', 'secret_history'] }).notNull(),
+  rowId: text('row_id').notNull(),
+  errorCode: text('error_code').notNull(),
+}, (t) => [primaryKey({ columns: [t.rotationId, t.tableName, t.rowId] })])

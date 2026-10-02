@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import app from '../src/index'
+import { app } from '../src/index'
 import { assertSecretSize, redactPath, SecretTooLargeError } from '../src/lib/security'
 import { call, createTestEnv, seedApiKey, seedUser } from './helpers/env'
 

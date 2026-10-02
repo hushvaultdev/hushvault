@@ -8,11 +8,13 @@ import { environmentRoutes } from './routes/environments'
 import { secretRoutes } from './routes/secrets'
 import { shareRoutes } from './routes/share'
 import { auditRoutes } from './routes/audit'
+import { securityRoutes } from './routes/security'
 import { secretScannerRouter } from './routes/secret-scanner'
 import { securityHeaders } from './middleware/security-headers'
 import { globalApiRateLimit } from './middleware/auth'
 import { RateLimiter } from './lib/rate-limiter-do'
 import { SecretTooLargeError, redactPath } from './lib/security'
+import { rotationTick } from './lib/key-rotation'
 
 export { RateLimiter }
 
@@ -21,7 +23,10 @@ export type Env = {
   SECRETS_KV: KVNamespace
   RATE_LIMITER: DurableObjectNamespace<RateLimiter>
   ENVIRONMENT: string
+  // Key ring (docs/ENCRYPTION.md): v1 is ENCRYPTION_MASTER_KEY; vN is the secret ENCRYPTION_KEY_V<N>.
   ENCRYPTION_MASTER_KEY: string
+  ENCRYPTION_ACTIVE_KEY_VERSION?: string
+  ROTATION_BATCH_SIZE?: string
   JWT_SECRET: string
   STRIPE_SECRET_KEY?: string
   STRIPE_WEBHOOK_SECRET?: string
@@ -109,6 +114,7 @@ app.route('/api/environments', environmentRoutes)
 app.route('/api/secrets', secretRoutes)
 app.route('/api/share', shareRoutes)
 app.route('/api/audit', auditRoutes)
+app.route('/api/security', securityRoutes)
 app.route('/api/integrations/secret-scanner', secretScannerRouter)
 
 // 404 handler
@@ -137,4 +143,12 @@ app.onError((err, c) => {
   return c.json({ error: 'INTERNAL_ERROR', message: 'Something went wrong', requestId }, 500)
 })
 
-export default app
+export { app }
+
+// Workers entrypoint: HTTP via Hono, plus a Cron Trigger that drives key rotation.
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(rotationTick(env).then(() => undefined))
+  },
+}

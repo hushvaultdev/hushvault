@@ -2,10 +2,10 @@ import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
-import { encryptSecret, decryptSecret } from '../crypto/envelope'
+import { loadKeyRing, encryptSecretWithRing, decryptSecretWithRing } from '../crypto/envelope'
 import { createPrefixedId } from '../lib/auth'
 import { requireAuth, requireRole, secretReadRateLimit, secretWriteRateLimit } from '../middleware/auth'
-import { MAX_SECRET_VALUE_BYTES, getRequestIp, writeAuditLog } from '../lib/security'
+import { MAX_SECRET_VALUE_BYTES, getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
 
 export const secretRoutes = new Hono<{ Bindings: Env }>()
 
@@ -86,8 +86,8 @@ secretRoutes.get('/:name', secretReadRateLimit, async (c) => {
   }
 
   const secret = await c.env.DB.prepare(
-    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.name = ? AND s.env_id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(name, envId, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; is_computed: number; template: string | null; org_id: string }>()
+    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.name = ? AND s.env_id = ? AND p.org_id = ? LIMIT 1',
+  ).bind(name, envId, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; is_computed: number; template: string | null; org_id: string }>()
 
   if (!secret) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
@@ -100,8 +100,9 @@ secretRoutes.get('/:name', secretReadRateLimit, async (c) => {
 
   let value: string
   try {
-    value = await decryptSecret(encryptedValue, secret.wrapped_dek, c.env.ENCRYPTION_MASTER_KEY)
-  } catch {
+    value = await decryptSecretWithRing(encryptedValue, secret.wrapped_dek, secret.key_version, loadKeyRing(c.env))
+  } catch (err) {
+    logKeyRingError(err)
     return c.json({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' }, 500)
   }
 
@@ -144,7 +145,7 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
 
   const secretId = createPrefixedId('sec')
   const secretValue = value ?? template ?? ''
-  const { encryptedValue, wrappedDek } = await encryptSecret(secretValue, c.env.ENCRYPTION_MASTER_KEY)
+  const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(secretValue, loadKeyRing(c.env))
   await c.env.SECRETS_KV.put(`secret:${secretId}`, encryptedValue)
 
   const now = new Date().toISOString()
@@ -157,7 +158,7 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
       envId,
       name,
       wrappedDek,
-      'v1',
+      keyVersion,
       Boolean(isComputed),
       template ?? null,
       '[]',
@@ -233,7 +234,7 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
       const oldBlob = await c.env.SECRETS_KV.get(kvKey)
       const historyId = createPrefixedId('sech')
       const historyKey = `secrethist:${historyId}`
-      const { encryptedValue, wrappedDek } = await encryptSecret(newPlaintext, c.env.ENCRYPTION_MASTER_KEY)
+      const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(newPlaintext, loadKeyRing(c.env))
 
       if (oldBlob !== null) {
         await c.env.SECRETS_KV.put(historyKey, oldBlob)
@@ -241,8 +242,8 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
       try {
         await c.env.SECRETS_KV.put(kvKey, encryptedValue)
         const update = c.env.DB.prepare(
-          'UPDATE secrets SET name = ?, wrapped_dek = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
-        ).bind(nextName, wrappedDek, nextIsComputed, nextTemplate ?? null, now, id)
+          'UPDATE secrets SET name = ?, wrapped_dek = ?, key_version = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
+        ).bind(nextName, wrappedDek, keyVersion, nextIsComputed, nextTemplate ?? null, now, id)
         if (oldBlob !== null) {
           const history = c.env.DB.prepare(
             'INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, changed_at, changed_by) VALUES (?, ?, ?, ?, ?, ?)',

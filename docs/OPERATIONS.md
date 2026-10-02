@@ -26,14 +26,21 @@ Back it up offline, at the moment you generate it:
 
 Never paste the key into issues, logs or terminals with shared history.
 
-### Rotation: NOT implemented
+### Rotation
 
-There is currently no key-rotation tooling. The `key_version` columns exist in the
-schema (default `v1`) as groundwork only. Planned design (not built): add a second
-master key binding, store the key version with each wrapped DEK, write new DEKs with
-the new key, and run a background job that unwraps each DEK with the old key and
-re-wraps with the new one (secret values need not be re-encrypted because only the
-DEK wrapping changes). Until then, treat a suspected master-key leak as in section 5.
+Master-key rotation is implemented as a versioned key ring plus a cron-driven DEK re-wrap
+(see ENCRYPTION.md "Key Rotation" for the exact order). Summary for operators:
+
+- Add the new key (`ENCRYPTION_KEY_V<N>`) **after** backing it up offline, then set
+  `ENCRYPTION_ACTIVE_KEY_VERSION` in `wrangler.toml` and deploy.
+- Watch for `key.rotation.*` audit events and `GET /api/security/key-rotation`.
+- Do not delete an old key while any row, backup or export may still need it; the
+  Time Travel / export retention rule in section 2 applies to old keys too.
+- Alert on `KEY_VERSION_UNAVAILABLE` and `key_rotation.*_failed`/`activation_refused`
+  log lines (they carry only codes and version labels), in addition to `DECRYPTION_FAILED` spikes.
+- The cron runs every minute per environment; migration `0006` must be applied first
+  (until then the tick logs `key_rotation.tick_failed` and does nothing).
+- Rotation does not remedy a captured D1 + KV + old-key set (section 5).
 
 ## 2. Backups and recovery
 
@@ -128,11 +135,11 @@ leak, export file leak).
 
 1. Determine what leaked alongside it. If a D1 export, KV dump or Cloudflare API
    token leaked too, assume **all** stored secret values are compromised.
-2. Since rotation is not implemented (section 1), the only full remedy today is
-   manual: rotate every underlying secret at its source, then re-create the
-   values under a new master key (new key set via `wrangler secret put`, data re-entered or
-   migrated with a one-off script you write and review). Setting a new key without
-   re-wrapping makes existing secrets undecryptable, so do not just swap it.
+2. Rotate every underlying secret at its source first: key rotation (section 1) re-wraps
+   DEKs only, so it does not help if the attacker already holds D1 wraps, KV ciphertext and
+   the old key. Then rotate the master key as in ENCRYPTION.md, and re-enter the new
+   underlying values. Never just swap the key without the rotation procedure: existing
+   secrets would become undecryptable.
 3. Rotate `JWT_SECRET` and the Cloudflare API tokens as well.
 4. Record the incident and consider notifying affected users.
 

@@ -68,6 +68,10 @@ workers_dev = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
+# Key ring: which KEK version new writes use. v1 = ENCRYPTION_MASTER_KEY; vN = secret
+# ENCRYPTION_KEY_V<N>. Change this in git (after the new key secret exists) to rotate;
+# see docs/ENCRYPTION.md "Key rotation".
+ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
 # Used for OAuth redirects, share-link URLs and as an allowed CORS origin.
 WEB_APP_URL = "https://beta.hushvault.dev"
 
@@ -94,6 +98,11 @@ new_sqlite_classes = ["RateLimiter"]
 [env.dev.observability]
 enabled = true
 
+# Cron Trigger that drives key rotation (idle ticks do two single-row reads). Triggers are
+# non-inheritable like bindings, so each env declares its own.
+[env.dev.triggers]
+crons = ["* * * * *"]
+
 # Single-level subdomain on purpose: I believe Cloudflare's free universal
 # certificate covers only one subdomain level (api.beta.hushvault.dev could need
 # a paid certificate) — unverified, please check. The zone must be in the same
@@ -109,6 +118,8 @@ workers_dev = false
 
 [env.production.vars]
 ENVIRONMENT = "production"
+# See [env.dev.vars]: active KEK version for new writes.
+ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
 WEB_APP_URL = "https://hushvault.dev"
 
 [[env.production.d1_databases]]
@@ -131,6 +142,9 @@ new_sqlite_classes = ["RateLimiter"]
 
 [env.production.observability]
 enabled = true
+
+[env.production.triggers]
+crons = ["* * * * *"]
 
 # Custom domain: Cloudflare creates the DNS record + certificate on deploy. The
 # zone must be in the same account and the deploy token needs Zone > Workers

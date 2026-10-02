@@ -1,4 +1,5 @@
 import type { Env } from '../index'
+import { KeyRingError } from '../crypto/envelope'
 
 const textEncoder = new TextEncoder()
 
@@ -53,4 +54,10 @@ export async function writeAuditLog(env: Env, entry: {
 
 export function getRequestIp(c: { req: { header(name: string): string | undefined } }): string | null {
   return c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? null
+}
+/** Log a key-ring configuration problem: error code and key version label only, never key material. */
+export function logKeyRingError(err: unknown): void {
+  if (err instanceof KeyRingError) {
+    console.error(JSON.stringify({ level: 'error', code: err.code, keyVersion: err.version ?? null }))
+  }
 }

@@ -3,9 +3,9 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
-import { decryptSecret } from '../crypto/envelope'
+import { loadKeyRing, decryptSecretWithRing } from '../crypto/envelope'
 import { describeComputedError, evaluateSecrets } from '../lib/resolve'
-import { getRequestIp, writeAuditLog } from '../lib/security'
+import { getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
 import { requireAuth, requireRole, secretReadRateLimit } from '../middleware/auth'
 
 export const environmentRoutes = new Hono<{ Bindings: Env }>()
@@ -81,7 +81,7 @@ environmentRoutes.post('/', requireRole('admin'), zValidator('json', environment
 
 const MAX_INHERITANCE_DEPTH = 10
 
-type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string }
+type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string; key_version: string }
 
 // GET /api/environments/:id/resolved — secrets with branch inheritance applied (child overrides parent by name)
 environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
@@ -117,7 +117,7 @@ environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
 
   const rank = new Map(chain.map((envId, index) => [envId, index]))
   const rows = await c.env.DB.prepare(
-    `SELECT id, env_id, name, is_computed, template, wrapped_dek FROM secrets WHERE project_id = ? AND env_id IN (${chain.map(() => '?').join(',')})`,
+    `SELECT id, env_id, name, is_computed, template, wrapped_dek, key_version FROM secrets WHERE project_id = ? AND env_id IN (${chain.map(() => '?').join(',')})`,
   ).bind(environment.project_id, ...chain).all<SecretRow>()
 
   // Later (closer to the requested env) rank wins.
@@ -130,13 +130,15 @@ environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
   const plain = new Map<string, string>()
   if (wantValues) {
     try {
+      const ring = loadKeyRing(c.env)
       for (const row of selected) {
         if (row.is_computed) continue
         const blob = await c.env.SECRETS_KV.get(`secret:${row.id}`)
         if (blob === null) throw new Error('missing blob')
-        plain.set(row.name, await decryptSecret(blob, row.wrapped_dek, c.env.ENCRYPTION_MASTER_KEY))
+        plain.set(row.name, await decryptSecretWithRing(blob, row.wrapped_dek, row.key_version, ring))
       }
-    } catch {
+    } catch (err) {
+      logKeyRingError(err)
       return c.json({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' }, 500)
     }
   }
