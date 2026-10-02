@@ -1,3 +1,9 @@
+> **Status: aspirational wishlist, not a description of the product.** Nothing in this document is built, and several claims are
+> unverified or likely wrong: the competitor table (including "push-on-save without redeploy"), the Cloudflare Pages
+> `PATCH .../deployments` call (the Pages API shape was not verified), the reference to `tiers.ts` (no such file exists), and the
+> use of Queues. The current, reviewed plan is tracked in issue #37 (milestones #38-#45); integration status is defined in
+> `packages/shared/src/integrations.ts`. Do not copy claims from this file into public copy.
+
 # Webhooks & Integrations
 
 **Priority:** P2 — core product differentiation vs Doppler/Infisical

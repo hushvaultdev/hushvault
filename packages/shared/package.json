@@ -9,12 +9,18 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./integrations": {
+      "types": "./src/integrations.ts",
+      "import": "./src/integrations.ts",
+      "default": "./src/integrations.ts"
     }
   },
   "scripts": {
     "build": "tsc",
     "type-check": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run"
   },
   "devDependencies": {
     "typescript": "^5.7.0"
