@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
+import { CliInstallCard } from '@/components/cli/cli-install'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -99,6 +100,8 @@ export default function DashboardPage() {
           ))}
         </div>
       )}
+
+      <CliInstallCard />
     </div>
   )
 }
