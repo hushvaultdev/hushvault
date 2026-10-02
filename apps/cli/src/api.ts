@@ -82,6 +82,13 @@ export interface ShareResult {
 // They carry names and counts only: never secret values or provider credentials.
 export type SyncRunStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed'
 
+export const SYNC_SCHEDULE_OPTIONS = [15, 60, 360, 1440] as const
+
+export interface SyncAutoSync {
+  onChange: boolean
+  scheduleMinutes: number | null
+}
+
 export interface SyncTarget {
   id: string
   projectId: string
@@ -91,6 +98,8 @@ export interface SyncTarget {
   resource: Record<string, string>
   nameFilter: { prefix?: string; deny?: string[] }
   deleteRemoved: boolean
+  /** Absent when talking to an API older than M4. */
+  autoSync?: SyncAutoSync
   status: 'active' | 'needs_attention'
   lastRunAt: string | null
   lastRunStatus: SyncRunStatus | null
@@ -259,6 +268,10 @@ export class ApiClient {
 
   previewTarget(id: string): Promise<SyncPlan> {
     return this.request('POST', `/api/integrations/targets/${encodeURIComponent(id)}/preview`)
+  }
+
+  updateTargetAutoSync(id: string, autoSync: SyncAutoSync): Promise<SyncTarget> {
+    return this.request('PATCH', `/api/integrations/targets/${encodeURIComponent(id)}`, { body: { autoSync } })
   }
 
   runTarget(id: string): Promise<SyncRun> {

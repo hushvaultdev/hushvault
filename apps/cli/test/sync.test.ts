@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient, ApiError, friendlyError } from '../src/api.js'
 import {
-  EXIT_BLOCKED, EXIT_FAIL, EXIT_OK, reportSyncError, resolveTarget, syncListAction, syncPreviewAction, syncRunAction, syncStatusAction,
+  EXIT_BLOCKED, EXIT_FAIL, EXIT_OK, parseSchedule, reportSyncError, resolveTarget, syncAutoAction, syncListAction, syncPreviewAction, syncRunAction, syncStatusAction,
 } from '../src/commands/sync.js'
 import { FakeServer } from './fake-server.js'
 
@@ -38,6 +38,11 @@ describe('sync list', () => {
   it('exits 2 when a target needs attention', async () => {
     server.targets[0]!['status'] = 'needs_attention'
     expect(await syncListAction(client(), {}, out)).toBe(EXIT_BLOCKED)
+  })
+  it('prints the auto-sync setting', async () => {
+    await syncListAction(client(), {}, out)
+    expect(text()).toContain('auto-sync: on change on, schedule hourly')
+    expect(text()).toContain('auto-sync: on change off, schedule off')
   })
   it('hints at the dashboard when empty', async () => {
     server.targets = []
@@ -79,6 +84,50 @@ describe('sync status', () => {
     const p = JSON.parse(text()) as { target: { id: string }; latestRun: { status: string } }
     expect(p.target.id).toBe('tgt_1')
     expect(p.latestRun.status).toBe('succeeded')
+  })
+})
+
+describe('sync status retry and auto-sync', () => {
+  it('prints auto-sync and the next retry time', async () => {
+    server.runResult['status'] = 'failed'
+    server.runResult['errorCode'] = 'PROVIDER_RATE_LIMIT'
+    server.runResult['nextRetryAt'] = '2026-01-02T00:05:00.000Z'
+    await syncStatusAction(client(), 'tgt_1', {}, out)
+    expect(text()).toContain('auto-sync: on change on, schedule hourly')
+    expect(text()).toContain('next retry: 2026-01-02T00:05:00.000Z')
+  })
+  it('--json includes autoSync', async () => {
+    await syncStatusAction(client(), 'tgt_1', { json: true }, out)
+    const p = JSON.parse(text()) as { target: { autoSync: unknown } }
+    expect(p.target.autoSync).toEqual({ onChange: true, scheduleMinutes: 60 })
+  })
+})
+
+describe('sync auto', () => {
+  const patchCalls = (): { body?: unknown }[] => server.calls.filter((c) => c.method === 'PATCH' && c.path.startsWith('/api/integrations/targets/'))
+  it('parses schedules', () => {
+    expect(parseSchedule('off')).toBeNull()
+    expect(parseSchedule('15')).toBe(15)
+    expect(() => parseSchedule('30')).toThrow(/Invalid --schedule/)
+  })
+  it('turns on-change off and keeps the schedule', async () => {
+    expect(await syncAutoAction(client(), 'tgt_1', { onChange: false }, out)).toBe(EXIT_OK)
+    expect(patchCalls()[0]!.body).toEqual({ autoSync: { onChange: false, scheduleMinutes: 60 } })
+    expect(text()).toContain('on change off, schedule hourly')
+  })
+  it('sets a schedule and keeps on-change', async () => {
+    await syncAutoAction(client(), 'cloudflare-workers:web-worker', { schedule: '1440' }, out)
+    expect(patchCalls()[0]!.body).toEqual({ autoSync: { onChange: false, scheduleMinutes: 1440 } })
+  })
+  it('schedule off clears it, and --json prints the target', async () => {
+    await syncAutoAction(client(), 'tgt_1', { schedule: 'off', json: true }, out)
+    expect(patchCalls()[0]!.body).toEqual({ autoSync: { onChange: true, scheduleMinutes: null } })
+    expect((JSON.parse(text()) as { target: { autoSync: unknown } }).target.autoSync).toEqual({ onChange: true, scheduleMinutes: null })
+  })
+  it('requires a flag and a valid schedule without calling the API', async () => {
+    await expect(syncAutoAction(client(), 'tgt_1', {}, out)).rejects.toThrow(/Nothing to change/)
+    await expect(syncAutoAction(client(), 'tgt_1', { schedule: '7' }, out)).rejects.toThrow(/Invalid --schedule/)
+    expect(patchCalls()).toHaveLength(0)
   })
 })
 
@@ -188,6 +237,7 @@ describe('no secret-like output', () => {
       await syncStatusAction(client(), 'tgt_1', { json }, out)
       await syncPreviewAction(client(), 'tgt_1', { json }, out)
       await syncRunAction(client(), 'tgt_1', { json, yes: true }, out)
+      await syncAutoAction(client(), 'tgt_1', { json, onChange: true }, out)
     }
     const all = text() + errLines.join('\n')
     expect(all).not.toMatch(/LEAK|cf-|jwt-token/)

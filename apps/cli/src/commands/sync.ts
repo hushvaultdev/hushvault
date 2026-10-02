@@ -1,6 +1,6 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
-import { ApiError, friendlyError, type ApiClient, type SyncPlan, type SyncRun, type SyncTarget } from '../api.js'
+import { ApiError, friendlyError, SYNC_SCHEDULE_OPTIONS, type ApiClient, type SyncAutoSync, type SyncPlan, type SyncRun, type SyncTarget } from '../api.js'
 import { loadClient } from '../lib/context.js'
 import { prompt } from '../lib/prompt.js'
 
@@ -56,8 +56,27 @@ interface TargetView {
   envId: string
   status: string
   deleteRemoved: boolean
+  autoSync: SyncAutoSync
   lastRunAt: string | null
   lastRunStatus: string | null
+}
+
+function viewAutoSync(a: unknown): SyncAutoSync {
+  const o = (typeof a === 'object' && a !== null ? a : {}) as Record<string, unknown>
+  const m = o['scheduleMinutes']
+  return { onChange: o['onChange'] === true, scheduleMinutes: typeof m === 'number' && Number.isFinite(m) ? m : null }
+}
+
+export function scheduleText(minutes: number | null): string {
+  if (minutes === null) return 'off'
+  if (minutes === 60) return 'hourly'
+  if (minutes === 1440) return 'daily'
+  if (minutes % 60 === 0) return `every ${minutes / 60} hours`
+  return `every ${minutes} minutes`
+}
+
+export function autoSyncText(a: SyncAutoSync): string {
+  return `on change ${a.onChange ? 'on' : 'off'}, schedule ${scheduleText(a.scheduleMinutes)}`
 }
 
 function viewTarget(t: SyncTarget): TargetView {
@@ -69,6 +88,7 @@ function viewTarget(t: SyncTarget): TargetView {
     envId: safe(t.envId),
     status: safe(t.status),
     deleteRemoved: t.deleteRemoved === true,
+    autoSync: viewAutoSync(t.autoSync),
     lastRunAt: t.lastRunAt ? safe(t.lastRunAt) : null,
     lastRunStatus: t.lastRunStatus ? safe(t.lastRunStatus) : null,
   }
@@ -165,7 +185,7 @@ export async function syncListAction(client: ApiClient, opts: SyncOptions, out: 
   } else {
     for (const t of targets) {
       const last = t.lastRunStatus ? `last run ${t.lastRunStatus}${t.lastRunAt ? ` at ${t.lastRunAt}` : ''}` : 'never run'
-      out(`${t.label}  ${t.id}  ${t.status}  ${last}${t.deleteRemoved ? '  deletes on' : ''}`)
+      out(`${t.label}  ${t.id}  ${t.status}  ${last}${t.deleteRemoved ? '  deletes on' : ''}  auto-sync: ${autoSyncText(t.autoSync)}`)
     }
   }
   return targets.some((t) => t.status === 'needs_attention') ? EXIT_BLOCKED : EXIT_OK
@@ -181,12 +201,44 @@ export async function syncStatusAction(client: ApiClient, input: string, opts: S
   } else {
     out(`${view.label}  ${view.id}`)
     out(`  status: ${view.status}${view.status === 'needs_attention' ? ' (in the dashboard, rotate the connection credential or edit the target, then run again)' : ''}`)
+    out(`  auto-sync: ${autoSyncText(view.autoSync)}`)
     out(`  deletes on target: ${view.deleteRemoved ? 'on' : 'off'}`)
     if (latest) printRun(latest, out)
     else out('  no runs yet')
   }
   const bad = view.status === 'needs_attention' || latest?.status === 'failed' || latest?.status === 'partial'
   return bad ? EXIT_BLOCKED : EXIT_OK
+}
+
+export interface AutoOptions extends SyncOptions {
+  onChange?: boolean | undefined
+  schedule?: string | undefined
+}
+
+/** '15' | '60' | '360' | '1440' -> minutes, 'off' -> null. Throws on anything else. */
+export function parseSchedule(input: string): number | null {
+  const v = input.trim().toLowerCase()
+  if (v === 'off') return null
+  const n = Number(v)
+  if ((SYNC_SCHEDULE_OPTIONS as readonly number[]).includes(n)) return n
+  throw new Error(`Invalid --schedule "${safe(input)}". Use one of ${SYNC_SCHEDULE_OPTIONS.join(', ')} (minutes) or off.`)
+}
+
+export async function syncAutoAction(client: ApiClient, input: string, opts: AutoOptions, out: Out): Promise<number> {
+  if (opts.onChange === undefined && opts.schedule === undefined) {
+    throw new Error('Nothing to change. Pass --on-change or --no-on-change, and/or --schedule <15|60|360|1440|off>.')
+  }
+  const schedule = opts.schedule === undefined ? undefined : parseSchedule(opts.schedule)
+  const target = await resolveTarget(client, input)
+  const current = viewAutoSync(target.autoSync)
+  const next: SyncAutoSync = {
+    onChange: opts.onChange ?? current.onChange,
+    scheduleMinutes: schedule === undefined ? current.scheduleMinutes : schedule,
+  }
+  const updated = viewTarget(await client.updateTargetAutoSync(target.id, next))
+  if (opts.json) dump({ target: updated }, out)
+  else out(`${updated.label}  auto-sync: ${autoSyncText(updated.autoSync)}`)
+  return EXIT_OK
 }
 
 export async function syncPreviewAction(client: ApiClient, input: string, opts: SyncOptions, out: Out): Promise<number> {
@@ -299,3 +351,13 @@ syncCommand
   .option('--json', 'Machine-readable output')
   .option('-y, --yes', 'Confirm deletes without prompting (required when non-interactive)')
   .action((t: string, o: SyncOptions) => exec(o, (c, out) => syncRunAction(c, t, o, out)))
+
+syncCommand
+  .command('auto')
+  .description('Change automatic syncing for a target (needs an admin login)')
+  .argument('<target>', 'Target id or provider:scriptName')
+  .option('--on-change', 'Sync automatically when a secret changes (within about 1-2 minutes)')
+  .option('--no-on-change', 'Turn off syncing on change')
+  .option('--schedule <minutes>', 'Also reconcile on a schedule: 15, 60, 360, 1440 or off')
+  .option('--json', 'Machine-readable output')
+  .action((t: string, o: AutoOptions) => exec(o, (c, out) => syncAutoAction(c, t, o, out)))

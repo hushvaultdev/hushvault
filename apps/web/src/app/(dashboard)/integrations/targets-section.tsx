@@ -20,15 +20,22 @@ import {
 } from '@/lib/integrations-api'
 import {
   blockerLabel,
+  autoSyncText,
   describeApiError,
   formatWhen,
   groupPlan,
+  needsAttentionSteps,
+  parseScheduleValue,
   parseNameList,
   planIsEmpty,
   resourceText,
+  retryText,
   runCountsText,
   runErrorGuidance,
+  scheduleOptions,
+  scheduleValue,
   targetNeedsAttention,
+  triggerLabel,
   validateNameFilter,
   validateScriptName,
 } from '@/lib/integrations-helpers'
@@ -38,6 +45,58 @@ import type { EnvironmentRow, ProjectRow } from '@/lib/types'
 import styles from './integrations.module.css'
 
 const s = (name: string) => styles[name]
+
+function AutoSyncFields({
+  idPrefix,
+  onChange,
+  schedule,
+  setOnChange,
+  setSchedule,
+}: {
+  idPrefix: string
+  onChange: boolean
+  schedule: string
+  setOnChange: (v: boolean) => void
+  setSchedule: (v: string) => void
+}) {
+  return (
+    <>
+      <label className={s('check')}>
+        <input type="checkbox" checked={onChange} onChange={(e) => setOnChange(e.target.checked)} aria-describedby={`${idPrefix}-onchange-hint`} />
+        <span>
+          <strong>Sync automatically when a secret changes</strong>
+          <span id={`${idPrefix}-onchange-hint`} className={s('note')}>
+            Off by default. Runs within about 1-2 minutes of a change. Changes to a parent environment count too.
+          </span>
+        </span>
+      </label>
+      <label className={s('selectField')}>
+        <span className={s('selectLabel')}>Also reconcile on a schedule</span>
+        <select className={s('select')} value={schedule} onChange={(e) => setSchedule(e.target.value)}>
+          {scheduleOptions().map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    </>
+  )
+}
+
+function NeedsAttentionPanel() {
+  return (
+    <div className={s('blockers')} role="alert">
+      <strong>This target needs attention</strong>
+      <p>The last run failed in a way that retrying will not fix, so automatic syncing is paused. To fix it:</p>
+      <ol>
+        {needsAttentionSteps().map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+    </div>
+  )
+}
 
 function PlanView({ plan }: { plan: SyncPlanDto }) {
   const groups = groupPlan(plan)
@@ -96,6 +155,8 @@ function EditTargetForm({
   const [prefix, setPrefix] = useState(target.nameFilter.prefix ?? '')
   const [deny, setDeny] = useState((target.nameFilter.deny ?? []).join(', '))
   const [deleteRemoved, setDeleteRemoved] = useState(target.deleteRemoved)
+  const [autoOnChange, setAutoOnChange] = useState(target.autoSync?.onChange ?? false)
+  const [autoSchedule, setAutoSchedule] = useState(scheduleValue(target.autoSync?.scheduleMinutes))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const ref = useFocusReturn<HTMLFormElement>(true)
@@ -117,6 +178,7 @@ function EditTargetForm({
           resource: { ...target.resource, accountId, scriptName: scriptName.trim() },
           nameFilter: { ...(prefix.trim() ? { prefix: prefix.trim() } : {}), ...(denyList.length > 0 ? { deny: denyList } : {}) },
           deleteRemoved,
+          autoSync: { onChange: autoOnChange, scheduleMinutes: parseScheduleValue(autoSchedule) },
         }),
       )
     } catch (err) {
@@ -137,6 +199,13 @@ function EditTargetForm({
           <strong>Delete removed secrets on the target</strong>
         </span>
       </label>
+      <AutoSyncFields
+        idPrefix={`edit-auto-${target.id}`}
+        onChange={autoOnChange}
+        schedule={autoSchedule}
+        setOnChange={setAutoOnChange}
+        setSchedule={setAutoSchedule}
+      />
       {error ? (
         <p className={s('error')} role="alert">
           {error}
@@ -237,6 +306,7 @@ function TargetRow({
           Worker {resourceText(target.resource)} via {label} · last run {formatWhen(target.lastRunAt)}
           {target.lastRunStatus ? ` (${target.lastRunStatus})` : ''}
           {target.deleteRemoved ? ' · deletes removed secrets' : ''}
+          {` · auto-sync: ${autoSyncText(target.autoSync)}`}
         </span>
       </div>
       <div className={s('badges')}>
@@ -256,6 +326,8 @@ function TargetRow({
           Remove target
         </Button>
       </div>
+
+      {targetNeedsAttention(target) ? <NeedsAttentionPanel /> : null}
 
       {confirmDelete ? (
         <div ref={confirmRef} tabIndex={-1} className={s('confirm')} role="alertdialog" aria-label="Confirm removing this sync target">
@@ -313,6 +385,8 @@ function CreateTargetForm({
   const [prefix, setPrefix] = useState('')
   const [deny, setDeny] = useState('')
   const [deleteRemoved, setDeleteRemoved] = useState(false)
+  const [autoOnChange, setAutoOnChange] = useState(false)
+  const [autoSchedule, setAutoSchedule] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const formRef = useFocusReturn<HTMLFormElement>(true)
@@ -365,6 +439,7 @@ function CreateTargetForm({
         resource: { accountId, scriptName: scriptName.trim() },
         nameFilter: { ...(prefix.trim() ? { prefix: prefix.trim() } : {}), ...(denyList.length > 0 ? { deny: denyList } : {}) },
         deleteRemoved,
+        autoSync: { onChange: autoOnChange, scheduleMinutes: parseScheduleValue(autoSchedule) },
       })
       onCreated(created)
     } catch (err) {
@@ -427,6 +502,8 @@ function CreateTargetForm({
             </span>
           </span>
         </label>
+
+        <AutoSyncFields idPrefix="create-auto" onChange={autoOnChange} schedule={autoSchedule} setOnChange={setAutoOnChange} setSchedule={setAutoSchedule} />
 
         {error ? (
           <p className={s('error')} role="alert">
@@ -509,8 +586,11 @@ function RunHistory({ targets, refreshKey, optionLabel }: { targets: SyncTargetD
               runs.map((r) => (
                 <tr key={r.id}>
                   <td>{formatWhen(r.startedAt)}</td>
-                  <td>{r.trigger}</td>
-                  <td>{r.status}</td>
+                  <td>{triggerLabel(r.trigger)}</td>
+                  <td>
+                    {r.status}
+                    {retryText(r.nextRetryAt) ? <span className={s('meta')}> · {retryText(r.nextRetryAt)}</span> : null}
+                  </td>
                   <td>{runCountsText(r.counts)}</td>
                   <td>{r.errorCode ?? '-'}</td>
                 </tr>
