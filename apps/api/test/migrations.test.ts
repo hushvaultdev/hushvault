@@ -6,7 +6,7 @@ describe('migrations', () => {
     const env = createTestEnv()
     const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all<{ name: string }>()
     const tables = results.map((r) => r.name)
-    for (const t of ['users', 'api_keys', 'organisations', 'members', 'projects', 'environments', 'secrets', 'secret_history', 'share_links', 'audit_log', 'encryption_keys', 'key_rotations', 'key_rotation_failures']) {
+    for (const t of ['users', 'api_keys', 'organisations', 'members', 'projects', 'environments', 'secrets', 'secret_history', 'share_links', 'audit_log', 'encryption_keys', 'key_rotations', 'key_rotation_failures', 'auth_tokens']) {
       expect(tables).toContain(t)
     }
   })
@@ -15,7 +15,7 @@ describe('migrations', () => {
     const env = createTestEnv()
     const cols = async (t: string) =>
       (await env.DB.prepare(`PRAGMA table_info(${t})`).all<{ name: string }>()).results.map((r) => r.name)
-    expect(await cols('users')).toEqual(expect.arrayContaining(['provider', 'provider_id', 'email_verified']))
+    expect(await cols('users')).toEqual(expect.arrayContaining(['provider', 'provider_id', 'email_verified', 'sessions_valid_after']))
     expect(await cols('api_keys')).toEqual(expect.arrayContaining(['revoked_at', 'revoked_reason']))
     expect(await cols('organisations')).toContain('audit_retention_days')
   })

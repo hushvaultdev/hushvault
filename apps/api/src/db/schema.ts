@@ -12,6 +12,8 @@ export const users = sqliteTable('users', {
   provider: text('provider'), // 'github' | 'google' | null (password)
   providerId: text('provider_id'), // provider's stable user id
   emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),
+  // Unix seconds; JWTs issued before this are rejected (set on password reset). 0 = none.
+  sessionsValidAfter: integer('sessions_valid_after').notNull().default(0),
   createdAt: text('created_at').notNull(),
 }, (t) => [uniqueIndex('users_provider_idx').on(t.provider, t.providerId)])
 
@@ -188,3 +190,21 @@ export const keyRotationFailures = sqliteTable('key_rotation_failures', {
   rowId: text('row_id').notNull(),
   errorCode: text('error_code').notNull(),
 }, (t) => [primaryKey({ columns: [t.rotationId, t.tableName, t.rowId] })])
+
+// ─────────────────────────────────────────────
+// Email verification / password reset tokens (migration 0007, issue #26)
+// ─────────────────────────────────────────────
+
+export const authTokens = sqliteTable('auth_tokens', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  purpose: text('purpose', { enum: ['verify_email', 'reset_password'] }).notNull(),
+  tokenHash: text('token_hash').notNull().unique(), // SHA-256 of the token; the token is never stored
+  email: text('email').notNull(),                   // address the token was issued for
+  expiresAt: text('expires_at').notNull(),
+  usedAt: text('used_at'),
+  createdAt: text('created_at').notNull(),
+}, (t) => [
+  index('auth_tokens_user_purpose_idx').on(t.userId, t.purpose),
+  index('auth_tokens_expires_idx').on(t.expiresAt),
+])

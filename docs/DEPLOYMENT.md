@@ -173,6 +173,24 @@ The first deploy of each env runs the Durable Object migration `v1`
 (`new_sqlite_classes = ["RateLimiter"]`); new DO classes must be SQLite-backed
 (<https://developers.cloudflare.com/changelog/post/2026-07-09-restrict-new-kv-backed-namespaces/>).
 
+## Transactional email (issue #26)
+
+Email verification and password reset send mail through **Cloudflare Email Service** (Workers
+`send_email` binding, public beta, needs Workers Paid; docs: developers.cloudflare.com/email-service).
+The code is provider-neutral (`apps/api/src/lib/email.ts`); with no binding configured nothing is sent
+and the endpoints still respond normally.
+
+1. Owner (issue #75): onboard `hushvault.dev` under Compute > Email Service > Email Sending > Onboard
+   Domain (the domain must use Cloudflare DNS), and confirm the DNS records and daily quota.
+2. In `apps/api/wrangler.toml`, uncomment the `[[env.<env>.send_email]]` block (name `EMAIL`, pinned to
+   `allowed_sender_addresses`) and make sure `MAIL_FROM` matches an address on the onboarded domain, then deploy.
+   The binding config was checked with `wrangler deploy --dry-run` (wrangler 4.92.0); behaviour on a real
+   deploy and real sends is not verified yet.
+3. Smoke test: before the domain is onboarded you can only send to verified destination addresses in the account.
+
+**Migration `0007_email_tokens.sql`** (auth token table and `users.sessions_valid_after`) must be applied to each
+database with a D1-capable token, like `0006`.
+
 ## Migrations
 
 **Migration `0006_key_rotation.sql`** (key rotation tables, issue #27) must be applied to each database. The `*:code-only` deploy commands do not run migrations, so apply it by hand with a token that has D1 edit (`pnpm --filter @hushvault/api db:migrate:dev` / `db:migrate:production`). Until it is applied the new cron handler logs `key_rotation.tick_failed` and does nothing, and `GET /api/security/key-rotation` returns 500; everything else works.

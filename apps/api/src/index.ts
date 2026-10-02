@@ -15,6 +15,7 @@ import { globalApiRateLimit } from './middleware/auth'
 import { RateLimiter } from './lib/rate-limiter-do'
 import { SecretTooLargeError, redactPath } from './lib/security'
 import { rotationTick } from './lib/key-rotation'
+import type { EmailBinding } from './lib/email'
 
 export { RateLimiter }
 
@@ -27,6 +28,9 @@ export type Env = {
   ENCRYPTION_MASTER_KEY: string
   ENCRYPTION_ACTIVE_KEY_VERSION?: string
   ROTATION_BATCH_SIZE?: string
+  // Transactional email (issue #26): Cloudflare Email Service binding + sender address.
+  EMAIL?: EmailBinding
+  MAIL_FROM?: string
   JWT_SECRET: string
   STRIPE_SECRET_KEY?: string
   STRIPE_WEBHOOK_SECRET?: string

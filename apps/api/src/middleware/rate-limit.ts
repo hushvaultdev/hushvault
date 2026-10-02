@@ -83,3 +83,28 @@ export function createRateLimitMiddleware(options: RateLimitOptions): Middleware
     return next()
   }
 }
+
+/** SHA-256 hex of a lowercased identity (e.g. an email), so limiter object names hold no PII. */
+export async function identityKey(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value.trim().toLowerCase()))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+export type IdentityLimit = { scope: string; identity: string; limit: number; windowMs: number }
+
+/**
+ * Consume one hit for a non-IP identity (hash the identity first with identityKey). Returns
+ * `{ allowed }`, or `{ unavailable: true }` if the limiter backend failed so the caller can fail closed.
+ */
+export async function consumeIdentityLimit(env: Env, input: IdentityLimit): Promise<{ allowed: boolean; remaining: number } | { unavailable: true }> {
+  const key = `${input.scope}:${input.identity}`
+  try {
+    const ns = env.RATE_LIMITER as Env['RATE_LIMITER'] | undefined
+    const result = ns
+      ? await ns.get(ns.idFromName(key)).hit(input.limit, input.windowMs)
+      : consumeInMemory(env, key, Date.now(), input.limit, input.windowMs)
+    return { allowed: result.allowed, remaining: result.remaining }
+  } catch {
+    return { unavailable: true }
+  }
+}

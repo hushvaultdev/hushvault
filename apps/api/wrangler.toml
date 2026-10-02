@@ -72,6 +72,9 @@ ENVIRONMENT = "development"
 # ENCRYPTION_KEY_V<N>. Change this in git (after the new key secret exists) to rotate;
 # see docs/ENCRYPTION.md "Key rotation".
 ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
+# Sender address for transactional mail (issue #26). Must belong to a domain onboarded to
+# Cloudflare Email Service (issue #75).
+MAIL_FROM = "no-reply@hushvault.dev"
 # Used for OAuth redirects, share-link URLs and as an allowed CORS origin.
 WEB_APP_URL = "https://beta.hushvault.dev"
 
@@ -103,6 +106,13 @@ enabled = true
 [env.dev.triggers]
 crons = ["* * * * *"]
 
+# Cloudflare Email Service send binding (issue #26, #76). DISABLED until the sending domain is
+# onboarded (issue #75): uncomment, then deploy. Without it the code sends nothing and the auth
+# endpoints still respond normally. `allowed_sender_addresses` pins the binding to MAIL_FROM.
+# [[env.dev.send_email]]
+# name = "EMAIL"
+# allowed_sender_addresses = ["no-reply@hushvault.dev"]
+
 # Single-level subdomain on purpose: I believe Cloudflare's free universal
 # certificate covers only one subdomain level (api.beta.hushvault.dev could need
 # a paid certificate) — unverified, please check. The zone must be in the same
@@ -120,6 +130,7 @@ workers_dev = false
 ENVIRONMENT = "production"
 # See [env.dev.vars]: active KEK version for new writes.
 ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
+MAIL_FROM = "no-reply@hushvault.dev"
 WEB_APP_URL = "https://hushvault.dev"
 
 [[env.production.d1_databases]]
@@ -145,6 +156,13 @@ enabled = true
 
 [env.production.triggers]
 crons = ["* * * * *"]
+
+# Cloudflare Email Service send binding (issue #26, #76). DISABLED until the sending domain is
+# onboarded (issue #75): uncomment, then deploy. Without it the code sends nothing and the auth
+# endpoints still respond normally. `allowed_sender_addresses` pins the binding to MAIL_FROM.
+# [[env.production.send_email]]
+# name = "EMAIL"
+# allowed_sender_addresses = ["no-reply@hushvault.dev"]
 
 # Custom domain: Cloudflare creates the DNS record + certificate on deploy. The
 # zone must be in the same account and the deploy token needs Zone > Workers
