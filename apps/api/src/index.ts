@@ -17,8 +17,11 @@ import { RateLimiter } from './lib/rate-limiter-do'
 import { SecretTooLargeError, redactPath } from './lib/security'
 import { rotationTick } from './lib/key-rotation'
 import type { EmailBinding } from './lib/email'
+import { registerProviders } from './integrations/providers'
 
 export { RateLimiter }
+
+registerProviders()
 
 export type Env = {
   DB: D1Database
@@ -46,6 +49,8 @@ export type Env = {
   GOOGLE_CLIENT_SECRET?: string
   // Base URL of the dashboard, used as the OAuth success redirect target.
   WEB_APP_URL?: string
+  // Extra Worker names (comma list) that may never be a sync target; adds to the built-in HushVault names.
+  HUSHVAULT_SYNC_DENY_SCRIPTS?: string
 }
 
 declare module 'hono' {

@@ -25,9 +25,9 @@ export const INTEGRATIONS: readonly IntegrationInfo[] = [
     id: 'cloudflare-workers',
     name: 'Cloudflare Workers',
     mark: 'CW',
-    status: 'planned',
+    status: 'beta',
     directions: ['push'],
-    summary: 'Planned: push resolved secrets to a Cloudflare Worker as Worker secrets.',
+    summary: 'Beta: push an environment to a Cloudflare Worker one way, Worker secrets only (API only, manual runs).',
     issue: 41,
   },
   {

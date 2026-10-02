@@ -1,14 +1,17 @@
 import { zValidator } from '@hono/zod-validator'
-import { INTEGRATIONS } from '@hushvault/shared/integrations'
+import { FREE_PLAN_MAX_SYNC_TARGETS, INTEGRATIONS, type SyncErrorCode } from '@hushvault/shared/integrations'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { encryptCredentialWithRing } from '../crypto/envelope'
 import { getProvider, connectableProviderIds } from '../integrations/provider'
+import { isDeniedScript } from '../integrations/providers/cloudflare-workers'
+import { SyncEngineError, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
+import { isSyncProvider } from '../integrations/sync-types'
 import { createPrefixedId } from '../lib/auth'
 import { loadWriteRing } from '../lib/key-rotation'
 import { getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
-import { integrationWriteRateLimit, requireAuth, requireHuman, requireRole } from '../middleware/auth'
+import { integrationPreviewRateLimit, integrationRunRateLimit, integrationWriteRateLimit, requireAuth, requireHuman, requireRole } from '../middleware/auth'
 import type { MiddlewareHandler } from 'hono'
 
 // Outbound credential management (issue #39). Everything that creates, reads or changes a connection is
@@ -189,17 +192,274 @@ integrationsRouter.put('/connections/:id/credential', ...adminOnly, integrationW
 integrationsRouter.delete('/connections/:id', ...adminOnly, integrationWriteRateLimit, async (c) => {
   const auth = c.get('auth')
   const { id } = c.req.param()
+  // Revoking cascades to the connection's sync targets (migration 0011): list them first so each removal is audited.
+  const cascaded = await c.env.DB.prepare('SELECT id FROM sync_targets WHERE connection_id = ? AND org_id = ? AND deleted_at IS NULL').bind(id, auth.orgId).all<{ id: string }>()
   const result = await c.env.DB.prepare('DELETE FROM integration_connections WHERE id = ? AND org_id = ?').bind(id, auth.orgId).run()
   if (Number(result.meta.changes ?? 0) !== 1) {
     return c.json({ error: 'NOT_FOUND', message: 'Connection not found' }, 404)
   }
+  for (const t of cascaded.results ?? []) await audit(c, auth, 'sync.target.delete', t.id, 'sync_target')
   await audit(c, auth, 'integration.revoke', id)
   return c.json({ data: { revoked: true } })
 })
 
+// ---------------------------------------------------------------------------------------------
+// Sync targets and runs (issues #40, #41). Same guards as connections: human-only, admin+, current membership.
+// Responses are DTOs: names, counts and ids. Never values, credentials or provider bodies.
+// ---------------------------------------------------------------------------------------------
+
+const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+const nameFilterSchema = z.object({
+  prefix: z.string().max(64).regex(/^[A-Za-z0-9_]*$/, 'Prefix may only contain letters, digits and underscores').optional(),
+  deny: z.array(z.string().max(128).regex(NAME, 'Invalid name in deny list')).max(200).optional(),
+}).strict()
+
+const createTargetSchema = z.object({
+  projectId: z.string().min(1).max(64),
+  envId: z.string().min(1).max(64),
+  connectionId: z.string().min(1).max(64),
+  resource: z.record(z.unknown()),
+  nameFilter: nameFilterSchema.optional(),
+  deleteRemoved: z.boolean().optional(),
+}).strict()
+
+const patchTargetSchema = z.object({
+  resource: z.record(z.unknown()).optional(),
+  nameFilter: nameFilterSchema.optional(),
+  deleteRemoved: z.boolean().optional(),
+}).strict()
+
+function canonicalResource(resource: Record<string, string>): string {
+  return JSON.stringify(Object.keys(resource).sort().map((k) => [k, resource[k]]))
+}
+
+/** Normalised filter: drop empty fields so equal filters compare equal. */
+function cleanFilter(f: z.infer<typeof nameFilterSchema> | undefined): { prefix?: string; deny?: string[] } {
+  const out: { prefix?: string; deny?: string[] } = {}
+  if (f?.prefix) out.prefix = f.prefix
+  if (f?.deny && f.deny.length > 0) out.deny = [...new Set(f.deny)]
+  return out
+}
+
+type ConnRow = { id: string; provider: string; config_json: string }
+type ResourceCheck = { ok: true; resource: Record<string, string> } | { ok: false; status: 400 | 409 | 422; error: string; message: string }
+
+/** Validate a resource for a connection: provider syntax, same account as the connection, denylist, no duplicate target. */
+async function checkResource(env: Env, orgId: string, conn: ConnRow, raw: unknown, excludeTargetId?: string): Promise<ResourceCheck> {
+  const provider = getProvider(conn.provider)
+  if (!isSyncProvider(provider)) return { ok: false, status: 400, error: 'UNSUPPORTED_PROVIDER', message: 'This integration cannot be used as a sync target' }
+  const resource = provider.parseResource(raw)
+  if (!resource) return { ok: false, status: 400, error: 'VALIDATION_ERROR', message: 'Invalid target settings' }
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(conn.config_json) as Record<string, unknown> } catch { config = {} }
+  if (config['accountId'] !== undefined && resource['accountId'] !== undefined && config['accountId'] !== resource['accountId']) {
+    return { ok: false, status: 400, error: 'VALIDATION_ERROR', message: 'Target account does not match the connection' }
+  }
+  if (resource['scriptName'] !== undefined && isDeniedScript(env, resource['scriptName'])) {
+    return { ok: false, status: 422, error: 'TARGET_NOT_ALLOWED', message: 'This Worker cannot be used as a sync target' }
+  }
+  const same = await env.DB.prepare('SELECT id, resource_json FROM sync_targets WHERE org_id = ? AND connection_id = ? AND deleted_at IS NULL').bind(orgId, conn.id).all<{ id: string; resource_json: string }>()
+  const wanted = canonicalResource(resource)
+  for (const row of same.results ?? []) {
+    if (row.id === excludeTargetId) continue
+    try {
+      if (canonicalResource(JSON.parse(row.resource_json) as Record<string, string>) === wanted) {
+        return { ok: false, status: 409, error: 'CONFLICT', message: 'A sync target for this resource already exists' }
+      }
+    } catch { /* an unparseable row cannot clash */ }
+  }
+  return { ok: true, resource }
+}
+
+const SYNC_ERROR_RESPONSES: Record<string, { status: 422 | 429 | 502; message: string }> = {
+  PROVIDER_AUTH: { status: 422, message: 'The provider rejected the stored credential' },
+  CREDENTIAL_UNAVAILABLE: { status: 422, message: 'The stored credential could not be used; rotate it' },
+  COMPUTED_ERROR: { status: 422, message: 'The environment could not be resolved (check computed secrets)' },
+  TARGET_NOT_FOUND: { status: 422, message: 'The provider could not find the target' },
+  PROVIDER_RATE_LIMIT: { status: 429, message: 'The provider is rate limiting requests; try again shortly' },
+  PROVIDER_VALIDATION: { status: 502, message: 'The provider rejected the request' },
+  PROVIDER_ERROR: { status: 502, message: 'Could not reach the provider' },
+  TIMEOUT: { status: 502, message: 'The provider timed out' },
+}
+
+function syncFailure(code: SyncErrorCode) {
+  const mapped = SYNC_ERROR_RESPONSES[code] ?? { status: 502 as const, message: 'Could not reach the provider' }
+  return { body: { error: code, message: mapped.message }, status: mapped.status }
+}
+
+const notFound = (what: string) => ({ error: 'NOT_FOUND', message: `${what} not found` })
+const deniedBody = { error: 'TARGET_NOT_ALLOWED', message: 'This Worker cannot be used as a sync target' }
+
+// POST /api/integrations/targets
+integrationsRouter.post('/targets', ...adminOnly, integrationWriteRateLimit, zValidator('json', createTargetSchema, validationHook), async (c) => {
+  const auth = c.get('auth')
+  const body = c.req.valid('json')
+
+  const conn = await c.env.DB.prepare('SELECT id, provider, config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1').bind(body.connectionId, auth.orgId).first<ConnRow>()
+  if (!conn) return c.json(notFound('Connection'), 404)
+  const project = await c.env.DB.prepare('SELECT id FROM projects WHERE id = ? AND org_id = ? LIMIT 1').bind(body.projectId, auth.orgId).first()
+  if (!project) return c.json(notFound('Project'), 404)
+  const environment = await c.env.DB.prepare('SELECT id FROM environments WHERE id = ? AND project_id = ? LIMIT 1').bind(body.envId, body.projectId).first()
+  if (!environment) return c.json(notFound('Environment'), 404)
+
+  const checked = await checkResource(c.env, auth.orgId, conn, body.resource)
+  if (!checked.ok) return c.json({ error: checked.error, message: checked.message }, checked.status)
+
+  const id = createPrefixedId('ist')
+  const now = new Date().toISOString()
+  // The free-plan cap is enforced inside the INSERT, so concurrent requests cannot exceed it.
+  try {
+    await c.env.DB.prepare(
+      "INSERT INTO sync_targets (id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, fingerprint_salt, status, created_by, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ? WHERE (SELECT plan FROM organisations WHERE id = ?) <> 'free' OR (SELECT COUNT(*) FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL) < ?",
+    ).bind(id, auth.orgId, body.projectId, body.envId, conn.id, conn.provider, JSON.stringify(checked.resource), JSON.stringify(cleanFilter(body.nameFilter)), body.deleteRemoved ? 1 : 0, newFingerprintSalt(), auth.userId, now, now, auth.orgId, auth.orgId, FREE_PLAN_MAX_SYNC_TARGETS).run()
+  } catch {
+    return c.json({ error: 'INTERNAL_ERROR', message: 'Could not create the sync target' }, 500)
+  }
+  const target = await loadSyncTarget(c.env, id, auth.orgId)
+  if (!target) {
+    return c.json({ error: 'PLAN_LIMIT', message: `The Free plan allows ${FREE_PLAN_MAX_SYNC_TARGETS} sync targets; upgrade to add more` }, 409)
+  }
+  await audit(c, auth, 'sync.target.create', id, 'sync_target')
+  return c.json({ data: await toSyncTargetDto(c.env, target) }, 201)
+})
+
+// GET /api/integrations/targets
+integrationsRouter.get('/targets', ...adminOnly, async (c) => {
+  const auth = c.get('auth')
+  const rows = await c.env.DB.prepare('SELECT id FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 200').bind(auth.orgId).all<{ id: string }>()
+  const data = []
+  for (const row of rows.results ?? []) {
+    const target = await loadSyncTarget(c.env, row.id, auth.orgId)
+    if (target) data.push(await toSyncTargetDto(c.env, target))
+  }
+  return c.json({ data })
+})
+
+// PATCH /api/integrations/targets/:id - the connection cannot be changed
+integrationsRouter.patch('/targets/:id', ...adminOnly, integrationWriteRateLimit, zValidator('json', patchTargetSchema, validationHook), async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.param()
+  const body = c.req.valid('json')
+  const target = await loadSyncTarget(c.env, id, auth.orgId)
+  if (!target) return c.json(notFound('Sync target'), 404)
+
+  let resource = target.resource
+  let resourceChanged = false
+  if (body.resource !== undefined) {
+    const conn = await c.env.DB.prepare('SELECT id, provider, config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1').bind(target.connectionId, auth.orgId).first<ConnRow>()
+    if (!conn) return c.json(notFound('Connection'), 404)
+    const checked = await checkResource(c.env, auth.orgId, conn, body.resource, target.id)
+    if (!checked.ok) return c.json({ error: checked.error, message: checked.message }, checked.status)
+    resource = checked.resource
+    resourceChanged = canonicalResource(resource) !== canonicalResource(target.resource)
+  }
+  const nameFilter = body.nameFilter !== undefined ? cleanFilter(body.nameFilter) : target.nameFilter
+  const deleteRemoved = body.deleteRemoved ?? target.deleteRemoved
+  const now = new Date().toISOString()
+  const statements = [
+    c.env.DB.prepare("UPDATE sync_targets SET resource_json = ?, name_filter_json = ?, delete_removed = ?, status = CASE WHEN ? = 1 THEN 'active' ELSE status END, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL")
+      .bind(JSON.stringify(resource), JSON.stringify(nameFilter), deleteRemoved ? 1 : 0, resourceChanged ? 1 : 0, now, id, auth.orgId),
+  ]
+  // The ledger describes names HushVault wrote to the OLD resource. On a new resource it must not authorise deletes.
+  if (resourceChanged) statements.push(c.env.DB.prepare('DELETE FROM sync_items WHERE target_id = ?').bind(id))
+  await c.env.DB.batch(statements)
+
+  await audit(c, auth, 'sync.target.update', id, 'sync_target')
+  const updated = await loadSyncTarget(c.env, id, auth.orgId)
+  if (!updated) return c.json(notFound('Sync target'), 404)
+  return c.json({ data: await toSyncTargetDto(c.env, updated) })
+})
+
+// DELETE /api/integrations/targets/:id - soft delete; nothing is removed from the provider
+integrationsRouter.delete('/targets/:id', ...adminOnly, integrationWriteRateLimit, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.param()
+  const now = new Date().toISOString()
+  const result = await c.env.DB.prepare('UPDATE sync_targets SET deleted_at = ?, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL').bind(now, now, id, auth.orgId).run()
+  if (Number(result.meta.changes ?? 0) !== 1) return c.json(notFound('Sync target'), 404)
+  await audit(c, auth, 'sync.target.delete', id, 'sync_target')
+  return c.json({ data: { deleted: true } })
+})
+
+/** Re-check the denylist at use time: the var may have changed since the target was created. */
+function targetDenied(env: Env, resource: Record<string, string>): boolean {
+  return resource['scriptName'] !== undefined && isDeniedScript(env, resource['scriptName'])
+}
+
+// POST /api/integrations/targets/:id/preview - names only
+integrationsRouter.post('/targets/:id/preview', ...adminOnly, integrationPreviewRateLimit, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.param()
+  const target = await loadSyncTarget(c.env, id, auth.orgId)
+  if (!target) return c.json(notFound('Sync target'), 404)
+  if (targetDenied(c.env, target.resource)) return c.json(deniedBody, 422)
+  try {
+    const result = await previewSync(c.env, auth.orgId, id, { actorId: auth.userId, actorType: 'user' })
+    if (!result.ok) {
+      const failure = syncFailure(result.code)
+      return c.json(failure.body, failure.status)
+    }
+    return c.json({ data: result.plan })
+  } catch (err) {
+    if (err instanceof SyncEngineError) {
+      return err.code === 'NOT_FOUND' ? c.json(notFound('Sync target'), 404) : c.json({ error: 'PROVIDER_UNAVAILABLE', message: 'This integration is not available' }, 503)
+    }
+    return c.json({ error: 'INTERNAL_ERROR', message: 'Could not build the preview' }, 500)
+  }
+})
+
+// POST /api/integrations/targets/:id/run
+integrationsRouter.post('/targets/:id/run', ...adminOnly, integrationRunRateLimit, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.param()
+  const target = await loadSyncTarget(c.env, id, auth.orgId)
+  if (!target) return c.json(notFound('Sync target'), 404)
+  if (targetDenied(c.env, target.resource)) return c.json(deniedBody, 422)
+  try {
+    // A plan with blockers is refused up front (422 SYNC_BLOCKED with the plan) instead of recording a failed run.
+    const preview = await previewSync(c.env, auth.orgId, id, { actorId: auth.userId, actorType: 'user' })
+    if (!preview.ok) {
+      const failure = syncFailure(preview.code)
+      return c.json(failure.body, failure.status)
+    }
+    if (preview.plan.blockers.length > 0) {
+      return c.json({ error: 'SYNC_BLOCKED', message: 'The plan has blockers; fix them before running', plan: preview.plan }, 422)
+    }
+    const run = await runSync(c.env, id, { trigger: 'manual', actorId: auth.userId, orgId: auth.orgId })
+    return c.json({ data: run })
+  } catch (err) {
+    if (err instanceof SyncEngineError) {
+      if (err.code === 'NOT_FOUND') return c.json(notFound('Sync target'), 404)
+      if (err.code === 'BUSY') return c.json({ error: 'BUSY', message: 'A sync is already running for this target' }, 409)
+      return c.json({ error: 'PROVIDER_UNAVAILABLE', message: 'This integration is not available' }, 503)
+    }
+    return c.json({ error: 'INTERNAL_ERROR', message: 'Could not run the sync' }, 500)
+  }
+})
+
+// GET /api/integrations/targets/:id/runs - newest first, max 50
+integrationsRouter.get('/targets/:id/runs', ...adminOnly, async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.param()
+  const target = await loadSyncTarget(c.env, id, auth.orgId)
+  if (!target) return c.json(notFound('Sync target'), 404)
+  const rows = await c.env.DB.prepare(
+    'SELECT id, target_id, trigger, status, attempt, counts_json, error_code, started_at, finished_at, next_retry_at FROM sync_runs WHERE target_id = ? ORDER BY started_at DESC, id DESC LIMIT 50',
+  ).bind(id).all<Parameters<typeof toSyncRunDto>[0]>()
+  return c.json({ data: (rows.results ?? []).map(toSyncRunDto) })
+})
+
+// GET /api/integrations/runs/:runId
+integrationsRouter.get('/runs/:runId', ...adminOnly, async (c) => {
+  const auth = c.get('auth')
+  const run = await loadSyncRun(c.env, auth.orgId, c.req.param('runId'))
+  if (!run) return c.json(notFound('Run'), 404)
+  return c.json({ data: run })
+})
+
 type Auth = { orgId: string; userId: string; actorType: 'user' | 'api_key' }
 
-async function audit(c: { env: Env; req: { header: (n: string) => string | undefined } } & Parameters<typeof getRequestIp>[0], auth: Auth, action: string, resourceId: string) {
+async function audit(c: { env: Env; req: { header: (n: string) => string | undefined } } & Parameters<typeof getRequestIp>[0], auth: Auth, action: string, resourceId: string, resourceType = 'integration_connection') {
   // The change is already committed: a failed audit write must not turn it into a 500 the client retries.
   try {
     await writeAuditLog(c.env, {
@@ -207,7 +467,7 @@ async function audit(c: { env: Env; req: { header: (n: string) => string | undef
     actorId: auth.userId,
     actorType: auth.actorType,
     action,
-    resourceType: 'integration_connection',
+    resourceType,
     resourceId,
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),

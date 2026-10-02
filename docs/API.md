@@ -450,7 +450,7 @@ expired or `maxViews` has been reached.
 
 ## Integrations
 
-Outbound credential vault (issue #39). No integration can sync yet; the first provider (Cloudflare Workers) arrives with M3.
+Outbound credential vault (issue #39) and secret sync (issues #40, #41). The only provider is Cloudflare Workers secrets (beta); see `docs/INTEGRATIONS.md`.
 Everything that touches a connection is **JWT only (API keys get `403`), admin or owner, rate limited (20/min) and audited**.
 The credential is accepted once and never returned, logged or echoed in an error; responses carry metadata only. It is stored as
 ciphertext (format tag `c2:`) bound by AES-GCM AAD to `(organisation id, connection id)` and re-wrapped by key rotation like a secret.
@@ -465,6 +465,28 @@ ciphertext (format tag `c2:`) bound by AES-GCM AAD to `(organisation id, connect
 
 Audit actions: `integration.connect`, `integration.update`, `integration.revoke` (resource id only). `GET /api/security/key-rotation`
 now also reports `rows.connections` per key version.
+
+### Sync targets and runs
+
+A target pushes one environment's resolved secrets (inheritance and computed secrets applied) to one provider resource, one way.
+Same guards as connections: **JWT only (API keys `403`), admin or owner with a current membership re-read**. Responses are DTOs
+(`SyncTargetDto`, `SyncPlanDto`, `SyncRunDto` in `packages/shared/src/integrations.ts`): names, counts and ids, never values,
+credentials, the fingerprint salt or provider response bodies. Not-found and cross-organisation ids are both `404`.
+
+| Endpoint | Notes |
+|----------|-------|
+| `POST /api/integrations/targets` | Body `{ projectId, envId, connectionId, resource, nameFilter?: { prefix?, deny? }, deleteRemoved?: false }`, unknown fields rejected. `resource` is validated by the provider (Cloudflare Workers: `{ accountId, scriptName }`, identifiers only; the account must match the connection). `201 { data: SyncTargetDto }`. Errors: `400 VALIDATION_ERROR`, `404` (connection, project or environment not in your organisation), `409 CONFLICT` (same resource already a target of that connection) / `PLAN_LIMIT` (Free plan: 2 targets per organisation, enforced inside the INSERT), `422 TARGET_NOT_ALLOWED` (HushVault's own Workers and `HUSHVAULT_SYNC_DENY_SCRIPTS`). Rate limited 20/min. |
+| `GET /api/integrations/targets` | `{ data: SyncTargetDto[] }`, newest first. |
+| `PATCH /api/integrations/targets/:id` | Body `{ resource?, nameFilter?, deleteRemoved? }`; `connectionId` is rejected (`400`). Changing `resource` clears the target's ledger, so names written to the old resource can never authorise deletes on the new one. |
+| `DELETE /api/integrations/targets/:id` | Soft delete (`{ data: { deleted: true } }`); nothing is removed on the provider. Frees the plan slot. |
+| `POST /api/integrations/targets/:id/preview` | `{ data: SyncPlanDto }` (`create/update/delete/skip/conflict` names and `blockers`). Audited as `secret.read_bulk`. Rate limited 12/min. |
+| `POST /api/integrations/targets/:id/run` | Rate limited 6/min. `200 { data: SyncRunDto }`; a push failure is a recorded run (`failed`/`partial` with `errorCode`), not an HTTP error. `422 SYNC_BLOCKED { plan }` when the plan has blockers (no run recorded). Other errors carry the provider code: `422 PROVIDER_AUTH / CREDENTIAL_UNAVAILABLE / COMPUTED_ERROR / TARGET_NOT_FOUND`, `429 PROVIDER_RATE_LIMIT`, `502 PROVIDER_ERROR / TIMEOUT / PROVIDER_VALIDATION`, `409 BUSY` (a run is already active), `503 PROVIDER_UNAVAILABLE`. |
+| `GET /api/integrations/targets/:id/runs` | `{ data: SyncRunDto[] }` newest first, max 50. |
+| `GET /api/integrations/runs/:runId` | `{ data: SyncRunDto }`. |
+
+Deleting a connection **cascades** to its targets (migration 0011); each removed target is audited as `sync.target.delete`.
+Audit actions: `sync.target.create`, `sync.target.update`, `sync.target.delete` (resource type `sync_target`), `sync.run.started`,
+`sync.run.succeeded`, `sync.run.failed` (resource type `sync_run`).
 
 ## Security
 

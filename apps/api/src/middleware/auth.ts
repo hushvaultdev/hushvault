@@ -123,6 +123,20 @@ export const integrationWriteRateLimit = createRateLimitMiddleware({
   failClosed: true,
 })
 
+export const integrationRunRateLimit = createRateLimitMiddleware({
+  scope: 'integration-run',
+  limit: 6,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
+export const integrationPreviewRateLimit = createRateLimitMiddleware({
+  scope: 'integration-preview',
+  limit: 12,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
 export const loginRateLimit = createRateLimitMiddleware({
   scope: 'auth-login',
   limit: 10,

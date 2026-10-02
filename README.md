@@ -24,11 +24,12 @@
 - Email verification and password reset (on the dev deployment; production rollout pending)
 - Short-lived sessions with rotating refresh tokens, and ciphertext bound to its record (AAD)
 - CLI: `login`, `init`, `set`, `get`, `run`, `share`
+- Cloudflare Workers secrets sync: beta, API only, not yet verified against a live account (see `docs/integrations/cloudflare-workers.md`)
 - Web dashboard: sign-in, projects, secrets, audit log
 
 **Planned, not built**
 
-- Integrations, all planned: Cloudflare Workers secrets push, GitHub Actions, Cloudflare Pages, Slack, webhooks (status in `packages/shared/src/integrations.ts`)
+- Integrations still planned: GitHub Actions, Cloudflare Pages, Slack, webhooks (status in `packages/shared/src/integrations.ts`)
 - Stripe billing, hosted paid plans, and plan-limit enforcement
 - SSO/SAML
 - Team invites and member management
