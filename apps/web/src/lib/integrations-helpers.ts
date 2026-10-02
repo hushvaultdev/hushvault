@@ -1,4 +1,4 @@
-import type { SyncPlanDto, SyncRunDto, SyncTargetDto } from '@hushvault/shared/integrations'
+import { FREE_PLAN_MAX_SYNC_TARGETS, type SyncPlanDto, type SyncRunDto, type SyncTargetDto } from '@hushvault/shared/integrations'
 
 import { ApiError } from './api'
 
@@ -25,16 +25,29 @@ const ERROR_MESSAGES: Record<string, string> = {
   CREDENTIAL_REJECTED: 'The provider rejected this credential. Check that the token is valid and has the permissions listed above.',
   UNSUPPORTED_PROVIDER: 'This provider cannot be connected in this deployment.',
   LIMIT_REACHED: 'The connection limit for your organisation has been reached. Revoke an unused connection first.',
-  CONFLICT: 'That label is already in use. Choose a different one.',
-  PLAN_LIMIT: 'Your plan allows at most 2 sync targets. Remove one or upgrade to add more.',
+  PLAN_LIMIT: `Your plan allows at most ${FREE_PLAN_MAX_SYNC_TARGETS} sync targets. Remove one or upgrade to add more.`,
   SYNC_BLOCKED: 'This run is blocked. Use Preview to see which names need fixing.',
+  PROVIDER_AUTH: 'The provider rejected the stored credential. Rotate the credential on the connection, then run again.',
   PROVIDER_RATE_LIMIT: 'The provider is rate limiting requests. Wait a minute and try again.',
+  PROVIDER_VALIDATION: 'The provider refused a value or name. Use Preview to check names and sizes, then fix the secret or the name filter.',
   PROVIDER_ERROR: 'The provider returned an error. Try again shortly.',
+  TARGET_NOT_FOUND: 'The target resource (for example the Worker) was not found. Check it still exists, or edit the target to point at the right one.',
+  COMPUTED_ERROR: 'A computed secret could not be resolved. Fix its ${NAME} references in the project, then run again.',
+  CREDENTIAL_UNAVAILABLE: 'The stored credential could not be used. Rotate the credential on the connection, then run again.',
+  TIMEOUT: 'The run timed out before finishing. Run again; partial progress is kept.',
+}
+
+/** Guidance for a failed or partial run's error code, or null when there is none to show. */
+export function runErrorGuidance(code: string | null | undefined): string | null {
+  if (!code) return null
+  return ERROR_MESSAGES[code] ?? `The run stopped with ${code}. Try again shortly.`
 }
 
 /** Maps API failures to a short message. Never includes request bodies, so no credential can leak. */
 export function describeApiError(err: unknown, fallback: string): string {
   if (!(err instanceof ApiError)) return fallback
+  // CONFLICT is context dependent (label in use, resource already a target), so use the API's own message.
+  if (err.code === 'CONFLICT') return err.message || 'That conflicts with existing data.'
   const known = ERROR_MESSAGES[err.code]
   if (known) return known
   if (err.status === 403) return 'Only organisation admins can manage integrations, and only from a signed-in session (not an API key).'
@@ -42,6 +55,7 @@ export function describeApiError(err: unknown, fallback: string): string {
   if (err.status === 409) return err.message || 'That conflicts with existing data.'
   if (err.status === 422) return err.message || 'The request could not be processed.'
   if (err.status === 0) return err.message
+  if (err.status === 502) return ERROR_MESSAGES['PROVIDER_ERROR'] ?? fallback
   if (err.status >= 500) return 'The server had a problem. Try again shortly.'
   return err.message || fallback
 }

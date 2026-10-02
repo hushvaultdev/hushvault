@@ -180,7 +180,7 @@ export async function syncStatusAction(client: ApiClient, input: string, opts: S
     dump({ target: view, latestRun: latest ?? null }, out)
   } else {
     out(`${view.label}  ${view.id}`)
-    out(`  status: ${view.status}${view.status === 'needs_attention' ? ' (fix the connection or target in the dashboard)' : ''}`)
+    out(`  status: ${view.status}${view.status === 'needs_attention' ? ' (in the dashboard, rotate the connection credential or edit the target, then run again)' : ''}`)
     out(`  deletes on target: ${view.deleteRemoved ? 'on' : 'off'}`)
     if (latest) printRun(latest, out)
     else out('  no runs yet')

@@ -128,7 +128,7 @@ available depends on your deployment.
 ### `hushvault sync <list|status|preview|run>`
 
 Inspect and trigger one-way HushVault to target syncs (for example Cloudflare Workers secrets). Connections and
-targets are created in the dashboard (Integrations); the CLI only reads and runs them. These commands do not need
+targets are created and edited in the dashboard (Integrations); the CLI only reads, previews and runs them. These commands do not need
 `.hushvault.json`.
 
 | Command | What it does |
@@ -145,6 +145,10 @@ Options: `--json` on all four (machine-readable; only known fields are emitted).
 When the plan contains deletes, `run` asks for confirmation on a terminal and otherwise (non-interactive, or with
 `--json`) refuses unless `--yes` is given. Deletes only ever apply to names HushVault itself created, and only when
 the target's delete toggle is on (default off).
+
+`run` re-plans on the server when it executes, so the plan it actually runs can differ from the preview or the plan
+printed just before it (for example if secrets changed in between). `--yes` skips the delete confirmation, so use it
+only when you accept whatever the server plans at that moment.
 
 Output is names and counts only: never secret values, provider credentials or provider responses.
 

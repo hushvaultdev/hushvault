@@ -27,7 +27,7 @@ export const INTEGRATIONS: readonly IntegrationInfo[] = [
     mark: 'CW',
     status: 'beta',
     directions: ['push'],
-    summary: 'Beta: push an environment to a Cloudflare Worker one way, Worker secrets only (API only, manual runs).',
+    summary: 'Beta: push an environment to a Cloudflare Worker one way, Worker secrets only, with manual runs from the dashboard, CLI or API; not yet verified against a live Cloudflare account.',
     issue: 41,
   },
   {

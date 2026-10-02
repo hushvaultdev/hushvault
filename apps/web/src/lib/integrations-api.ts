@@ -71,6 +71,13 @@ export function createTarget(input: {
   return apiFetch<SyncTargetDto>(`${BASE}/targets`, { method: 'POST', body: input })
 }
 
+export function updateTarget(
+  id: string,
+  input: { resource?: Record<string, string>; nameFilter?: SyncNameFilter; deleteRemoved?: boolean },
+): Promise<SyncTargetDto> {
+  return apiFetch<SyncTargetDto>(`${BASE}/targets/${encodeURIComponent(id)}`, { method: 'PATCH', body: input })
+}
+
 export function deleteTarget(id: string): Promise<unknown> {
   return apiFetch<unknown>(`${BASE}/targets/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }

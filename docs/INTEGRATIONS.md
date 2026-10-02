@@ -5,7 +5,7 @@ README derive from it, and tests fail if an entry is promoted to beta/available 
 
 | Integration | Status | Direction | Notes |
 |-------------|--------|-----------|-------|
-| Cloudflare Workers | **beta** | push | Worker secrets only. See [integrations/cloudflare-workers.md](integrations/cloudflare-workers.md). API only: there is no dashboard UI for targets yet. |
+| Cloudflare Workers | **beta** | push | Worker secrets only. See [integrations/cloudflare-workers.md](integrations/cloudflare-workers.md). Manual runs from the dashboard, `hushvault sync` and the API; one way. Not yet verified against a live Cloudflare account. |
 | GitHub Actions | planned | pull, push | Not built. |
 | Cloudflare Pages | planned | push | Not built, lowest priority. |
 | Slack | planned | notify | Not built. |
@@ -36,4 +36,5 @@ is not built.
   Several Cloudflare API details are unverified (list in the provider doc).
 - No scheduler yet: runs are manual (`POST /targets/:id/run`). Failed runs record `nextRetryAt`, but nothing retries them yet.
 - No automatic sync on secret change.
-- No dashboard or CLI surface for targets yet.
+- Surfaces: the dashboard (Integrations) creates, edits, previews and runs targets; `hushvault sync` lists, previews and runs them; the API does all of it.
+  Connections and targets are created in the dashboard or the API, not the CLI.

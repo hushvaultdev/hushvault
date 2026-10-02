@@ -8,6 +8,7 @@ import { Card } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Field } from '@/components/ui/field'
 import { revokeConnection, rotateCredential, type ConnectionDto } from '@/lib/integrations-api'
+import { useFocusReturn } from '@/lib/use-focus-return'
 import { describeApiError, formatWhen, validateCredential } from '@/lib/integrations-helpers'
 
 import styles from './integrations.module.css'
@@ -31,6 +32,7 @@ function ConnectionRow({
   const [credential, setCredential] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const revokeRef = useFocusReturn<HTMLDivElement>(mode === 'revoke')
 
   async function rotate(e: React.FormEvent) {
     e.preventDefault()
@@ -107,10 +109,10 @@ function ConnectionRow({
       ) : null}
 
       {mode === 'revoke' ? (
-        <div className={s('confirm')} role="alertdialog" aria-label={`Confirm revoking ${connection.label}`}>
+        <div ref={revokeRef} tabIndex={-1} className={s('confirm')} role="alertdialog" aria-label={`Confirm revoking ${connection.label}`}>
           <p className={s('note')}>
-            Revoking deletes the stored credential permanently. Sync targets using this connection will stop working. Secrets already
-            pushed stay on the target. This does not revoke the token at the provider; do that there as well.
+            Revoking deletes the stored credential permanently. Revoking also removes its sync targets and their run history. Secrets
+            already pushed to the target stay there. This does not revoke the token at the provider; do that there as well.
           </p>
           <div className={s('actions')}>
             <Button type="button" size="sm" variant="danger" loading={busy} onClick={() => void revoke()}>

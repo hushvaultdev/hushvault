@@ -1,6 +1,6 @@
 'use client'
 
-import type { SyncPlanDto, SyncRunDto, SyncTargetDto } from '@hushvault/shared/integrations'
+import { FREE_PLAN_MAX_SYNC_TARGETS, type SyncPlanDto, type SyncRunDto, type SyncTargetDto } from '@hushvault/shared/integrations'
 import { useCallback, useEffect, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -15,6 +15,7 @@ import {
   listRuns,
   previewTarget,
   runTarget,
+  updateTarget,
   type ConnectionDto,
 } from '@/lib/integrations-api'
 import {
@@ -26,10 +27,12 @@ import {
   planIsEmpty,
   resourceText,
   runCountsText,
+  runErrorGuidance,
   targetNeedsAttention,
   validateNameFilter,
   validateScriptName,
 } from '@/lib/integrations-helpers'
+import { useFocusReturn } from '@/lib/use-focus-return'
 import type { EnvironmentRow, ProjectRow } from '@/lib/types'
 
 import styles from './integrations.module.css'
@@ -65,6 +68,92 @@ function PlanView({ plan }: { plan: SyncPlanDto }) {
   )
 }
 
+function RunResult({ run }: { run: SyncRunDto }) {
+  const bad = run.status === 'failed' || run.status === 'partial'
+  const guidance = bad ? runErrorGuidance(run.errorCode) : null
+  return (
+    <div className={s('note')} role={bad ? 'alert' : 'status'}>
+      <p>
+        Run {run.status}: {runCountsText(run.counts)}.
+      </p>
+      {run.errorCode ? <p>Error code: {run.errorCode}</p> : null}
+      {guidance ? <p>{guidance}</p> : null}
+    </div>
+  )
+}
+
+function EditTargetForm({
+  target,
+  onSaved,
+  onCancel,
+}: {
+  target: SyncTargetDto
+  onSaved: (target: SyncTargetDto) => void
+  onCancel: () => void
+}) {
+  const accountId = target.resource['accountId'] ?? ''
+  const [scriptName, setScriptName] = useState(target.resource['scriptName'] ?? '')
+  const [prefix, setPrefix] = useState(target.nameFilter.prefix ?? '')
+  const [deny, setDeny] = useState((target.nameFilter.deny ?? []).join(', '))
+  const [deleteRemoved, setDeleteRemoved] = useState(target.deleteRemoved)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const ref = useFocusReturn<HTMLFormElement>(true)
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (busy) return
+    const denyList = parseNameList(deny)
+    const problem = validateScriptName(scriptName.trim()) ?? validateNameFilter(prefix.trim(), denyList)
+    if (problem) {
+      setError(problem)
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      onSaved(
+        await updateTarget(target.id, {
+          resource: { ...target.resource, accountId, scriptName: scriptName.trim() },
+          nameFilter: { ...(prefix.trim() ? { prefix: prefix.trim() } : {}), ...(denyList.length > 0 ? { deny: denyList } : {}) },
+          deleteRemoved,
+        }),
+      )
+    } catch (err) {
+      setError(describeApiError(err, 'Could not save the target.'))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form ref={ref} tabIndex={-1} className={s('form')} onSubmit={(e) => void submit(e)} aria-label="Edit sync target">
+      <p className={s('note')}>The connection cannot be changed. To use another connection, remove this target and create a new one.</p>
+      <Field label="Worker name" name={`edit-script-${target.id}`} value={scriptName} onChange={setScriptName} required />
+      <Field label="Name prefix (optional)" name={`edit-prefix-${target.id}`} value={prefix} onChange={setPrefix} />
+      <Field label="Never push these names (optional)" name={`edit-deny-${target.id}`} value={deny} onChange={setDeny} hint="Comma separated." />
+      <label className={s('check')}>
+        <input type="checkbox" checked={deleteRemoved} onChange={(e) => setDeleteRemoved(e.target.checked)} />
+        <span>
+          <strong>Delete removed secrets on the target</strong>
+        </span>
+      </label>
+      {error ? (
+        <p className={s('error')} role="alert">
+          {error}
+        </p>
+      ) : null}
+      <div className={s('actions')}>
+        <Button type="submit" size="sm" loading={busy}>
+          Save changes
+        </Button>
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </form>
+  )
+}
+
 function TargetRow({
   target,
   label,
@@ -72,6 +161,7 @@ function TargetRow({
   envName,
   onDeleted,
   onRan,
+  onUpdated,
 }: {
   target: SyncTargetDto
   label: string
@@ -79,11 +169,14 @@ function TargetRow({
   envName: string
   onDeleted: (id: string) => void
   onRan: (targetId: string) => void
+  onUpdated: (target: SyncTargetDto) => void
 }) {
   const [busy, setBusy] = useState<'preview' | 'run' | 'delete' | null>(null)
   const [plan, setPlan] = useState<SyncPlanDto | null>(null)
   const [result, setResult] = useState<SyncRunDto | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const confirmRef = useFocusReturn<HTMLDivElement>(confirmDelete)
   const [error, setError] = useState<string | null>(null)
 
   async function preview() {
@@ -156,13 +249,16 @@ function TargetRow({
         <Button type="button" size="sm" onClick={() => void run()} loading={busy === 'run'} disabled={busy !== null}>
           Run now
         </Button>
+        <Button type="button" size="sm" variant="secondary" onClick={() => setEditing(true)} disabled={busy !== null || editing}>
+          Edit
+        </Button>
         <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmDelete(true)} disabled={busy !== null}>
           Remove target
         </Button>
       </div>
 
       {confirmDelete ? (
-        <div className={s('confirm')} role="alertdialog" aria-label="Confirm removing this sync target">
+        <div ref={confirmRef} tabIndex={-1} className={s('confirm')} role="alertdialog" aria-label="Confirm removing this sync target">
           <p className={s('note')}>Removes this sync target and its history. Secrets already on the target are left in place.</p>
           <div className={s('actions')}>
             <Button type="button" size="sm" variant="danger" loading={busy === 'delete'} onClick={() => void remove()}>
@@ -175,17 +271,25 @@ function TargetRow({
         </div>
       ) : null}
 
+      {editing ? (
+        <EditTargetForm
+          target={target}
+          onCancel={() => setEditing(false)}
+          onSaved={(t) => {
+            setEditing(false)
+            setPlan(null)
+            onUpdated(t)
+          }}
+        />
+      ) : null}
+
       {error ? (
         <p className={s('error')} role="alert">
           {error}
         </p>
       ) : null}
       {plan ? <PlanView plan={plan} /> : null}
-      {result ? (
-        <p className={s('note')} role="status">
-          Run {result.status}: {runCountsText(result.counts)}.
-        </p>
-      ) : null}
+      {result ? <RunResult run={result} /> : null}
     </li>
   )
 }
@@ -211,6 +315,7 @@ function CreateTargetForm({
   const [deleteRemoved, setDeleteRemoved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const formRef = useFocusReturn<HTMLFormElement>(true)
 
   useEffect(() => {
     if (!projectId) {
@@ -271,7 +376,7 @@ function CreateTargetForm({
 
   return (
     <Card tone="light" className={s('panel')}>
-      <form className={s('form')} onSubmit={(e) => void submit(e)} aria-labelledby="target-title">
+      <form ref={formRef} tabIndex={-1} className={s('form')} onSubmit={(e) => void submit(e)} aria-labelledby="target-title">
         <h3 id="target-title" className={s('panelTitle')}>
           New sync target
         </h3>
@@ -341,7 +446,7 @@ function CreateTargetForm({
   )
 }
 
-function RunHistory({ targets, refreshKey }: { targets: SyncTargetDto[]; refreshKey: number }) {
+function RunHistory({ targets, refreshKey, optionLabel }: { targets: SyncTargetDto[]; refreshKey: number; optionLabel: (t: SyncTargetDto) => string }) {
   const [targetId, setTargetId] = useState('')
   const [runs, setRuns] = useState<SyncRunDto[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -373,7 +478,7 @@ function RunHistory({ targets, refreshKey }: { targets: SyncTargetDto[]; refresh
         <select className={s('select')} value={selected} onChange={(e) => setTargetId(e.target.value)}>
           {targets.map((t) => (
             <option key={t.id} value={t.id}>
-              {resourceText(t.resource)} ({t.id.slice(0, 6)})
+              {optionLabel(t)}
             </option>
           ))}
         </select>
@@ -475,7 +580,7 @@ export function TargetsSection({
         ) : null}
       </div>
       <p className={s('note')}>
-        The Free plan includes up to 2 sync targets per organisation. Reserved secrets (ENCRYPTION_MASTER_KEY, ENCRYPTION_KEY_V*,
+        The Free plan includes up to {FREE_PLAN_MAX_SYNC_TARGETS} sync targets per organisation. Reserved secrets (ENCRYPTION_MASTER_KEY, ENCRYPTION_KEY_V*,
         JWT_SECRET) are never synced.
       </p>
       {loadError ? (
@@ -512,6 +617,7 @@ export function TargetsSection({
                 projectName={projectName(t.projectId)}
                 envName={envNames[t.envId] ?? 'environment'}
                 onDeleted={(id) => onTargetsChange(targets.filter((x) => x.id !== id))}
+                onUpdated={(updated) => onTargetsChange(targets.map((x) => (x.id === updated.id ? updated : x)))}
                 onRan={() => {
                   setHistoryKey((k) => k + 1)
                   onRefresh()
@@ -522,7 +628,11 @@ export function TargetsSection({
         </Card>
       )}
 
-      <RunHistory targets={targets} refreshKey={historyKey} />
+      <RunHistory
+        targets={targets}
+        refreshKey={historyKey}
+        optionLabel={(t) => `${projectName(t.projectId)} / ${envNames[t.envId] ?? 'environment'} / Worker ${resourceText(t.resource)}`}
+      />
     </section>
   )
 }
