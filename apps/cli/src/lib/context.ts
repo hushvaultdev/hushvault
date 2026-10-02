@@ -7,13 +7,30 @@ export interface ProjectContext {
   client: ApiClient
 }
 
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Where credentials are sent: --api-url, then HUSHVAULT_API_URL, then the URL recorded at login,
+ * then the default. A committed .hushvault.json can NOT choose this: otherwise a malicious repo
+ * could point the CLI at its own server and collect the bearer token. The project's apiUrl is only
+ * checked against it, and a mismatch is refused before any request is made.
+ */
 export async function resolveApiUrl(explicit?: string, projectApiUrl?: string): Promise<string> {
-  if (explicit) return explicit
-  if (projectApiUrl) return projectApiUrl
-  const fromEnv = process.env['HUSHVAULT_API_URL']
-  if (fromEnv) return fromEnv
-  const global = await getGlobalConfig()
-  return global['apiUrl'] ?? DEFAULT_API_URL
+  const trusted = explicit ?? process.env['HUSHVAULT_API_URL'] ?? (await getGlobalConfig())['apiUrl'] ?? DEFAULT_API_URL
+  if (projectApiUrl && originOf(projectApiUrl) !== originOf(trusted)) {
+    throw new Error(
+      `This project's .hushvault.json points at ${projectApiUrl}, but you are signed in to ${trusted}. ` +
+        'Credentials are never sent to a server chosen by a repository file. ' +
+        `If you trust it, run: hushvault login --api-url ${projectApiUrl} (or set HUSHVAULT_API_URL).`,
+    )
+  }
+  return trusted
 }
 
 /** Load .hushvault.json (walking up from cwd) and an authenticated client. */
