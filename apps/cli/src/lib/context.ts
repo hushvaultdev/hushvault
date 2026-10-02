@@ -57,3 +57,11 @@ export async function readStdin(stream: NodeJS.ReadableStream = process.stdin): 
 export function stripTrailingNewline(s: string): string {
   return s.replace(/\r?\n$/, '')
 }
+
+/** Authenticated client that does not need a project (org-level commands such as `sync`). */
+export async function loadClient(cwd = process.cwd()): Promise<ApiClient> {
+  const found = await findProjectConfig(cwd)
+  const token = await getAuthToken()
+  const apiUrl = await resolveApiUrl(undefined, found?.config.apiUrl)
+  return new ApiClient({ apiUrl, token })
+}
