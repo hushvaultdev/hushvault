@@ -41,7 +41,8 @@ export async function writeAuditLog(env: Env, entry: {
   ).bind(
     `audit_${crypto.randomUUID().replace(/-/g, '')}`,
     entry.orgId,
-    entry.actorId ?? null,
+    // A CI token has no person behind it: an empty actor id is stored as NULL (actor_id references users).
+    entry.actorId || null,
     entry.actorType,
     entry.action,
     entry.resourceType ?? null,

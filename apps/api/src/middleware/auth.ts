@@ -1,13 +1,25 @@
 import type { MiddlewareHandler } from 'hono'
 import type { Env } from '../index'
 import { hashApiKey, verifyJwt, type JwtPayload } from '../lib/auth'
+import { verifyCiToken } from '../lib/ci-tokens'
 import { createRateLimitMiddleware } from './rate-limit'
 
 export type AuthContext = {
+  /** Empty for a CI token: it represents a workflow, not a person (audit rows then carry no actor id). */
   userId: string
   orgId: string
   role: 'owner' | 'admin' | 'member' | 'viewer'
-  actorType: 'user' | 'api_key'
+  actorType: 'user' | 'api_key' | 'system'
+  /** Present only for a CI token (issue #43): the single environment it may read. */
+  scope?: { envId: string; ruleId: string }
+}
+
+/**
+ * A CI token reaches exactly one endpoint, for exactly the environment it was issued for. This is an allowlist in
+ * the middleware rather than a check per route, so a new route is unreachable by CI tokens until it is added here.
+ */
+export function ciTokenMayReach(method: string, pathname: string, envId: string): boolean {
+  return method === 'GET' && pathname === `/api/environments/${envId}/resolved`
 }
 
 declare module 'hono' {
@@ -28,6 +40,16 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
 
   if (!token) {
     return c.json({ error: 'UNAUTHORIZED', message: 'Authentication required' }, 401)
+  }
+
+  // A CI token is unambiguous (it carries `kind`), so it is checked first and never falls through.
+  const ci = await verifyCiToken(token, c.env.JWT_SECRET)
+  if (ci) {
+    if (!ciTokenMayReach(c.req.method, new URL(c.req.url).pathname, ci.envId)) {
+      return c.json({ error: 'FORBIDDEN', message: 'This token may only read the environment it was issued for' }, 403)
+    }
+    c.set('auth', { userId: '', orgId: ci.orgId, role: 'viewer', actorType: 'system', scope: { envId: ci.envId, ruleId: ci.sub } })
+    return next()
   }
 
   let jwtPayload: JwtPayload | null = null
@@ -145,6 +167,19 @@ export const integrationPreviewRateLimit = createRateLimitMiddleware({
   failClosed: true,
   keyFn: byOrganisation,
 })
+
+/**
+ * Humans only, with the caller's CURRENT membership re-read: the JWT role claim can be up to its lifetime stale, so
+ * a demoted or removed admin must lose access to credential- and CI-access management immediately.
+ */
+export const requireCurrentAdmin: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
+  const auth = c.get('auth')
+  const member = await c.env.DB.prepare('SELECT role FROM members WHERE user_id = ? AND org_id = ? LIMIT 1').bind(auth.userId, auth.orgId).first<{ role: string }>()
+  if (!member || (member.role !== 'admin' && member.role !== 'owner')) {
+    return c.json({ error: 'FORBIDDEN', message: 'You do not have permission to perform this action' }, 403)
+  }
+  return next()
+}
 
 export const loginRateLimit = createRateLimitMiddleware({
   scope: 'auth-login',
