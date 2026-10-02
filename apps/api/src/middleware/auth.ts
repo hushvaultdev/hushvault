@@ -163,6 +163,14 @@ export const forgotPasswordRateLimit = createRateLimitMiddleware({
   failClosed: true,
 })
 
+// Refresh/logout: one call per page load per tab, so higher than the credential endpoints.
+export const refreshRateLimit = createRateLimitMiddleware({
+  scope: 'auth-refresh',
+  limit: 60,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
 // Token submissions (verify / reset): the tokens have 256 bits, so this only caps abuse of the DB.
 export const tokenSubmitRateLimit = createRateLimitMiddleware({
   scope: 'auth-token-submit',

@@ -1,5 +1,5 @@
 import { ApiClient, type EnvironmentRow } from '../api.js'
-import { getAuthToken } from '../config/auth.js'
+import { getAuthToken, getRefreshToken, storeRefreshToken, storeToken } from '../config/auth.js'
 import { findProjectConfig, getGlobalConfig, DEFAULT_API_URL, type HushVaultConfig } from '../config/project.js'
 
 export interface ProjectContext {
@@ -7,22 +7,61 @@ export interface ProjectContext {
   client: ApiClient
 }
 
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Where credentials are sent: --api-url, then HUSHVAULT_API_URL, then the URL recorded at login,
+ * then the default. A committed .hushvault.json can NOT choose this: otherwise a malicious repo
+ * could point the CLI at its own server and collect the bearer token. The project's apiUrl is only
+ * checked against it, and a mismatch is refused before any request is made.
+ */
 export async function resolveApiUrl(explicit?: string, projectApiUrl?: string): Promise<string> {
-  if (explicit) return explicit
-  if (projectApiUrl) return projectApiUrl
-  const fromEnv = process.env['HUSHVAULT_API_URL']
-  if (fromEnv) return fromEnv
-  const global = await getGlobalConfig()
-  return global['apiUrl'] ?? DEFAULT_API_URL
+  const trusted = explicit ?? process.env['HUSHVAULT_API_URL'] ?? (await getGlobalConfig())['apiUrl'] ?? DEFAULT_API_URL
+  if (projectApiUrl && originOf(projectApiUrl) !== originOf(trusted)) {
+    throw new Error(
+      `This project's .hushvault.json points at ${projectApiUrl}, but your credentials are for ${trusted}. ` +
+        'Credentials are never sent to a server chosen by a repository file. ' +
+        `If you trust that server, set HUSHVAULT_API_URL=${projectApiUrl} (CI, or to work with several servers), ` +
+        `or run: hushvault login --api-url ${projectApiUrl}.`,
+    )
+  }
+  return trusted
+}
+
+/**
+ * Client for the signed-in user. A keychain session carries a refresh hook, so the CLI keeps working
+ * past the 15-minute access token without another login. HUSHVAULT_TOKEN (an API key for CI) does not expire this way.
+ */
+export async function createAuthedClient(apiUrl: string): Promise<ApiClient> {
+  const token = await getAuthToken()
+  if (process.env['HUSHVAULT_TOKEN']) return new ApiClient({ apiUrl, token })
+  const refresh = async (): Promise<string | null> => {
+    const stored = await getRefreshToken()
+    if (!stored) return null
+    try {
+      const next = await new ApiClient({ apiUrl }).refreshSession(stored.refreshToken)
+      await storeToken(stored.email, next.token)
+      if (next.refreshToken) await storeRefreshToken(stored.email, next.refreshToken)
+      return next.token
+    } catch {
+      return null
+    }
+  }
+  return new ApiClient({ apiUrl, token, refresh })
 }
 
 /** Load .hushvault.json (walking up from cwd) and an authenticated client. */
 export async function loadProjectContext(cwd = process.cwd()): Promise<ProjectContext> {
   const found = await findProjectConfig(cwd)
   if (!found) throw new Error('No .hushvault.json found. Run: hushvault init')
-  const token = await getAuthToken()
   const apiUrl = await resolveApiUrl(undefined, found.config.apiUrl)
-  return { config: found.config, client: new ApiClient({ apiUrl, token }) }
+  return { config: found.config, client: await createAuthedClient(apiUrl) }
 }
 
 /** Resolve an env id, slug or name (case-insensitive) to an environment row. */

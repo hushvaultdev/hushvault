@@ -2,8 +2,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
-import { apiFetch } from './api'
-import { clearSession, readSession, writeSession } from './auth-storage'
+import { apiFetch, endSession, refreshSession } from './api'
+import { clearSession, hasSessionHint, markSessionHint, purgeLegacyStorage, readSession, writeSession } from './auth-storage'
 import type { Session } from './types'
 
 interface AuthContextValue {
@@ -27,8 +27,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    setSession(readSession())
-    setReady(true)
+    // A page load has no access token in memory: trade the HttpOnly refresh cookie for one.
+    // The OAuth callback adopts its own session, so skip the exchange there.
+    purgeLegacyStorage()
+    if (window.location.pathname.startsWith('/auth/callback') || !hasSessionHint()) {
+      setReady(true)
+      return
+    }
+    let cancelled = false
+    void refreshSession().then((next) => {
+      if (cancelled) return
+      setSession(next)
+      setReady(true)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const login = useCallback(async (email: string, password: string) => {
@@ -37,23 +51,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       auth: false,
       body: { email, password },
     })
-    writeSession(next)
-    setSession(next)
+    const clean: Session = { token: next.token, userId: next.userId, orgId: next.orgId, role: next.role, emailVerified: next.emailVerified }
+    writeSession(clean)
+    markSessionHint(true)
+    setSession(clean)
   }, [])
 
   const register = useCallback(async (email: string, password: string, organisationName: string) => {
-    const result = await apiFetch<{ userId: string; orgId: string; token: string }>('/api/auth/register', {
+    const result = await apiFetch<{ userId: string; orgId: string; token: string; emailVerified: boolean }>('/api/auth/register', {
       method: 'POST',
       auth: false,
       body: { email, password, organisationName },
     })
-    const next: Session = { ...result, role: 'owner', emailVerified: false }
+    const next: Session = { token: result.token, userId: result.userId, orgId: result.orgId, role: 'owner', emailVerified: result.emailVerified }
     writeSession(next)
+    markSessionHint(true)
     setSession(next)
   }, [])
 
   const applySession = useCallback((next: Session) => {
     writeSession(next)
+    markSessionHint(true)
     setSession(next)
   }, [])
 
@@ -68,6 +86,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(() => {
     clearSession()
     setSession(null)
+    void endSession()
   }, [])
 
   const value = useMemo<AuthContextValue>(

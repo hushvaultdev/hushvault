@@ -9,6 +9,25 @@
 const ALGORITHM = 'AES-GCM'
 const KEY_LENGTH = 256
 const IV_LENGTH = 12 // 96-bit IV for GCM
+const FORMAT_V2 = 'v2' // blob prefix: AES-GCM with additional authenticated data (record context)
+
+/** Identifies the record a ciphertext belongs to; bound into the GCM tag so blobs cannot be moved. */
+export type SecretContext = { projectId: string; envId: string; secretId: string }
+
+function contextPart(value: string): string {
+  if (value.length === 0 || value.includes('|')) throw new Error('Invalid context')
+  return value
+}
+
+/** AAD for the secret value (DEK-encrypted blob in KV). Same bytes for a row's history blobs. */
+export function valueAad(ctx: SecretContext): Uint8Array {
+  return new TextEncoder().encode(`hushvault|value|v2|${contextPart(ctx.projectId)}|${contextPart(ctx.envId)}|${contextPart(ctx.secretId)}`)
+}
+
+/** AAD for the wrapped DEK. Excludes the key version so rotation can re-wrap without changing it. */
+export function wrapAad(secretId: string): Uint8Array {
+  return new TextEncoder().encode(`hushvault|wrap|v2|${contextPart(secretId)}`)
+}
 
 /**
  * Import a raw 256-bit key from base64 string
@@ -37,31 +56,40 @@ export async function exportKey(key: CryptoKey): Promise<string> {
  * Encrypt plaintext with a CryptoKey
  * Returns: "base64(iv):base64(ciphertext+authTag)"
  */
-export async function encrypt(plaintext: string, key: CryptoKey): Promise<string> {
+export async function encrypt(plaintext: string, key: CryptoKey, aad?: Uint8Array): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH))
   const encoded = new TextEncoder().encode(plaintext)
 
-  const ciphertext = await crypto.subtle.encrypt({ name: ALGORITHM, iv }, key, encoded)
+  const params: { name: string; iv: Uint8Array; additionalData?: Uint8Array } = aad ? { name: ALGORITHM, iv, additionalData: aad } : { name: ALGORITHM, iv }
+  const ciphertext = await crypto.subtle.encrypt(params, key, encoded)
 
-  return `${bufferToBase64(iv)}:${bufferToBase64(ciphertext)}`
+  const body = `${bufferToBase64(iv)}:${bufferToBase64(ciphertext)}`
+  return aad ? `${FORMAT_V2}:${body}` : body
 }
 
 /**
  * Decrypt ciphertext with a CryptoKey
  * Expects: "base64(iv):base64(ciphertext+authTag)"
  */
-export async function decrypt(encrypted: string, key: CryptoKey): Promise<string> {
-  const [ivB64, ciphertextB64] = encrypted.split(':')
-  if (!ivB64 || !ciphertextB64) throw new Error('Invalid encrypted format')
+export async function decrypt(encrypted: string, key: CryptoKey, aad?: Uint8Array): Promise<string> {
+  const parts = encrypted.split(':')
+  // Format and AAD must agree: a v2 blob is never decrypted without its context and a legacy
+  // blob is never accepted where a context is required (no silent downgrade).
+  const isV2 = parts[0] === FORMAT_V2
+  if (isV2 !== Boolean(aad)) throw new Error('Invalid encrypted format')
+  const [ivB64, ciphertextB64] = isV2 ? parts.slice(1) : parts
+  if (!ivB64 || !ciphertextB64 || parts.length !== (isV2 ? 3 : 2)) throw new Error('Invalid encrypted format')
 
   const iv = base64ToBuffer(ivB64)
   const ciphertext = base64ToBuffer(ciphertextB64)
 
-  const plaintext = await crypto.subtle.decrypt({ name: ALGORITHM, iv }, key, ciphertext)
+  const params: { name: string; iv: Uint8Array; additionalData?: Uint8Array } = aad ? { name: ALGORITHM, iv, additionalData: aad } : { name: ALGORITHM, iv }
+  const plaintext = await crypto.subtle.decrypt(params, key, ciphertext)
   return new TextDecoder().decode(plaintext)
 }
 
 /**
+ * LEGACY (v1, no AAD). Kept only to read/produce pre-AAD rows in tests and migrations.
  * Encrypt a secret value using envelope encryption:
  * 1. Generate a new DEK
  * 2. Encrypt the secret value with the DEK
@@ -120,10 +148,13 @@ export class KeyRingError extends Error {
 export type KeyRingEnv = {
   ENCRYPTION_MASTER_KEY: string
   ENCRYPTION_ACTIVE_KEY_VERSION?: string | undefined
+  // 'true' refuses legacy (no-AAD) ciphertext entirely. Turn on once every row is enc_version 2.
+  ENFORCE_AAD?: string | undefined
 }
 
 export type KeyRing = {
   readonly activeVersion: string
+  readonly allowLegacy: boolean
   has(version: string): boolean
   getKey(version: string): Promise<CryptoKey>
 }
@@ -163,6 +194,7 @@ export function loadKeyRing(env: KeyRingEnv, override?: { activeVersion?: string
   const cache = new Map<string, Promise<CryptoKey>>()
   const ring: KeyRing = {
     activeVersion,
+    allowLegacy: env.ENFORCE_AAD?.trim() !== 'true',
     has: (version) => isValidKeyVersion(version) && readKeyMaterial(env, version) !== undefined,
     getKey(version) {
       const hit = cache.get(version)
@@ -178,25 +210,31 @@ export function loadKeyRing(env: KeyRingEnv, override?: { activeVersion?: string
 }
 
 /** True if `wrappedDek` unwraps under `key` to a 32-byte DEK. Used to sanity-check a key against real data. */
-export async function canUnwrapDek(wrappedDek: string, key: CryptoKey): Promise<boolean> {
+export async function canUnwrapDek(wrappedDek: string, key: CryptoKey, secretId: string): Promise<boolean> {
   try {
-    return base64ToBuffer(await decrypt(wrappedDek, key)).byteLength === KEK_BYTES
+    return base64ToBuffer(await decrypt(wrappedDek, key, wrapAadFor(wrappedDek, secretId))).byteLength === KEK_BYTES
   } catch {
     return false
   }
 }
 
-/** Envelope-encrypt under the ring's active key. Returns the version used. */
-export async function encryptSecretWithRing(value: string, ring: KeyRing): Promise<{
+/** AAD for a wrapped DEK, chosen by its stored format (legacy blobs have none). */
+function wrapAadFor(wrappedDek: string, secretId: string): Uint8Array | undefined {
+  return wrappedDek.startsWith(`${FORMAT_V2}:`) ? wrapAad(secretId) : undefined
+}
+
+/** Envelope-encrypt under the ring's active key, bound to the record context. Always writes v2. */
+export async function encryptSecretWithRing(value: string, ring: KeyRing, ctx: SecretContext): Promise<{
   encryptedValue: string
   wrappedDek: string
   keyVersion: string
+  encVersion: 2
 }> {
   const kek = await ring.getKey(ring.activeVersion)
   const dek = await generateDek()
-  const encryptedValue = await encrypt(value, dek)
-  const wrappedDek = await encrypt(await exportKey(dek), kek)
-  return { encryptedValue, wrappedDek, keyVersion: ring.activeVersion }
+  const encryptedValue = await encrypt(value, dek, valueAad(ctx))
+  const wrappedDek = await encrypt(await exportKey(dek), kek, wrapAad(ctx.secretId))
+  return { encryptedValue, wrappedDek, keyVersion: ring.activeVersion, encVersion: 2 }
 }
 
 /** Envelope-decrypt using the key version recorded on the row. */
@@ -205,12 +243,17 @@ export async function decryptSecretWithRing(
   wrappedDek: string,
   keyVersion: string,
   ring: KeyRing,
+  ctx: SecretContext,
+  encVersion: number,
 ): Promise<string> {
+  // The D1 enc_version column decides the format; a blob that disagrees is rejected, not downgraded.
+  if (encVersion !== 2 && !(encVersion === 1 && ring.allowLegacy)) throw new Error('Unsupported encryption version')
+  const v2 = encVersion === 2
   const kek = await ring.getKey(keyVersion)
-  const dekBuffer = base64ToBuffer(await decrypt(wrappedDek, kek))
+  const dekBuffer = base64ToBuffer(await decrypt(wrappedDek, kek, v2 ? wrapAad(ctx.secretId) : undefined))
   if (dekBuffer.byteLength !== KEK_BYTES) throw new Error('Invalid DEK')
   const dek = await crypto.subtle.importKey('raw', dekBuffer, { name: ALGORITHM, length: KEY_LENGTH }, false, ['decrypt'])
-  return decrypt(encryptedValue, dek)
+  return decrypt(encryptedValue, dek, v2 ? valueAad(ctx) : undefined)
 }
 
 /**
@@ -218,11 +261,12 @@ export async function decryptSecretWithRing(
  * (and therefore the KV ciphertext) is unchanged. The new wrap is verified by
  * unwrapping it with the target key before it is returned.
  */
-export async function rewrapDek(wrappedDek: string, fromKey: CryptoKey, toKey: CryptoKey): Promise<string> {
-  const dekBase64 = await decrypt(wrappedDek, fromKey)
+export async function rewrapDek(wrappedDek: string, fromKey: CryptoKey, toKey: CryptoKey, secretId: string): Promise<string> {
+  const aad = wrapAadFor(wrappedDek, secretId)
+  const dekBase64 = await decrypt(wrappedDek, fromKey, aad)
   if (base64ToBuffer(dekBase64).byteLength !== KEK_BYTES) throw new Error('Invalid DEK')
-  const rewrapped = await encrypt(dekBase64, toKey)
-  if ((await decrypt(rewrapped, toKey)) !== dekBase64) throw new Error('Re-wrap verification failed')
+  const rewrapped = await encrypt(dekBase64, toKey, aad)
+  if ((await decrypt(rewrapped, toKey, aad)) !== dekBase64) throw new Error('Re-wrap verification failed')
   return rewrapped
 }
 
@@ -239,36 +283,13 @@ export async function verifyKeyCheck(key: CryptoKey, checkValue: string): Promis
   }
 }
 
-/**
- * Derive a key from a password using PBKDF2 (WebCrypto-native)
- */
-export async function deriveKeyFromPassword(password: string, saltBase64: string): Promise<string> {
-  const enc = new TextEncoder()
-  const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey'])
-
-  const salt = base64ToBuffer(saltBase64)
-  const derived = await crypto.subtle.deriveKey(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
-    baseKey,
-    { name: ALGORITHM, length: KEY_LENGTH },
-    true,
-    ['encrypt', 'decrypt']
-  )
-
-  return exportKey(derived)
-}
-
-/**
- * Generate a random salt (for PBKDF2)
- */
-export function generateSalt(): string {
-  return bufferToBase64(crypto.getRandomValues(new Uint8Array(16)))
-}
-
 // Helpers
 function bufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
-  return btoa(String.fromCharCode(...bytes))
+  // Chunked: spreading a large array into String.fromCharCode overflows the call stack.
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(binary)
 }
 
 function base64ToBuffer(base64: string): Uint8Array {

@@ -44,13 +44,6 @@ decryptSecret(
   masterKeyBase64: string
 ): Promise<string>
 
-// Derive a 256-bit key from a password with PBKDF2-SHA256 (100,000 iterations).
-// Returns the derived key as a base64 string (raw key bytes), not a CryptoKey.
-// Not used by any route today; password hashing lives in apps/api/src/lib/auth.ts.
-deriveKeyFromPassword(password: string, saltBase64: string): Promise<string>
-
-// Generate a random salt
-generateSalt(): string  // base64
 ```
 
 ## Ciphertext Format
@@ -64,6 +57,24 @@ Example:
 ```
 abc123def456==:xyz789uvw012==
 ```
+
+**Version 2 (current, `enc_version = 2`)** adds a `v2:` prefix and binds the ciphertext to its record with
+AES-GCM additional authenticated data (AAD):
+```
+v2:base64(iv):base64(ciphertext || authTag)
+value AAD = "hushvault|value|v2|<projectId>|<envId>|<secretId>"   (history blobs reuse their secret's context)
+wrap  AAD = "hushvault|wrap|v2|<secretId>"                         (no key version, so rotation can re-wrap)
+```
+A blob copied to another environment, project or secret, or paired with another secret's wrapped DEK, fails
+authentication and returns `DECRYPTION_FAILED`. The D1 `enc_version` column decides the format; a blob that
+disagrees is rejected (no silent downgrade). **Limits:** AAD stops cross-record swaps; it cannot stop an
+attacker with D1 *and* KV write from restoring an older valid (blob, wrapped DEK) pair for the *same* secret.
+
+Rows written before AAD are `enc_version = 1` (migration `0008`) and still read until you set
+`ENFORCE_AAD=true`. Upgrade them by re-saving each secret (any PATCH with a value re-encrypts as v2), check
+`SELECT COUNT(*) FROM secrets WHERE enc_version = 1` and the same on `secret_history` (history rows only change
+when the secret next changes; old history can be deleted instead), then set `ENFORCE_AAD=true` so a v1 row
+can no longer be used for a downgrade.
 
 The IV and ciphertext+tag are stored together to enable decryption without separate IV storage.
 There is no separate auth-tag segment: WebCrypto appends the 16-byte GCM tag to the ciphertext, so the

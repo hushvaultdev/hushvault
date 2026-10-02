@@ -65,6 +65,8 @@ export interface LoginResult {
   userId: string
   orgId: string
   role: string
+  /** Present because the CLI identifies itself with X-HushVault-Client: cli. */
+  refreshToken?: string
 }
 
 export interface ShareResult {
@@ -75,6 +77,8 @@ export interface ShareResult {
 export interface ClientOptions {
   apiUrl: string
   token?: string | undefined
+  /** Called once on a 401 for a keychain session; returns a fresh access token or null. */
+  refresh?: (() => Promise<string | null>) | undefined
 }
 
 type Query = Record<string, string | undefined>
@@ -97,21 +101,24 @@ function normalizeApiUrl(apiUrl: string): string {
 
 export class ApiClient {
   private readonly baseUrl: string
-  private readonly token: string | undefined
+  private token: string | undefined
+  private readonly refreshHook: (() => Promise<string | null>) | undefined
 
   constructor(options: ClientOptions) {
     this.baseUrl = normalizeApiUrl(options.apiUrl)
     this.token = options.token
+    this.refreshHook = options.refresh
   }
 
-  async request<T>(method: string, path: string, opts: { query?: Query; body?: unknown } = {}): Promise<T> {
+  async request<T>(method: string, path: string, opts: { query?: Query; body?: unknown } = {}, retried = false): Promise<T> {
     const qs = new URLSearchParams()
     for (const [k, v] of Object.entries(opts.query ?? {})) {
       if (v !== undefined) qs.set(k, v)
     }
     const url = `${this.baseUrl}${path}${qs.size > 0 ? `?${qs.toString()}` : ''}`
 
-    const headers: Record<string, string> = { Accept: 'application/json' }
+    // 'cli' makes the API return the refresh token in the body (browsers get an HttpOnly cookie instead).
+    const headers: Record<string, string> = { Accept: 'application/json', 'X-HushVault-Client': 'cli' }
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`
     const init: RequestInit = { method, headers }
     if (opts.body !== undefined) {
@@ -133,6 +140,14 @@ export class ApiClient {
       json = undefined
     }
 
+    if (res.status === 401 && this.token && this.refreshHook && !retried) {
+      const fresh = await this.refreshHook()
+      if (fresh) {
+        this.token = fresh
+        return this.request<T>(method, path, opts, true)
+      }
+    }
+
     if (!res.ok) {
       // Only the API's own `error` / `message` fields are surfaced, never the raw body.
       const obj = (typeof json === 'object' && json !== null ? json : {}) as Record<string, unknown>
@@ -150,6 +165,11 @@ export class ApiClient {
 
   login(email: string, password: string): Promise<LoginResult> {
     return this.request('POST', '/api/auth/login', { body: { email, password } })
+  }
+
+  /** Rotate a refresh token. Sent in the body (never a cookie), so no CSRF surface. */
+  refreshSession(refreshToken: string): Promise<LoginResult> {
+    return this.request('POST', '/api/auth/refresh', { body: { refreshToken } }, true)
   }
 
   listProjects(): Promise<ProjectRow[]> {

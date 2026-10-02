@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { call, createTestEnv, seedApiKey, seedUser } from './helpers/env'
-import { githubCallback } from './helpers/auth-oauth'
+import { beginGithub, githubCallback } from './helpers/auth-oauth'
 
 vi.mock('../src/lib/oauth', async (orig) => ({
   ...(await orig<typeof import('../src/lib/oauth')>()),
@@ -27,7 +27,8 @@ describe('register / login', () => {
       json: { email: 'Ann@x.com', password: PASSWORD, organisationName: 'Ann Org' },
     })
     expect(reg.status).toBe(201)
-    expect(Object.keys(reg.body.data).sort()).toEqual(['orgId', 'token', 'userId'])
+    expect(Object.keys(reg.body.data).sort()).toEqual(['emailVerified', 'expiresIn', 'orgId', 'token', 'userId'])
+    expect(reg.body.data.expiresIn).toBe(900)
     expect((await userRow(env, 'ann@x.com'))?.['email_verified']).toBe(0)
 
     const login = await call(env, 'POST', '/api/auth/login', { json: { email: 'ann@x.com', password: PASSWORD } })
@@ -124,6 +125,45 @@ describe('OAuth account linking', () => {
     vi.mocked(fetchGitHubIdentity).mockResolvedValue({ id: '5', login: 'l', name: null, email: 'linked@x.com' })
     const res = await githubCallback(env)
     expect(res.fragment.get('userId')).toBe(u.userId)
+  })
+
+  it('sets a PKCE challenge and an HttpOnly, SameSite=Lax verifier cookie when the flow starts', async () => {
+    const env = createTestEnv()
+    const begun = await beginGithub(env)
+    expect(begun.authorize.searchParams.get('code_challenge_method')).toBe('S256')
+    expect(begun.authorize.searchParams.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(begun.setCookie).toMatch(/hv_oauth=/)
+    expect(begun.setCookie).toMatch(/HttpOnly/i)
+    expect(begun.setCookie).toMatch(/SameSite=Lax/i)
+    // The verifier (cookie) is not in any URL.
+    const verifier = begun.cookie.split('=')[1] ?? ''
+    expect(begun.authorize.toString()).not.toContain(verifier)
+  })
+
+  it('ATTACK: login CSRF - a callback URL replayed in a victim browser without the cookie is refused', async () => {
+    const env = createTestEnv()
+    vi.mocked(fetchGitHubIdentity).mockResolvedValue({ id: '1', login: 'attacker', name: null, email: 'attacker@x.com' })
+    const attackerFlow = await beginGithub(env)
+    const victim = await githubCallback(env, { state: attackerFlow.state, cookie: null })
+    expect(victim.fragment.get('error')).toBe('invalid_state')
+    expect(victim.fragment.get('token')).toBeNull()
+    // ...and a victim who has a cookie from a different flow is refused too.
+    const other = await beginGithub(env)
+    const mismatched = await githubCallback(env, { state: attackerFlow.state, cookie: other.cookie })
+    expect(mismatched.fragment.get('error')).toBe('invalid_state')
+    expect(fetchGitHubIdentity).not.toHaveBeenCalled()
+  })
+
+  it('a state is single use: the cookie is cleared, so a replay fails', async () => {
+    const env = createTestEnv()
+    vi.mocked(fetchGitHubIdentity).mockResolvedValue({ id: '3', login: 'once', name: null, email: 'once@x.com' })
+    const begun = await beginGithub(env)
+    const first = await githubCallback(env, { state: begun.state, cookie: begun.cookie })
+    expect(first.fragment.get('token')).toBeTruthy()
+    expect(first.setCookie).toMatch(/hv_oauth=;|Max-Age=0/i)
+    // Browser dropped the cookie; replaying the same URL has none.
+    const replay = await githubCallback(env, { state: begun.state, cookie: null })
+    expect(replay.fragment.get('error')).toBe('invalid_state')
   })
 
   it('rejects an invalid state', async () => {

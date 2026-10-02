@@ -45,6 +45,29 @@ export async function storeToken(email: string, token: string): Promise<void> {
   await saveGlobalConfig({ ...existing, currentUser: email })
 }
 
+const refreshAccount = (email: string) => `${email}#refresh`
+
+/** Store the rotating refresh token next to the access token (same keychain, separate entry). */
+export async function storeRefreshToken(email: string, refreshToken: string): Promise<void> {
+  const keytar = await loadKeytar()
+  try {
+    await keytar.setPassword(KEYCHAIN_SERVICE, refreshAccount(email), refreshToken)
+  } catch {
+    throw new KeychainUnavailableError()
+  }
+}
+
+export async function getRefreshToken(): Promise<{ email: string; refreshToken: string } | null> {
+  const email = (await getGlobalConfig())['currentUser']
+  if (!email) return null
+  try {
+    const value = await (await loadKeytar()).getPassword(KEYCHAIN_SERVICE, refreshAccount(email))
+    return value ? { email, refreshToken: value } : null
+  } catch {
+    return null
+  }
+}
+
 /** Retrieve auth token from OS keychain (null if none / keychain unavailable). */
 export async function getToken(): Promise<string | null> {
   const config = await getGlobalConfig()
@@ -78,6 +101,7 @@ export async function clearToken(): Promise<void> {
     try {
       const keytar = await loadKeytar()
       await keytar.deletePassword(KEYCHAIN_SERVICE, email)
+      await keytar.deletePassword(KEYCHAIN_SERVICE, refreshAccount(email))
     } catch {
       // nothing to clear if the keychain is unavailable
     }

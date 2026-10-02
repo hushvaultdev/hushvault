@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
 import { ApiClient, ApiError, friendlyError } from '../api.js'
-import { storeToken, KeychainUnavailableError } from '../config/auth.js'
+import { storeToken, storeRefreshToken, KeychainUnavailableError } from '../config/auth.js'
 import { getGlobalConfig, saveGlobalConfig } from '../config/project.js'
 import { resolveApiUrl } from '../lib/context.js'
 import { prompt } from '../lib/prompt.js'
@@ -31,6 +31,7 @@ export async function loginAction(options: LoginOptions = {}): Promise<{ email: 
 
   // Throws KeychainUnavailableError (with guidance) if the keychain can't be used.
   await storeToken(email, result.token)
+  if (result.refreshToken) await storeRefreshToken(email, result.refreshToken)
   const existing = await getGlobalConfig()
   await saveGlobalConfig({ ...existing, currentUser: email, apiUrl })
   return { email, userId: result.userId }

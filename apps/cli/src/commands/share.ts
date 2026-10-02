@@ -1,9 +1,8 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
 import { ApiClient } from '../api.js'
-import { getAuthToken } from '../config/auth.js'
 import { findProjectConfig } from '../config/project.js'
-import { resolveApiUrl } from '../lib/context.js'
+import { createAuthedClient, resolveApiUrl } from '../lib/context.js'
 import { readValue } from './set.js'
 import { fail } from '../lib/fail.js'
 
@@ -55,7 +54,7 @@ export const shareCommand = new Command('share')
     try {
       const found = await findProjectConfig()
       const apiUrl = await resolveApiUrl(undefined, found?.config.apiUrl)
-      const client = new ApiClient({ apiUrl, token: await getAuthToken() })
+      const client = await createAuthedClient(apiUrl)
       const link = await shareAction(client, await readValue(valueArg), options)
       console.log(chalk.green('✓ Share link created'))
       console.log(link)

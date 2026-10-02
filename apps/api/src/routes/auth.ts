@@ -1,15 +1,28 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import type { Context } from 'hono'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { z } from 'zod'
 import type { Env } from '../index'
-import { createApiKey, createPrefixedId, hashPassword, signJwt, verifyPassword } from '../lib/auth'
+import { createApiKey, createPrefixedId, hashPassword, timingSafeEqual, verifyPassword } from '../lib/auth'
 import type { OAuthIdentity } from '../lib/oauth'
+import {
+  clearRefreshCookie,
+  issueSession,
+  readRefreshCookie,
+  revokeRefreshFamily,
+  rotateSession,
+  rotateRefreshToken,
+  setRefreshCookie,
+  wantsBodyRefresh,
+} from '../lib/sessions'
 import {
   exchangeGitHubCode,
   exchangeGoogleCode,
   fetchGitHubIdentity,
   fetchGoogleIdentity,
+  challengeFor,
+  newPkce,
   signState,
   verifyState,
 } from '../lib/oauth'
@@ -17,6 +30,7 @@ import {
   forgotPasswordRateLimit,
   loginRateLimit,
   oauthRateLimit,
+  refreshRateLimit,
   registerRateLimit,
   requireAuth,
   requireVerifiedEmailIfEnforced,
@@ -95,10 +109,11 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
     ),
   ])
 
-  const token = await signJwt({ sub: userId, orgId, role: 'owner' }, c.env.JWT_SECRET)
+  const session = await issueSession(c.env, { userId, orgId, role: 'owner' })
+  setRefreshCookie(c, session.refreshToken)
   // Verification mail: in the background, so a failed or slow send never fails registration.
   await runBackground(c, sendVerificationEmail(c.env, { userId, email: email.toLowerCase(), orgId }))
-  return c.json({ data: { userId, orgId, token } }, 201)
+  return c.json({ data: { userId, orgId, token: session.accessToken, expiresIn: session.expiresIn, emailVerified: false, ...(wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}) } }, 201)
 })
 
 /** Issue a verify_email token and mail it. Respects the global daily budget; never throws to the caller. */
@@ -151,7 +166,8 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async
     return c.json({ error: 'UNAUTHORIZED', message: 'Membership not found' }, 401)
   }
 
-  const token = await signJwt({ sub: user.id, orgId: member.org_id, role: member.role }, c.env.JWT_SECRET)
+  const session = await issueSession(c.env, { userId: user.id, orgId: member.org_id, role: member.role })
+  setRefreshCookie(c, session.refreshToken)
   await writeAuditLog(c.env, {
     orgId: member.org_id,
     actorId: user.id,
@@ -162,7 +178,17 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),
   })
-  return c.json({ data: { token, userId: user.id, orgId: member.org_id, role: member.role, emailVerified: user.email_verified === 1 } })
+  return c.json({
+    data: {
+      token: session.accessToken,
+      expiresIn: session.expiresIn,
+      userId: user.id,
+      orgId: member.org_id,
+      role: member.role,
+      emailVerified: user.email_verified === 1,
+      ...(wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}),
+    },
+  })
 })
 
 // POST /api/auth/api-keys
@@ -363,6 +389,7 @@ authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', rese
     c.env.DB.prepare('UPDATE users SET password_hash = ?, salt = ?, email_verified = 1, sessions_valid_after = ? WHERE id = ?')
       .bind(passwordHash, salt, cutoff, consumed.userId),
     c.env.DB.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = 'reset_password'").bind(consumed.userId),
+    c.env.DB.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(consumed.userId),
   ])
 
   const member = await c.env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(consumed.userId).first<{ org_id: string }>()
@@ -421,6 +448,7 @@ async function completeOAuthLogin(
           .bind(provider, identity.id, cutoff, byEmail.id),
         revokeApiKeysStatement(c.env, byEmail.id, nowSeconds, 'oauth_account_link'),
         db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').bind(byEmail.id),
+        db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(byEmail.id),
       ])
       const member = await db.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
         .bind(byEmail.id).first<{ org_id: string }>()
@@ -475,7 +503,8 @@ async function completeOAuthLogin(
   }
 
   // A claimed account's session is minted at the cutoff so it survives the invalidation it caused.
-  const token = await signJwt({ sub: userId, orgId, role }, c.env.JWT_SECRET, undefined, cutoff ?? undefined)
+  const session = await issueSession(c.env, { userId, orgId, role, ...(cutoff !== null ? { issuedAt: cutoff } : {}) })
+  setRefreshCookie(c, session.refreshToken)
   await writeAuditLog(c.env, {
     orgId,
     actorId: userId,
@@ -487,10 +516,127 @@ async function completeOAuthLogin(
     userAgent: c.req.header('user-agent'),
   })
 
-  const params = new URLSearchParams({ token, userId, orgId, role })
+  const params = new URLSearchParams({ token: session.accessToken, userId, orgId, role })
   // Tell the dashboard that an existing, never-verified account was claimed (it shows a notice).
   if (linkedExistingUnverified) params.set('notice', 'account_linked')
   return c.redirect(`${webBase}/auth/callback#${params.toString()}`, 302)
+}
+
+const refreshSchema = z.object({ refreshToken: z.string().min(16).max(256).optional() })
+
+/**
+ * The refresh token comes from the request body (CLI) or the HttpOnly cookie (browser). Cookie use must
+ * carry the custom client header: a cross-site form post cannot set it and a cross-origin fetch with it
+ * needs a CORS preflight, so cookie-borne requests cannot be forged by other sites.
+ */
+function presentedRefreshToken(c: Context<{ Bindings: Env }>, bodyToken: string | undefined): string | null {
+  if (bodyToken) return bodyToken
+  if (!c.req.header('x-hushvault-client')) return null
+  return readRefreshCookie(c) ?? null
+}
+
+// POST /api/auth/refresh - exchange a refresh token for a new access token (rotates the refresh token)
+authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.default({})), async (c) => {
+  const bodyToken = c.req.valid('json').refreshToken
+  const presented = presentedRefreshToken(c, bodyToken)
+  // The token is only ever echoed in a body to a caller that already holds it there. A cookie-authenticated
+  // request (browser, possibly script-driven by XSS) must never be able to read a refresh token back out.
+  const viaCookie = !bodyToken
+  const invalid = () => {
+    clearRefreshCookie(c)
+    return c.json({ error: 'INVALID_REFRESH', message: 'Session expired. Please sign in again.' }, 401)
+  }
+  if (!presented) return invalid()
+
+  const rotated = await rotateRefreshToken(c.env, presented)
+  if (!rotated.ok) {
+    // Two tabs refreshing together: the loser retries with the cookie the winner just set.
+    if (rotated.reason === 'race') return c.json({ error: 'REFRESH_RACE', message: 'Please retry' }, 409)
+    return invalid()
+  }
+
+  // Role and org are re-read here, so a membership change reaches the session within one access TTL.
+  const member = await c.env.DB.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
+    .bind(rotated.userId).first<{ org_id: string; role: 'owner' | 'admin' | 'member' | 'viewer' }>()
+  const user = await c.env.DB.prepare('SELECT email_verified FROM users WHERE id = ? LIMIT 1').bind(rotated.userId).first<{ email_verified: number }>()
+  if (!member || !user) return invalid()
+
+  const session = await rotateSession(c.env, { userId: rotated.userId, orgId: member.org_id, role: member.role, family: rotated.family, consume: rotated.tokenId })
+  if (!session) return c.json({ error: 'REFRESH_RACE', message: 'Please retry' }, 409)
+  if (viaCookie) setRefreshCookie(c, session.refreshToken)
+  return c.json({
+    data: {
+      token: session.accessToken,
+      expiresIn: session.expiresIn,
+      userId: rotated.userId,
+      orgId: member.org_id,
+      role: member.role,
+      emailVerified: user.email_verified === 1,
+      ...(!viaCookie && wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}),
+    },
+  })
+})
+
+// POST /api/auth/logout - end this session (revokes its refresh token family). Always succeeds.
+authRoutes.post('/logout', refreshRateLimit, zValidator('json', refreshSchema.default({})), async (c) => {
+  const presented = presentedRefreshToken(c, c.req.valid('json').refreshToken)
+  if (presented) await revokeRefreshFamily(c.env, presented)
+  clearRefreshCookie(c)
+  return c.json({ data: { loggedOut: true } })
+})
+
+// POST /api/auth/logout-all - end every session of the signed-in user (access tokens too)
+authRoutes.post('/logout-all', requireAuth, async (c) => {
+  const auth = c.get('auth')
+  if (auth.actorType !== 'user') {
+    return c.json({ error: 'FORBIDDEN', message: 'Sign in as a user to end all sessions' }, 403)
+  }
+  const cutoff = Math.floor(Date.now() / 1000) + 1
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE users SET sessions_valid_after = ? WHERE id = ?').bind(cutoff, auth.userId),
+    c.env.DB.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(auth.userId),
+  ])
+  clearRefreshCookie(c)
+  await writeAuditLog(c.env, {
+    orgId: auth.orgId,
+    actorId: auth.userId,
+    actorType: 'user',
+    action: 'auth.logout_all',
+    resourceType: 'user',
+    resourceId: auth.userId,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+  return c.json({ data: { loggedOut: true } })
+})
+
+const OAUTH_COOKIE_TTL_SECONDS = 600
+
+function oauthCookieName(c: Context<{ Bindings: Env }>): string {
+  // The __Host- prefix needs Secure; plain http (local dev) cannot set it.
+  return new URL(c.req.url).protocol === 'https:' ? '__Host-hv_oauth' : 'hv_oauth'
+}
+
+/** Start a flow: the PKCE verifier goes into an HttpOnly cookie, so only the browser that began it can finish it. */
+async function beginOAuthBinding(c: Context<{ Bindings: Env }>): Promise<{ challenge: string }> {
+  const pkce = await newPkce()
+  const secure = new URL(c.req.url).protocol === 'https:'
+  setCookie(c, oauthCookieName(c), pkce.verifier, {
+    httpOnly: true, secure, sameSite: 'Lax', path: '/', maxAge: OAUTH_COOKIE_TTL_SECONDS,
+  })
+  return { challenge: pkce.challenge }
+}
+
+/** Validate state and the browser binding; returns the PKCE verifier. The cookie is always cleared (single use). */
+async function consumeOAuthBinding(c: Context<{ Bindings: Env }>, state: string): Promise<string | null> {
+  const name = oauthCookieName(c)
+  const verifier = getCookie(c, name)
+  const verified = await verifyState(c.env.JWT_SECRET, state)
+  if (!verified || !verifier) return null
+  if (!timingSafeEqual(await challengeFor(verifier), verified.challenge)) return null
+  // Cleared only after a match, so a stray callback hit cannot cancel someone else's in-flight login.
+  deleteCookie(c, name, { path: '/', secure: new URL(c.req.url).protocol === 'https:' })
+  return verifier
 }
 
 // GET /api/auth/github — begin the GitHub OAuth sign-in flow
@@ -505,7 +651,10 @@ authRoutes.get('/github', oauthRateLimit, async (c) => {
   authorizeUrl.searchParams.set('client_id', clientId)
   authorizeUrl.searchParams.set('redirect_uri', redirectUri)
   authorizeUrl.searchParams.set('scope', 'read:user user:email')
-  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET))
+  const pkce = await beginOAuthBinding(c)
+  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET, pkce.challenge))
+  authorizeUrl.searchParams.set('code_challenge', pkce.challenge)
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256')
   authorizeUrl.searchParams.set('allow_signup', 'true')
 
   return c.redirect(authorizeUrl.toString(), 302)
@@ -529,12 +678,13 @@ authRoutes.get('/github/callback', oauthRateLimit, async (c) => {
 
   const code = c.req.query('code')
   const state = c.req.query('state')
-  if (!code || !state || !(await verifyState(c.env.JWT_SECRET, state))) {
+  const verifier = code && state ? await consumeOAuthBinding(c, state) : null
+  if (!code || !verifier) {
     return fail('invalid_state')
   }
 
   const redirectUri = `${new URL(c.req.url).origin}/api/auth/github/callback`
-  const accessToken = await exchangeGitHubCode(clientId, clientSecret, code, redirectUri)
+  const accessToken = await exchangeGitHubCode(clientId, clientSecret, code, redirectUri, verifier)
   if (!accessToken) {
     return fail('exchange_failed')
   }
@@ -560,7 +710,10 @@ authRoutes.get('/google', oauthRateLimit, async (c) => {
   authorizeUrl.searchParams.set('redirect_uri', redirectUri)
   authorizeUrl.searchParams.set('response_type', 'code')
   authorizeUrl.searchParams.set('scope', 'openid email profile')
-  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET))
+  const pkce = await beginOAuthBinding(c)
+  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET, pkce.challenge))
+  authorizeUrl.searchParams.set('code_challenge', pkce.challenge)
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256')
 
   return c.redirect(authorizeUrl.toString(), 302)
 })
@@ -586,12 +739,13 @@ authRoutes.get('/google/callback', oauthRateLimit, async (c) => {
 
   const code = c.req.query('code')
   const state = c.req.query('state')
-  if (!code || !state || !(await verifyState(c.env.JWT_SECRET, state))) {
+  const verifier = code && state ? await consumeOAuthBinding(c, state) : null
+  if (!code || !verifier) {
     return fail('invalid_state')
   }
 
   const redirectUri = `${new URL(c.req.url).origin}/api/auth/google/callback`
-  const accessToken = await exchangeGoogleCode(clientId, clientSecret, code, redirectUri)
+  const accessToken = await exchangeGoogleCode(clientId, clientSecret, code, redirectUri, verifier)
   if (!accessToken) {
     return fail('exchange_failed')
   }

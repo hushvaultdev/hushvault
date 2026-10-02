@@ -179,3 +179,30 @@ describe('share', () => {
     await expect(shareAction(ctx().client, 'x', { views: '0' })).rejects.toThrow(/--views/)
   })
 })
+
+describe('credential origin pinning', () => {
+  it('refuses a project apiUrl whose origin differs from the signed-in server, before any request', async () => {
+    const { resolveApiUrl } = await import('../src/lib/context.js')
+    process.env['HUSHVAULT_API_URL'] = 'https://api.hushvault.dev'
+    try {
+      await expect(resolveApiUrl(undefined, 'https://evil.example')).rejects.toThrow(/never sent to a server chosen by a repository file/)
+      await expect(resolveApiUrl(undefined, 'https://api.hushvault.dev.evil.example')).rejects.toThrow()
+      await expect(resolveApiUrl(undefined, 'https://api.hushvault.dev/')).resolves.toBe('https://api.hushvault.dev')
+      await expect(resolveApiUrl(undefined, undefined)).resolves.toBe('https://api.hushvault.dev')
+    } finally {
+      delete process.env['HUSHVAULT_API_URL']
+    }
+  })
+
+  it('does not pass HUSHVAULT_* variables to the child process', async () => {
+    const { buildChildEnv } = await import('../src/commands/run.js')
+    process.env['HUSHVAULT_TOKEN'] = 'hv_live_secret'
+    try {
+      const env = buildChildEnv({ DB: 'x' }, true)
+      expect(env['HUSHVAULT_TOKEN']).toBeUndefined()
+      expect(env['DB']).toBe('x')
+    } finally {
+      delete process.env['HUSHVAULT_TOKEN']
+    }
+  })
+})

@@ -2,9 +2,8 @@ import { Command } from 'commander'
 import chalk from 'chalk'
 import path from 'path'
 import { ApiClient, type EnvironmentRow, type ProjectRow } from '../api.js'
-import { getAuthToken } from '../config/auth.js'
 import { writeProjectConfig, type HushVaultConfig } from '../config/project.js'
-import { resolveApiUrl } from '../lib/context.js'
+import { createAuthedClient, resolveApiUrl } from '../lib/context.js'
 import { fail } from '../lib/fail.js'
 
 function matchProject(projects: ProjectRow[], input: string): ProjectRow | undefined {
@@ -76,7 +75,7 @@ export const initCommand = new Command('init')
   .action(async (options: { project?: string; env: string; apiUrl?: string }) => {
     try {
       const apiUrl = await resolveApiUrl(options.apiUrl)
-      const client = new ApiClient({ apiUrl, token: await getAuthToken() })
+      const client = await createAuthedClient(apiUrl)
       await initAction(client, apiUrl, options, process.cwd(), (m) => console.log(chalk.green(`✓ ${m}`)))
       console.log(chalk.green('✓ Initialized .hushvault.json'))
       console.log(chalk.gray('  Commit .hushvault.json to git (it contains no secrets)\n'))

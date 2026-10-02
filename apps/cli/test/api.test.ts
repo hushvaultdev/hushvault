@@ -55,3 +55,45 @@ describe('ApiClient', () => {
     expect(friendlyError(new ApiError(400, 'VALIDATION_ERROR', 'Bad name'))).toMatch(/Invalid input: Bad name/)
   })
 })
+
+describe('ApiClient refresh on 401', () => {
+  it('refreshes once with the hook and retries; gives up if the hook returns null', async () => {
+    const seen: Array<string | null> = []
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const auth = ((init?.headers ?? {}) as Record<string, string>)['Authorization'] ?? null
+      seen.push(auth)
+      if (auth === 'Bearer fresh') return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
+      return new Response(JSON.stringify({ error: 'UNAUTHORIZED', message: 'Session expired' }), { status: 401 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const refresh = vi.fn(async () => 'fresh')
+      const ok = await new ApiClient({ apiUrl: 'https://api.test', token: 'old', refresh }).listProjects()
+      expect(ok).toEqual([])
+      expect(refresh).toHaveBeenCalledTimes(1)
+      expect(seen).toEqual(['Bearer old', 'Bearer fresh'])
+
+      const none = vi.fn(async () => null)
+      const err = (await new ApiClient({ apiUrl: 'https://api.test', token: 'old', refresh: none }).listProjects().catch((e: unknown) => e)) as ApiError
+      expect(err.status).toBe(401)
+      expect(none).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('identifies itself as the CLI so the API returns the refresh token in the body', async () => {
+    let header: string | undefined
+    vi.stubGlobal('fetch', vi.fn(async (_u: string | URL | Request, init?: RequestInit) => {
+      header = ((init?.headers ?? {}) as Record<string, string>)['X-HushVault-Client']
+      return new Response(JSON.stringify({ data: { token: 't', userId: 'u', orgId: 'o', role: 'admin', refreshToken: 'hvr_x' } }), { status: 200 })
+    }))
+    try {
+      const r = await new ApiClient({ apiUrl: 'https://api.test' }).login('a@b.co', 'pw')
+      expect(header).toBe('cli')
+      expect(r.refreshToken).toBe('hvr_x')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

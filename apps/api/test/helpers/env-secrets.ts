@@ -1,15 +1,15 @@
-import { encryptSecret } from '../../src/crypto/envelope'
+import { encryptSecretWithRing, loadKeyRing } from '../../src/crypto/envelope'
 import { createPrefixedId } from '../../src/lib/auth'
 import type { TestEnv } from './env'
 
 /** Insert a secret with real envelope encryption (blob in KV, wrapped DEK in D1). */
 export async function seedSecret(env: TestEnv, projectId: string, envId: string, name: string, value: string) {
   const id = createPrefixedId('sec')
-  const { encryptedValue, wrappedDek } = await encryptSecret(value, env.ENCRYPTION_MASTER_KEY)
+  const { encryptedValue, wrappedDek } = await encryptSecretWithRing(value, loadKeyRing(env), { projectId, envId, secretId: id })
   await env.SECRETS_KV.put(`secret:${id}`, encryptedValue)
   const now = new Date().toISOString()
   await env.DB.prepare(
-    'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, is_computed, template, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)',
+    'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, enc_version, is_computed, template, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 2, 0, NULL, ?, ?, ?)',
   ).bind(id, projectId, envId, name, wrappedDek, 'v1', '[]', now, now).run()
   return id
 }
