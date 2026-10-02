@@ -24,8 +24,8 @@ inputs:
     default: 'true'
   prefix:
     description: >-
-      Prefix applied to exported variable names. Recommended: it puts you, not whoever can add a secret, in control
-      of which variables this job ends up reading.
+      Prefix applied to exported variable names; must end with "_" (e.g. APP_). It puts you, not whoever can add a
+      secret, in control of which variables this job ends up reading.
     required: false
     default: ''
   names:

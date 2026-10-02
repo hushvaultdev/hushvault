@@ -65,7 +65,7 @@ The action masks every value before it can reach the log, writes values only to 
 ```yaml
 with:
   environment-id: env_...
-  prefix: APP_          # every secret becomes APP_<NAME>
+  prefix: APP_          # every secret becomes APP_<NAME>; the prefix must end in "_"
 # or
   names: DB_URL API_KEY # only these, and the run fails if one is missing
 ```

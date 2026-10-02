@@ -97,7 +97,7 @@ async function main() {
   const apiUrl = input('api-url', 'https://api.hushvault.dev').replace(/\/+$/, '')
   const environmentId = input('environment-id')
   const audience = input('audience', 'https://api.hushvault.dev')
-  const exportEnv = input('export-env', 'true') !== 'false'
+  const exportEnv = input('export-env', 'true').trim().toLowerCase() !== 'false'
   const prefix = input('prefix', '')
   const only = parseNames(input('names', ''))
   for (const name of only) {
@@ -113,7 +113,12 @@ async function main() {
   if (!/^https:\/\//.test(apiUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiUrl)) {
     fail('api-url must use https.')
   }
-  if (prefix && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(prefix)) fail('prefix must be a valid environment-variable prefix.')
+  // Must end in '_': otherwise a truncated prefix silently reassembles a build variable from a secret name —
+  // prefix 'MAKE' + secret 'FLAGS' is MAKEFLAGS, 'C' + 'C' is CC, 'CD' + 'PATH' is CDPATH, each of which is code
+  // execution. Requiring the separator removes that whole shape rather than listing the combinations.
+  if (prefix && !/^[A-Za-z_][A-Za-z0-9_]*_$/.test(prefix)) {
+    fail('prefix must be letters, digits and underscores, and must end with "_" (e.g. APP_).')
+  }
 
   // L5: a changed api-url must not be able to send a token minted for the real API somewhere else. The audience
   // follows api-url unless both were set deliberately and agree.

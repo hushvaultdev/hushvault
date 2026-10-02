@@ -168,6 +168,27 @@ describe('main', () => {
     expect(out.join('')).toContain('Refusing to export LD_PRELOAD')
   })
 
+  it('a truncated prefix cannot reassemble a build variable from a secret name', async () => {
+    // prefix 'MAKE' + secret 'FLAGS' would be MAKEFLAGS; 'C' + 'C' would be CC; 'CD' + 'PATH' would be CDPATH.
+    // Requiring the trailing underscore removes the whole shape instead of listing the combinations.
+    for (const prefix of ['MAKE', 'C', 'CD', 'P']) {
+      setup({ secrets: [{ name: 'FLAGS', value: 'x' }], prefix })
+      await expect(action.main()).rejects.toThrow('exit')
+      expect(out.join(''), prefix).toContain('must end with')
+      expect(readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')).toBe('')
+    }
+  })
+
+  it('export-env is case-insensitive about false', async () => {
+    for (const value of ['false', 'FALSE', ' False ']) {
+      setup({ secrets: [{ name: 'DB_URL', value: 'v' }], prefix: '' })
+      process.env['INPUT_EXPORT-ENV'] = value
+      await action.main()
+      expect(readFileSync(process.env['GITHUB_ENV'] as string, 'utf8'), value).toBe('')
+      expect(out.join('')).toContain('::add-mask::v')
+    }
+  })
+
   it('ATTACK: refuses to run at all when neither prefix nor names is set', async () => {
     // Otherwise a `member` picks the variable names, and CC / MAKE / CDPATH / LD_PRELOAD are code execution.
     setup({ secrets: [{ name: 'CC', value: 'touch /tmp/pwned; true' }], prefix: '' })
