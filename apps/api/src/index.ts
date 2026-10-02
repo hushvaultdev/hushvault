@@ -51,6 +51,8 @@ export type Env = {
   WEB_APP_URL?: string
   // Extra Worker names (comma list) that may never be a sync target; adds to the built-in HushVault names.
   HUSHVAULT_SYNC_DENY_SCRIPTS?: string
+  // Cloudflare account ids (comma list) that sync targets and connections may never use.
+  HUSHVAULT_SYNC_DENY_ACCOUNT_IDS?: string
 }
 
 declare module 'hono' {

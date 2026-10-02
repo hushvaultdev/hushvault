@@ -209,7 +209,7 @@ describe('own-worker denylist and the real Cloudflare provider', () => {
 
   it('refuses HushVault\'s own Workers and anything in HUSHVAULT_SYNC_DENY_SCRIPTS', async () => {
     const w = await cloudflareOrg()
-    for (const scriptName of ['hushvault-api', 'hushvault-api-dev', 'hushvault-web', 'hushvault-web-dev', 'HushVault-API']) {
+    for (const scriptName of ['hushvault-api', 'hushvault-api-dev', 'hushvault-web', 'hushvault-web-dev', 'hushvault-web-local', 'HushVault-API']) {
       const res = await createTarget(w.token, cfBody(w, { accountId: ACCOUNT, scriptName }))
       expect(res.status, scriptName).toBe(422)
       expect(res.body.error).toBe('TARGET_NOT_ALLOWED')
@@ -354,5 +354,205 @@ describe('preview and run end to end', () => {
     expect(res.body.error).toBe('COMPUTED_ERROR')
     expect(fake.listCalls).toBe(0)
     expect(fake.pushCalls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Review fixes (issue #41 follow-ups)
+// ---------------------------------------------------------------------------------------------
+
+describe('run endpoint: one plan, one read', () => {
+  it('a blocked plan costs a single plan: one list call, one bulk-read audit row, no run row', async () => {
+    const w = await setupSyncWorld(env, { secrets: { BLANK: '', OK: 'v' } })
+    const res = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    expect(res.status).toBe(422)
+    expect(res.body).toMatchObject({ error: 'SYNC_BLOCKED', plan: { blockers: [{ code: 'EMPTY_VALUE', names: ['BLANK'] }], create: ['OK'] } })
+    expect(fake.listCalls).toBe(1)
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'secret.read_bulk'").first<{ n: number }>())?.n).toBe(1)
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_runs').first<{ n: number }>())?.n).toBe(0)
+  })
+
+  it('a successful run also plans once', async () => {
+    const w = await setupSyncWorld(env)
+    const res = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    expect(res.status).toBe(200)
+    expect(fake.listCalls).toBe(1)
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'secret.read_bulk'").first<{ n: number }>())?.n).toBe(1)
+  })
+
+  it('an active run answers 200 with that run before anything is planned', async () => {
+    const w = await setupSyncWorld(env)
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, started_at, lease_until) VALUES ('isr_live', ?, 'manual', 'running', 1, ?, '2999-01-01T00:00:00.000Z')").bind(w.targetId, new Date().toISOString()).run()
+    const res = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({ id: 'isr_live', status: 'running' })
+    expect(fake.listCalls).toBe(0)
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'secret.read_bulk'").first<{ n: number }>())?.n).toBe(0)
+  })
+
+  it('a failure before anything is sent is a mapped HTTP error AND a recorded failed run that flags the target', async () => {
+    const w = await setupSyncWorld(env, { secrets: { GOOD: 'g' } })
+    await seedComputed(env, w.projectId, w.envId, 'BROKEN', '${DOES_NOT_EXIST}')
+    const res = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    expect(res.status).toBe(422)
+    expect(res.body.error).toBe('COMPUTED_ERROR')
+    const runs = (await call(env, 'GET', `/api/integrations/targets/${w.targetId}/runs`, { token: w.token })).body.data
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ status: 'failed', errorCode: 'COMPUTED_ERROR', nextRetryAt: null })
+    const target = (await call(env, 'GET', '/api/integrations/targets', { token: w.token })).body.data[0]
+    expect(target.status).toBe('needs_attention')
+  })
+
+  it('an undecryptable secret is reported as DECRYPTION_FAILED, distinct from a computed-secret error', async () => {
+    const w = await setupSyncWorld(env, { secrets: { GOOD: 'g' } })
+    const row = await env.DB.prepare("SELECT id FROM secrets WHERE name = 'GOOD'").first<{ id: string }>()
+    await env.SECRETS_KV.delete(`secret:${row!.id}`)
+    const res = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    expect(res.status).toBe(422)
+    expect(res.body.error).toBe('DECRYPTION_FAILED')
+    const preview = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/preview`, { token: w.token })
+    expect(preview.body.error).toBe('DECRYPTION_FAILED')
+  })
+
+  it('audits the run and the bulk read with the caller\'s ip and user agent', async () => {
+    const w = await setupSyncWorld(env)
+    await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token, headers: { 'cf-connecting-ip': '198.51.100.7', 'user-agent': 'dash/9' } })
+    const rows = (await env.DB.prepare("SELECT action, ip, user_agent FROM audit_log WHERE action LIKE 'sync.run.%' OR action = 'secret.read_bulk'").all<Record<string, string>>()).results
+    expect(rows.length).toBe(3)
+    for (const r of rows) expect([r['ip'], r['user_agent']], r['action']).toEqual(['198.51.100.7', 'dash/9'])
+  })
+})
+
+describe('preview and run rate limits are per organisation', () => {
+  const run = (w: { targetId: string; token: string }, ip: string, action = 'run') =>
+    call(env, 'POST', `/api/integrations/targets/${w.targetId}/${action}`, { token: w.token, headers: { 'cf-connecting-ip': ip } })
+
+  it('one organisation cannot dodge the run limit by changing IP, and another organisation is not affected', async () => {
+    const a = await setupSyncWorld(env)
+    const b = await setupSyncWorld(env)
+    for (let i = 0; i < 6; i++) expect((await run(a, `203.0.113.${i + 1}`)).status).toBe(200)
+    expect((await run(a, '203.0.113.200')).status).toBe(429)
+    expect((await run(a, '203.0.113.1')).status).toBe(429)
+    // org B from the very same IPs is untouched
+    expect((await run(b, '203.0.113.1')).status).toBe(200)
+  })
+
+  it('same for preview (12 per minute)', async () => {
+    const a = await setupSyncWorld(env)
+    const b = await setupSyncWorld(env)
+    for (let i = 0; i < 12; i++) expect((await run(a, `198.51.100.${i + 1}`, 'preview')).status).toBe(200)
+    expect((await run(a, '198.51.100.99', 'preview')).status).toBe(429)
+    expect((await run(b, '198.51.100.1', 'preview')).status).toBe(200)
+  })
+})
+
+describe('PATCH while a run is active', () => {
+  const activeRun = (targetId: string, lease = '2999-01-01T00:00:00.000Z') =>
+    env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, started_at, lease_until) VALUES (?, ?, 'manual', 'running', 1, ?, ?)").bind(`isr_${Math.random().toString(36).slice(2, 10)}`, targetId, new Date().toISOString(), lease).run()
+  const patch = (w: { token: string }, id: string, json: unknown) => call(env, 'PATCH', `/api/integrations/targets/${id}`, { token: w.token, json })
+
+  it('refuses a resource or filter change with 409 BUSY and changes nothing (ledger included)', async () => {
+    const w = await setupSyncWorld(env)
+    await env.DB.prepare('INSERT INTO sync_items (target_id, name, fingerprint, last_pushed_at) VALUES (?, ?, ?, ?)').bind(w.targetId, 'KEEP', 'fp', new Date().toISOString()).run()
+    await activeRun(w.targetId)
+    for (const json of [{ resource: { scriptName: 'worker-z' } }, { nameFilter: { prefix: 'X_' } }, { nameFilter: { deny: ['A'] } }]) {
+      const res = await patch(w, w.targetId, json)
+      expect(res.status, JSON.stringify(json)).toBe(409)
+      expect(res.body.error).toBe('BUSY')
+    }
+    const row = await env.DB.prepare('SELECT resource_json, name_filter_json FROM sync_targets WHERE id = ?').bind(w.targetId).first<Record<string, string>>()
+    expect(row).toEqual({ resource_json: '{"scriptName":"worker-a"}', name_filter_json: '{}' })
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_items WHERE target_id = ?').bind(w.targetId).first<{ n: number }>())?.n).toBe(1)
+  })
+
+  it('still allows changes that do not alter what is synced (deleteRemoved, or an identical filter/resource)', async () => {
+    const w = await setupSyncWorld(env)
+    await activeRun(w.targetId)
+    expect((await patch(w, w.targetId, { deleteRemoved: true })).status).toBe(200)
+    expect((await patch(w, w.targetId, { nameFilter: {}, resource: { scriptName: 'worker-a' } })).status).toBe(200)
+  })
+
+  it('works again once the run finished, and a crashed run (expired lease) does not block', async () => {
+    const w = await setupSyncWorld(env)
+    await activeRun(w.targetId, '2000-01-01T00:00:00.000Z')
+    expect((await patch(w, w.targetId, { nameFilter: { prefix: 'X_' } })).status).toBe(200)
+    await env.DB.prepare("UPDATE sync_runs SET status = 'failed'").run()
+    await activeRun(w.targetId)
+    await env.DB.prepare("UPDATE sync_runs SET status = 'succeeded' WHERE lease_until = '2999-01-01T00:00:00.000Z'").run()
+    expect((await patch(w, w.targetId, { resource: { scriptName: 'worker-q' } })).status).toBe(200)
+  })
+
+  it('the UPDATE itself is guarded: a run that starts between the check and the write still wins', async () => {
+    const w = await setupSyncWorld(env)
+    const realPrepare = env.DB.prepare.bind(env.DB)
+    let injected = false
+    env.DB.prepare = ((sql: string) => {
+      // Right after the route's pre-check query, a run starts.
+      if (!injected && sql.startsWith('UPDATE sync_targets SET resource_json')) {
+        injected = true
+        void env.DB.prepare('SELECT 1').first()
+        realPrepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, started_at, lease_until) VALUES ('isr_race', ?, 'manual', 'running', 1, ?, '2999-01-01T00:00:00.000Z')").bind(w.targetId, new Date().toISOString()).runSync()
+      }
+      return realPrepare(sql)
+    }) as typeof env.DB.prepare
+    const res = await patch(w, w.targetId, { nameFilter: { prefix: 'X_' } })
+    env.DB.prepare = realPrepare
+    expect(injected).toBe(true)
+    expect(res.status).toBe(409)
+    expect((await env.DB.prepare('SELECT name_filter_json FROM sync_targets WHERE id = ?').bind(w.targetId).first<{ name_filter_json: string }>())?.name_filter_json).toBe('{}')
+  })
+})
+
+describe('soft delete clears scheduled retries', () => {
+  it('DELETE nulls next_retry_at on the target\'s runs', async () => {
+    const w = await setupSyncWorld(env)
+    fake.script.push(() => ({ ok: false, code: 'PROVIDER_ERROR' }))
+    const failed = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    expect(failed.body.data.nextRetryAt).not.toBeNull()
+    expect((await call(env, 'DELETE', `/api/integrations/targets/${w.targetId}`, { token: w.token })).status).toBe(200)
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_runs WHERE next_retry_at IS NOT NULL').first<{ n: number }>())?.n).toBe(0)
+  })
+})
+
+describe('account denylist (HUSHVAULT_SYNC_DENY_ACCOUNT_IDS)', () => {
+  it('refuses targets in a denied account (resource or the connection\'s account) and connections for it', async () => {
+    const w = await setupOrg()
+    env['HUSHVAULT_SYNC_DENY_ACCOUNT_IDS'] = ` ${'d'.repeat(32)} , ACC1`
+    // fixture connection config is { accountId: 'acc1' }: denied through the connection
+    const viaConnection = await createTarget(w.token, createBody(w))
+    expect(viaConnection.status).toBe(422)
+    expect(viaConnection.body.error).toBe('TARGET_NOT_ALLOWED')
+    // denied through the resource itself
+    env['HUSHVAULT_SYNC_DENY_ACCOUNT_IDS'] = 'D'.repeat(32)
+    await env.DB.prepare('UPDATE integration_connections SET config_json = ? WHERE id = ?').bind(JSON.stringify({ accountId: 'd'.repeat(32) }), w.connectionId).run()
+    const viaResource = await createTarget(w.token, createBody(w, 'worker-a', { resource: { scriptName: 'worker-a', accountId: 'd'.repeat(32) } }))
+    expect(viaResource.status).toBe(422)
+    // a new connection for a denied account is refused too
+    const conn = await call(env, 'POST', '/api/integrations/connections', { token: w.token, json: { provider: 'fake-sync', label: 'bad', credential: 'long-enough-credential', config: { accountId: 'd'.repeat(32) } } })
+    expect(conn.status).toBe(422)
+    expect(conn.body.error).toBe('TARGET_NOT_ALLOWED')
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM integration_connections WHERE label = ?').bind('bad').first<{ n: number }>())?.n).toBe(0)
+    // other accounts still work
+    env['HUSHVAULT_SYNC_DENY_ACCOUNT_IDS'] = 'e'.repeat(32)
+    expect((await createTarget(w.token, createBody(w))).status).toBe(201)
+  })
+
+  it('a var added after the target exists is enforced by preview and run (engine), nothing reaches the provider', async () => {
+    const w = await setupSyncWorld(env)
+    env['HUSHVAULT_SYNC_DENY_ACCOUNT_IDS'] = 'acc1'
+    const preview = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/preview`, { token: w.token })
+    expect([preview.status, preview.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
+    const run = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    expect([run.status, run.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
+    expect(fake.listCalls).toBe(0)
+    expect(fake.pushCalls).toHaveLength(0)
+    const target = (await call(env, 'GET', '/api/integrations/targets', { token: w.token })).body.data[0]
+    expect(target.status).toBe('needs_attention')
+  })
+
+  it('hushvault-web-local is denied by default', async () => {
+    const w = await setupOrg()
+    const res = await createTarget(w.token, createBody(w, 'hushvault-web-local'))
+    expect([res.status, res.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
   })
 })

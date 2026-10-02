@@ -4,9 +4,13 @@
 //
 // UNVERIFIED against the live API (see docs/integrations/cloudflare-workers.md): the bulk endpoint's HTTP verb,
 // the list response envelope, the verify endpoints and per-endpoint status codes. Each is handled defensively.
-import type { Env } from '../../index'
+// The bulk request is PATCH only. There is deliberately NO fallback to PUT: if PUT replaces the whole secret set,
+// a fallback could delete every secret that is not in the request.
 import type { VerifyResult } from '../provider'
-import type { ItemResult, ProviderErrorCode, PushInput, PushResult, SyncOp, SyncProvider } from '../sync-types'
+import type { FailureInfo, ItemResult, ProviderErrorCode, PushInput, PushResult, SyncOp, SyncProvider } from '../sync-types'
+
+// The denylist lives in its own module so the engine can enforce it too; re-exported for existing importers.
+export { DEFAULT_DENIED_SCRIPTS, deniedScripts, isDeniedScript } from '../target-denylist'
 
 export const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
 export const CLOUDFLARE_WORKERS_PROVIDER_ID = 'cloudflare-workers'
@@ -18,19 +22,6 @@ export const BULK_MAX_OPERATIONS = 100
 const ACCOUNT_ID = /^[a-f0-9]{32}$/i
 // Worker names: letters, digits, dash, underscore; 63 chars max. No dots, slashes or percent signs.
 const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
-
-/** Scripts that may never be a sync target, whatever the env var says (HushVault's own Workers). */
-export const DEFAULT_DENIED_SCRIPTS: readonly string[] = ['hushvault-api', 'hushvault-api-dev', 'hushvault-web', 'hushvault-web-dev']
-
-/** Default list plus the comma separated HUSHVAULT_SYNC_DENY_SCRIPTS var, lower-cased. The var can only add. */
-export function deniedScripts(env: Pick<Env, 'HUSHVAULT_SYNC_DENY_SCRIPTS'> | undefined): Set<string> {
-  const extra = (env?.HUSHVAULT_SYNC_DENY_SCRIPTS ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
-  return new Set([...DEFAULT_DENIED_SCRIPTS, ...extra])
-}
-
-export function isDeniedScript(env: Pick<Env, 'HUSHVAULT_SYNC_DENY_SCRIPTS'> | undefined, scriptName: string): boolean {
-  return deniedScripts(env).has(scriptName.toLowerCase())
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -51,24 +42,49 @@ async function errorCodes(res: Response): Promise<number[]> {
 
 const VALIDATION_CODES = new Set([10016, 10021, 10026, 10054, 10055])
 
-async function mapFailure(res: Response): Promise<ProviderErrorCode> {
+type Failure = { code: ProviderErrorCode } & FailureInfo
+
+/** Retry-After as whole seconds (delta-seconds or an HTTP date). Absent or unusable -> undefined. Capped at 24 h. */
+export function parseRetryAfter(res: Response, nowMs: number = Date.now()): number | undefined {
+  const raw = res.headers.get('retry-after')
+  if (raw === null) return undefined
+  const trimmed = raw.trim()
+  let seconds: number
+  if (/^\d{1,9}$/.test(trimmed)) seconds = Number(trimmed)
+  else {
+    const at = Date.parse(trimmed)
+    if (Number.isNaN(at)) return undefined
+    seconds = Math.ceil((at - nowMs) / 1000)
+  }
+  return seconds > 0 ? Math.min(seconds, 86_400) : undefined
+}
+
+async function mapFailure(res: Response): Promise<Failure> {
   const codes = await errorCodes(res)
-  if (codes.includes(10007)) return 'TARGET_NOT_FOUND'
-  if (codes.some((c) => VALIDATION_CODES.has(c))) return 'PROVIDER_VALIDATION'
-  if (codes.includes(10035)) return 'PROVIDER_ERROR'
+  if (codes.includes(10007)) return { code: 'TARGET_NOT_FOUND' }
+  if (codes.some((c) => VALIDATION_CODES.has(c))) return { code: 'PROVIDER_VALIDATION' }
+  if (codes.includes(10035)) return { code: 'PROVIDER_ERROR' }
   switch (res.status) {
     case 401:
-    case 403: return 'PROVIDER_AUTH'
-    case 404: return 'TARGET_NOT_FOUND'
-    case 429: return 'PROVIDER_RATE_LIMIT'
+    case 403: return { code: 'PROVIDER_AUTH' }
+    case 404: return { code: 'TARGET_NOT_FOUND' }
+    case 429: {
+      const retryAfterSeconds = parseRetryAfter(res)
+      return retryAfterSeconds !== undefined ? { code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds } : { code: 'PROVIDER_RATE_LIMIT' }
+    }
     case 400:
     case 413:
-    case 422: return 'PROVIDER_VALIDATION'
-    default: return 'PROVIDER_ERROR'
+    case 422: return { code: 'PROVIDER_VALIDATION' }
+    // A 5xx may be returned after the change was applied: the caller cannot assume it was not.
+    case 500:
+    case 502:
+    case 503:
+    case 504: return { code: 'PROVIDER_ERROR', maybeApplied: true }
+    default: return { code: 'PROVIDER_ERROR' }
   }
 }
 
-type Fetched = { ok: true; res: Response } | { ok: false; code: ProviderErrorCode }
+type Fetched = { ok: true; res: Response } | ({ ok: false } & Failure)
 
 async function cfFetch(method: string, path: string, credential: string, signal: AbortSignal, body?: unknown): Promise<Fetched> {
   try {
@@ -81,7 +97,8 @@ async function cfFetch(method: string, path: string, credential: string, signal:
     })
     return { ok: true, res }
   } catch {
-    return { ok: false, code: signal.aborted ? 'TIMEOUT' : 'PROVIDER_ERROR' }
+    // The request may have reached Cloudflare and been applied before the connection or the timer failed.
+    return { ok: false, code: signal.aborted ? 'TIMEOUT' : 'PROVIDER_ERROR', maybeApplied: true }
   }
 }
 
@@ -120,24 +137,47 @@ async function verifyOne(path: string, credential: string, signal: AbortSignal):
   }
 }
 
-/** One bulk request. Returns null on success, else a fixed code. */
-async function pushChunk(path: string, credential: string, ops: SyncOp[], signal: AbortSignal): Promise<ProviderErrorCode | null> {
-  const secrets: Record<string, unknown> = {}
-  for (const op of ops) {
-    secrets[op.name] = op.type === 'set' ? { type: 'secret_text', name: op.name, text: op.value } : null
-  }
-  // The bulk verb is unconfirmed (PATCH expected: "omitted secrets are unchanged"). Fall back to PUT on 405 only.
-  let fetched = await cfFetch('PATCH', path, credential, signal, { secrets })
-  if (fetched.ok && fetched.res.status === 405) fetched = await cfFetch('PUT', path, credential, signal, { secrets })
-  if (!fetched.ok) return fetched.code
+/** One bulk request. Returns null on success, else a fixed code (plus what is known about the outcome). */
+async function pushChunk(path: string, credential: string, ops: SyncOp[], signal: AbortSignal): Promise<Failure | null> {
+  // Object.fromEntries defines own properties, so a name such as "__proto__" can never be swallowed by the
+  // prototype setter and silently dropped from the body (the planner also rejects such names).
+  const secrets = Object.fromEntries(
+    ops.map((op) => [op.name, op.type === 'set' ? { type: 'secret_text', name: op.name, text: op.value } : null] as const),
+  )
+  const fetched = await cfFetch('PATCH', path, credential, signal, { secrets })
+  if (!fetched.ok) return { code: fetched.code, ...(fetched.maybeApplied ? { maybeApplied: true } : {}) }
   if (!fetched.res.ok) return mapFailure(fetched.res)
   try {
     const body: unknown = await fetched.res.json()
-    if (isRecord(body) && body['success'] === false) return 'PROVIDER_ERROR'
+    if (isRecord(body) && body['success'] === false) return { code: 'PROVIDER_ERROR' }
   } catch {
     // An empty or non-JSON 2xx body is treated as success.
   }
   return null
+}
+
+function readFailure(failure: Failure): { ok: false; code: ProviderErrorCode; retryAfterSeconds?: number } {
+  return { ok: false, code: failure.code, ...(failure.retryAfterSeconds !== undefined ? { retryAfterSeconds: failure.retryAfterSeconds } : {}) }
+}
+
+/** True when the list envelope says there is more than this page (result_info totals / cursors / next links). */
+function mayBeTruncated(body: Record<string, unknown>, received: number): boolean {
+  const info = body['result_info']
+  if (!isRecord(info)) return false
+  const num = (k: string): number | null => (typeof info[k] === 'number' ? info[k] : null)
+  const totalPages = num('total_pages')
+  if (totalPages !== null && totalPages > 1) return true
+  const total = num('total_count')
+  if (total !== null && total > received) return true
+  const page = num('page')
+  const perPage = num('per_page')
+  if (page !== null && perPage !== null && totalPages === null && total === null && received >= perPage) return true
+  for (const key of ['cursor', 'cursors', 'next', 'next_cursor', 'next_page']) {
+    const v = info[key]
+    if (typeof v === 'string' && v !== '') return true
+    if (isRecord(v) && Object.values(v).some((x) => typeof x === 'string' && x !== '')) return true
+  }
+  return false
 }
 
 export const cloudflareWorkersProvider: SyncProvider = {
@@ -176,11 +216,15 @@ export const cloudflareWorkersProvider: SyncProvider = {
     const path = secretsPath(input.resource)
     if (!path) return { ok: false, code: 'PROVIDER_VALIDATION' }
     const fetched = await cfFetch('GET', path, input.credential, input.signal)
-    if (!fetched.ok) return fetched
-    if (!fetched.res.ok) return { ok: false, code: await mapFailure(fetched.res) }
+    // A read changes nothing, so "maybe applied" is meaningless here: only the code (and Retry-After) is reported.
+    if (!fetched.ok) return { ok: false, code: fetched.code }
+    if (!fetched.res.ok) return readFailure(await mapFailure(fetched.res))
     try {
       const body: unknown = await fetched.res.json()
       if (!isRecord(body) || body['success'] === false || !Array.isArray(body['result'])) return { ok: false, code: 'PROVIDER_ERROR' }
+      // Pagination is not implemented (the docs do not confirm the cursor contract), so any sign of a partial page
+      // fails closed: planning against a truncated list would misclassify names as missing or as ours.
+      if (mayBeTruncated(body, (body['result'] as unknown[]).length)) return { ok: false, code: 'PROVIDER_ERROR' }
       const names: string[] = []
       for (const item of body['result'] as unknown[]) {
         if (isRecord(item) && typeof item['name'] === 'string') names.push(item['name'])
@@ -195,16 +239,17 @@ export const cloudflareWorkersProvider: SyncProvider = {
     const path = secretsPath(input.resource)
     if (!path) return { ok: false, code: 'PROVIDER_VALIDATION' }
     const results: ItemResult[] = []
-    let stopCode: ProviderErrorCode | null = null
+    let stop: Failure | null = null
     for (let offset = 0; offset < input.ops.length; offset += BULK_MAX_OPERATIONS) {
       const chunk = input.ops.slice(offset, offset + BULK_MAX_OPERATIONS)
-      if (stopCode) {
-        for (const op of chunk) results.push({ name: op.name, ok: false, code: stopCode })
+      if (stop) {
+        // Never sent: a definite failure, whatever the stopping chunk's outcome was.
+        for (const op of chunk) results.push({ name: op.name, ok: false, code: stop.code })
         continue
       }
-      const code = await pushChunk(path, input.credential, chunk, input.signal)
-      for (const op of chunk) results.push(code ? { name: op.name, ok: false, code } : { name: op.name, ok: true })
-      if (code && code !== 'PROVIDER_VALIDATION' && code !== 'PROVIDER_ERROR') stopCode = code
+      const failure = await pushChunk(path, input.credential, chunk, input.signal)
+      for (const op of chunk) results.push(failure ? { name: op.name, ok: false, ...failure } : { name: op.name, ok: true })
+      if (failure && failure.code !== 'PROVIDER_VALIDATION' && failure.code !== 'PROVIDER_ERROR') stop = failure
     }
     return { ok: true, results }
   },

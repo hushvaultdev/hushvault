@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BULK_MAX_OPERATIONS, CLOUDFLARE_API_BASE, cloudflareWorkersProvider as provider, deniedScripts, isDeniedScript } from '../src/integrations/providers/cloudflare-workers'
+import { BULK_MAX_OPERATIONS, CLOUDFLARE_API_BASE, cloudflareWorkersProvider as provider, deniedScripts, isDeniedScript, parseRetryAfter } from '../src/integrations/providers/cloudflare-workers'
 import type { SyncOp } from '../src/integrations/sync-types'
 
 const TOKEN = 'cf-token-PROVIDER-CANARY-77aa'
@@ -65,13 +65,13 @@ describe('parseConfig / parseResource', () => {
 
 describe('own-worker denylist', () => {
   it('always denies HushVault workers, case-insensitively, and the var only adds', () => {
-    for (const name of ['hushvault-api', 'hushvault-api-dev', 'hushvault-web', 'hushvault-web-dev', 'HushVault-API']) {
+    for (const name of ['hushvault-api', 'hushvault-api-dev', 'hushvault-web', 'hushvault-web-dev', 'hushvault-web-local', 'HushVault-API']) {
       expect(isDeniedScript(undefined, name), name).toBe(true)
     }
     expect(isDeniedScript({ HUSHVAULT_SYNC_DENY_SCRIPTS: 'other-one, Another' }, 'another')).toBe(true)
     expect(isDeniedScript({ HUSHVAULT_SYNC_DENY_SCRIPTS: 'other-one' }, 'hushvault-api')).toBe(true)
     expect(isDeniedScript({ HUSHVAULT_SYNC_DENY_SCRIPTS: '' }, 'customer-app')).toBe(false)
-    expect(deniedScripts({ HUSHVAULT_SYNC_DENY_SCRIPTS: ' , ,' }).size).toBe(4)
+    expect(deniedScripts({ HUSHVAULT_SYNC_DENY_SCRIPTS: ' , ,' }).size).toBe(5)
   })
 })
 
@@ -130,6 +130,27 @@ describe('listNames', () => {
     expect(await provider.listNames({ credential: TOKEN, config: {}, resource: RESOURCE, signal: signal() })).toEqual({ ok: false, code: 'PROVIDER_ERROR' })
   })
 
+  it('fails closed when the list may be a partial page (pagination is not implemented)', async () => {
+    const list = () => provider.listNames({ credential: TOKEN, config: {}, resource: RESOURCE, signal: signal() })
+    const page = [{ name: 'A', type: 'secret_text' }]
+    const truncated: unknown[] = [
+      { total_pages: 2, page: 1, per_page: 1, count: 1, total_count: 2 },
+      { total_count: 5, count: 1 },
+      { cursor: 'abc' },
+      { cursors: { after: 'abc' } },
+      { page: 1, per_page: 1 },
+    ]
+    for (const info of truncated) {
+      responder = () => json(200, { success: true, result: page, result_info: info })
+      expect(await list(), JSON.stringify(info)).toEqual({ ok: false, code: 'PROVIDER_ERROR' })
+    }
+    // A complete page (or no pagination info at all) is accepted.
+    responder = () => json(200, { success: true, result: page, result_info: { page: 1, per_page: 20, total_pages: 1, count: 1, total_count: 1 } })
+    expect(await list()).toEqual({ ok: true, names: ['A'] })
+    responder = () => json(200, { success: true, result: page, result_info: { cursor: '' } })
+    expect(await list()).toEqual({ ok: true, names: ['A'] })
+  })
+
   it('reports TIMEOUT when the signal aborted', async () => {
     const controller = new AbortController()
     responder = () => { controller.abort(); throw new DOMException('aborted', 'AbortError') }
@@ -156,11 +177,65 @@ describe('push', () => {
     expect(result.ok && result.results.every((r) => r.ok)).toBe(true)
   })
 
-  it('falls back to PUT when the verb is rejected with 405', async () => {
+  it('never falls back to PUT: PUT may replace the whole secret set. A 405 is a plain PROVIDER_ERROR', async () => {
     responder = (call) => (call.method === 'PATCH' ? json(405, {}) : json(200, { success: true }))
-    const result = await provider.push(input(sets(1)))
-    expect(calls.map((c) => c.method)).toEqual(['PATCH', 'PUT'])
-    expect(result).toEqual({ ok: true, results: [{ name: 'K_0', ok: true }] })
+    const result = await provider.push(input(sets(150)))
+    expect(calls.every((c) => c.method === 'PATCH')).toBe(true)
+    expect(calls.map((c) => c.method)).not.toContain('PUT')
+    expect(result.ok && result.results.every((r) => !r.ok && r.code === 'PROVIDER_ERROR')).toBe(true)
+    // every request of the run was PATCH, whatever the response: none was retried with another verb
+    for (const status of [400, 404, 405, 429, 500, 503]) {
+      calls = []
+      responder = () => json(status, {})
+      await provider.push(input(sets(5)))
+      expect(calls.map((c) => c.method).filter((m) => m !== 'PATCH'), `${status}`).toEqual([])
+    }
+  })
+
+  it('a name such as __proto__ is never dropped from the bulk body (own property, not the prototype setter)', async () => {
+    const ops: SyncOp[] = [
+      { type: 'set', name: '__proto__', value: VALUE },
+      { type: 'set', name: 'constructor', value: VALUE },
+      { type: 'delete', name: 'prototype' },
+      { type: 'set', name: 'NORMAL', value: VALUE },
+    ]
+    await provider.push(input(ops))
+    const raw = calls[0]?.body ?? ''
+    const parsed = JSON.parse(raw) as { secrets: Record<string, unknown> }
+    expect(Object.keys(parsed.secrets).sort()).toEqual(['NORMAL', '__proto__', 'constructor', 'prototype'])
+    expect(Object.getOwnPropertyDescriptor(parsed.secrets, '__proto__')?.value).toEqual({ type: 'secret_text', name: '__proto__', text: VALUE })
+    expect(raw).toContain('"__proto__":{"type":"secret_text"')
+  })
+
+  it('reports a chunk-level network failure or 5xx as maybe-applied, but a 4xx or 429 as definite', async () => {
+    responder = () => { throw new Error('socket hang up') }
+    const lost = await provider.push(input(sets(1)))
+    expect(lost).toEqual({ ok: true, results: [{ name: 'K_0', ok: false, code: 'PROVIDER_ERROR', maybeApplied: true }] })
+    responder = () => json(502, {})
+    expect(await provider.push(input(sets(1)))).toEqual({ ok: true, results: [{ name: 'K_0', ok: false, code: 'PROVIDER_ERROR', maybeApplied: true }] })
+    responder = () => json(400, { errors: [{ code: 10054 }] })
+    expect(await provider.push(input(sets(1)))).toEqual({ ok: true, results: [{ name: 'K_0', ok: false, code: 'PROVIDER_VALIDATION' }] })
+    const controller = new AbortController()
+    responder = () => { controller.abort(); throw new DOMException('aborted', 'AbortError') }
+    const timedOut = await provider.push({ ...input(sets(1)), signal: controller.signal })
+    expect(timedOut).toEqual({ ok: true, results: [{ name: 'K_0', ok: false, code: 'TIMEOUT', maybeApplied: true }] })
+  })
+
+  it('carries Retry-After (seconds or an HTTP date, capped at 24h) on a 429', async () => {
+    responder = () => new Response('{}', { status: 429, headers: { 'retry-after': '420' } })
+    expect(await provider.push(input(sets(1)))).toEqual({ ok: true, results: [{ name: 'K_0', ok: false, code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 420 }] })
+    expect(await provider.listNames({ credential: TOKEN, config: {}, resource: RESOURCE, signal: signal() })).toEqual({ ok: false, code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 420 })
+    responder = () => new Response('{}', { status: 429, headers: { 'retry-after': '99999999' } })
+    const capped = await provider.push(input(sets(1)))
+    expect(capped.ok && capped.results[0]).toMatchObject({ retryAfterSeconds: 86_400 })
+    const date = new Date(Date.now() + 600_000).toUTCString()
+    const res = new Response('{}', { status: 429, headers: { 'retry-after': date } })
+    const parsed = parseRetryAfter(res)
+    expect(parsed).toBeGreaterThan(590)
+    expect(parsed).toBeLessThanOrEqual(600)
+    responder = () => new Response('{}', { status: 429, headers: { 'retry-after': 'soon' } })
+    const none = await provider.push(input(sets(1)))
+    expect(none.ok && 'retryAfterSeconds' in (none.results[0] ?? {})).toBe(false)
   })
 
   it('maps failures per item and stops on auth/rate-limit/not-found; never echoes the provider body', async () => {

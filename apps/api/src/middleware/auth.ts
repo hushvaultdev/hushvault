@@ -123,11 +123,19 @@ export const integrationWriteRateLimit = createRateLimitMiddleware({
   failClosed: true,
 })
 
+// Run and preview decrypt a whole environment and call a third party, so they are limited per organisation
+// (an attacker or a busy team cannot dodge the cap by changing IP). Runs after requireAuth.
+const byOrganisation = (c: Parameters<NonNullable<Parameters<typeof createRateLimitMiddleware>[0]['keyFn']>>[0]): string | undefined => {
+  const orgId = c.get('auth')?.orgId
+  return orgId ? `org:${orgId}` : undefined
+}
+
 export const integrationRunRateLimit = createRateLimitMiddleware({
   scope: 'integration-run',
   limit: 6,
   windowMs: 60_000,
   failClosed: true,
+  keyFn: byOrganisation,
 })
 
 export const integrationPreviewRateLimit = createRateLimitMiddleware({
@@ -135,6 +143,7 @@ export const integrationPreviewRateLimit = createRateLimitMiddleware({
   limit: 12,
   windowMs: 60_000,
   failClosed: true,
+  keyFn: byOrganisation,
 })
 
 export const loginRateLimit = createRateLimitMiddleware({

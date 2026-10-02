@@ -7,6 +7,7 @@ import {
   isReservedSyncName,
   loadSyncTarget,
   MAX_SYNC_ATTEMPTS,
+  RATE_LIMIT_MIN_WAIT_MS,
   planSync,
   previewSync,
   runSync,
@@ -15,6 +16,7 @@ import {
 } from '../src/integrations/sync-engine'
 import { auditActions } from './helpers/projects-seed'
 import { createTestEnv, seedEnvironment, seedProject, seedUser, type TestEnv } from './helpers/env'
+import type { PushInput, PushResult } from '../src/integrations/sync-types'
 import { CREDENTIAL, installFakeProvider, seedComputed, seedConnection, seedSecret, seedTarget, setupSyncWorld, type FakeProvider } from './helpers/sync-fixture'
 
 const CANARY = 'canary-VALUE-7c2f19d0-must-never-leak'
@@ -108,8 +110,12 @@ describe('planning', () => {
 
 describe('reserved bootstrap names', () => {
   it('recognises the reserved names', () => {
-    for (const n of ['ENCRYPTION_MASTER_KEY', 'ENCRYPTION_KEY_V2', 'ENCRYPTION_KEY_V10', 'JWT_SECRET', 'jwt_secret']) expect(isReservedSyncName(n)).toBe(true)
-    for (const n of ['ENCRYPTION_KEY', 'MY_JWT_SECRET', 'ENCRYPTION_KEY_VX']) expect(isReservedSyncName(n)).toBe(false)
+    // Every secret-typed Env key: ENCRYPTION_*, JWT_SECRET, OAuth client secrets, Stripe keys.
+    for (const n of [
+      'ENCRYPTION_MASTER_KEY', 'ENCRYPTION_KEY_V2', 'ENCRYPTION_KEY_V10', 'ENCRYPTION_KEY', 'ENCRYPTION_ACTIVE_KEY_VERSION', 'JWT_SECRET', 'jwt_secret',
+      'GITHUB_CLIENT_SECRET', 'GOOGLE_CLIENT_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'stripe_webhook_secret',
+    ]) expect(isReservedSyncName(n), n).toBe(true)
+    for (const n of ['MY_JWT_SECRET', 'GITHUB_CLIENT_ID', 'STRIPE_PUBLISHABLE_KEY', 'MY_ENCRYPTION_KEY', 'API_KEY']) expect(isReservedSyncName(n), n).toBe(false)
   })
 
   it('never pushes them, lists them as skipped, and never deletes them', async () => {
@@ -426,12 +432,24 @@ describe('no plaintext leaks', () => {
     expect(await auditActions(env, w.orgId, run.id)).toEqual(['sync.run.started', 'sync.run.failed'])
   })
 
-  it('fails closed when the bulk-read audit cannot be written (no read without a record)', async () => {
-    const w = await setupSyncWorld(env)
+  it('a failed audit write never fails the plan or the run; it is logged by event name only', async () => {
+    const w = await setupSyncWorld(env, { secrets: { SECRET_ONE: CANARY } })
     await env.DB.prepare('DROP TABLE audit_log').run()
+    const planned = await planSync(env, await target(w), provider)
+    expect(planned.ok).toBe(true)
     const run = await runSync(env, w.targetId, { trigger: 'manual' })
-    expect(run.status).toBe('failed')
-    expect(provider.pushCalls).toHaveLength(0)
+    expect(run.status).toBe('succeeded')
+    expect(provider.remote.get('SECRET_ONE')).toBe(CANARY)
+    expect(logged.some((l) => l.includes('sync.audit_failed'))).toBe(true)
+    expect(logged.join('\n')).not.toContain(CANARY)
+  })
+
+  it('threads ip and user agent into the sync.run.* and secret.read_bulk audit rows', async () => {
+    const w = await setupSyncWorld(env)
+    await runSync(env, w.targetId, { trigger: 'manual', actorId: w.userId, ip: '203.0.113.9', userAgent: 'hushvault-test/1' })
+    const rows = (await env.DB.prepare("SELECT action, ip, user_agent FROM audit_log WHERE action LIKE 'sync.run.%' OR action = 'secret.read_bulk'").all<Record<string, string | null>>()).results
+    expect(rows.map((r) => r['action']).sort()).toEqual(['secret.read_bulk', 'sync.run.started', 'sync.run.succeeded'])
+    for (const r of rows) expect([r['ip'], r['user_agent']]).toEqual(['203.0.113.9', 'hushvault-test/1'])
   })
 })
 
@@ -587,5 +605,512 @@ describe('target lifecycle', () => {
     expect(row!['finished_at']).not.toBeNull()
     const t = await target(w)
     expect(t.lastRunAt).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Review fixes (issue #41 follow-ups)
+// ---------------------------------------------------------------------------------------------
+
+const ledgerRows = async (targetId: string) =>
+  Object.fromEntries((await env.DB.prepare('SELECT name, fingerprint FROM sync_items WHERE target_id = ?').bind(targetId).all<{ name: string; fingerprint: string }>()).results.map((r) => [r.name, r.fingerprint]))
+
+/** maxItems 2 with A,B ledgered and the environment swapped to C,D: chunk 1 = the sets, chunk 2 = the deletes. */
+async function swapEnvWorld() {
+  provider = installFakeProvider({ maxItems: 2 })
+  const w = await setupSyncWorld(env, { deleteRemoved: true, secrets: { A: '1', B: '2' } })
+  await runSync(env, w.targetId, { trigger: 'manual' })
+  await env.DB.prepare("DELETE FROM secrets WHERE name IN ('A', 'B')").run()
+  await seedSecret(env, w.projectId, w.envId, 'C', '3')
+  await seedSecret(env, w.projectId, w.envId, 'D', '4')
+  provider.pushCalls.length = 0
+  return w
+}
+
+
+describe('unsafe names', () => {
+  it('__proto__, constructor and prototype are NAME_INVALID blockers: never planned, never sent, never ledgered', async () => {
+    const w = await setupSyncWorld(env, { secrets: { __proto__: 'p', constructor: 'c', prototype: 'q', Prototype: 'r', GOOD: 'g' } })
+    // Object.entries(...) above skips nothing: __proto__ in a literal sets the prototype, so seed it explicitly.
+    await seedSecret(env, w.projectId, w.envId, '__proto__', 'p')
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    const invalid = planned.plan.blockers.find((b) => b.code === 'NAME_INVALID')
+    expect(invalid?.names).toEqual(expect.arrayContaining(['__proto__', 'constructor', 'prototype', 'Prototype']))
+    expect(planned.plan.create).toEqual(['GOOD'])
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION' })
+    expect(provider.pushCalls).toHaveLength(0)
+    expect(await ledger(w.targetId)).toEqual([])
+  })
+})
+
+describe('empty values', () => {
+  it('an empty value is an EMPTY_VALUE blocker (provider behaviour is unverified), listed by name only', async () => {
+    const w = await setupSyncWorld(env, { secrets: { FULL: 'x', BLANK: '' } })
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    expect(planned.plan.blockers).toEqual([{ code: 'EMPTY_VALUE', names: ['BLANK'] }])
+    expect(planned.plan.create).toEqual(['FULL'])
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION' })
+    expect(provider.pushCalls).toHaveLength(0)
+  })
+})
+
+describe('intent-first ledger (lost responses)', () => {
+  /** Apply the ops on the fake target, then lose the response like a dropped connection. */
+  const applyThenLose = (fail: (input: PushInput) => PushResult | never) => (input: PushInput): PushResult => {
+    for (const op of input.ops) {
+      if (op.type === 'set') provider.remote.set(op.name, op.value)
+      else provider.remote.delete(op.name)
+    }
+    return fail(input)
+  }
+
+  it('writes a pending ledger row for every set BEFORE the provider is called', async () => {
+    const w = await setupSyncWorld(env, { secrets: { A: '1', B: '2' } })
+    let seen: Record<string, string> = {}
+    const original = provider.push
+    provider.push = async (input) => {
+      seen = await ledgerRows(w.targetId)
+      return original(input)
+    }
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(seen).toEqual({ A: 'pending', B: 'pending' })
+    expect(Object.values(await ledgerRows(w.targetId)).every((fp) => /^[0-9a-f]{64}$/.test(fp))).toBe(true)
+  })
+
+  for (const [label, lose] of [
+    ['a TIMEOUT result', (): PushResult => ({ ok: false, code: 'TIMEOUT' })],
+    ['a thrown network error', (): PushResult => { throw new Error('socket hang up') }],
+    ['an item result flagged maybeApplied', (): PushResult => ({ ok: true, results: [{ name: 'A', ok: false, code: 'PROVIDER_ERROR', maybeApplied: true }, { name: 'B', ok: false, code: 'PROVIDER_ERROR', maybeApplied: true }] })],
+  ] as const) {
+    it(`end to end: bulk applied but the response was lost (${label}); the next run updates the names instead of calling them conflicts forever`, async () => {
+      const w = await setupSyncWorld(env, { secrets: { A: '1', B: '2' } })
+      provider.script.push(applyThenLose(lose))
+      const first = await runSync(env, w.targetId, { trigger: 'manual' })
+      expect(first.status).toBe('failed')
+      expect(first.nextRetryAt).not.toBeNull()
+      // The names exist on the Worker, and the ledger knows they are ours (pending), not missing.
+      expect([...provider.remote.keys()].sort()).toEqual(['A', 'B'])
+      expect(await ledgerRows(w.targetId)).toEqual({ A: 'pending', B: 'pending' })
+
+      const planned = await planSync(env, await target(w), provider)
+      if (!planned.ok) throw new Error('plan failed')
+      expect(planned.plan).toMatchObject({ create: [], update: ['A', 'B'], conflict: [] })
+
+      const second = await runSync(env, w.targetId, { trigger: 'schedule', attempt: 2 })
+      expect(second).toMatchObject({ status: 'succeeded', counts: { updated: 2, created: 0, skipped: 0 } })
+      expect(Object.values(await ledgerRows(w.targetId)).every((fp) => /^[0-9a-f]{64}$/.test(fp))).toBe(true)
+      const third = await runSync(env, w.targetId, { trigger: 'manual' })
+      expect(third.counts).toMatchObject({ skipped: 2, created: 0, updated: 0 })
+    })
+  }
+
+  it('a pending name that is gone from the target is created again (not stuck)', async () => {
+    const w = await setupSyncWorld(env, { secrets: { A: '1' } })
+    provider.script.push(() => ({ ok: false, code: 'TIMEOUT' }))
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(await ledgerRows(w.targetId)).toEqual({ A: 'pending' })
+    const run = await runSync(env, w.targetId, { trigger: 'schedule', attempt: 2 })
+    expect(run).toMatchObject({ status: 'succeeded', counts: { created: 1 } })
+  })
+
+  it('a definite failure removes the pending row of a name that was never ledgered, and keeps the old fingerprint of one that was', async () => {
+    const w = await setupSyncWorld(env, { secrets: { OLD: 'v1' } })
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    const before = (await ledgerRows(w.targetId))['OLD']
+    await env.DB.prepare("DELETE FROM secrets WHERE name = 'OLD'").run()
+    await seedSecret(env, w.projectId, w.envId, 'OLD', 'v2')
+    await seedSecret(env, w.projectId, w.envId, 'NEW', 'n')
+    provider.script.push(() => ({ ok: true, results: [{ name: 'NEW', ok: false, code: 'PROVIDER_VALIDATION' }, { name: 'OLD', ok: false, code: 'PROVIDER_VALIDATION' }] }))
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run.status).toBe('failed')
+    expect(await ledgerRows(w.targetId)).toEqual({ OLD: before })
+    // and a chunk-level definite failure (auth) leaves no pending rows either
+    provider.script.push(() => ({ ok: false, code: 'PROVIDER_AUTH' }))
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(await ledgerRows(w.targetId)).toEqual({ OLD: before })
+  })
+
+  it('an unknown outcome on an already ledgered name keeps its row and the next run rewrites it', async () => {
+    const w = await setupSyncWorld(env, { secrets: { OLD: 'v1' } })
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    await env.DB.prepare("DELETE FROM secrets WHERE name = 'OLD'").run()
+    await seedSecret(env, w.projectId, w.envId, 'OLD', 'v2')
+    provider.script.push(applyThenLose(() => ({ ok: false, code: 'TIMEOUT' })))
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(provider.remote.get('OLD')).toBe('v2')
+    const again = await runSync(env, w.targetId, { trigger: 'schedule', attempt: 2 })
+    expect(again).toMatchObject({ status: 'succeeded', counts: { updated: 1 } })
+  })
+
+  it('pending names are still ledger names: removed from the environment they are deleted (toggle on)', async () => {
+    const w = await setupSyncWorld(env, { deleteRemoved: true, secrets: { A: '1' } })
+    provider.script.push(applyThenLose(() => ({ ok: false, code: 'TIMEOUT' })))
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    await env.DB.prepare("DELETE FROM secrets WHERE name = 'A'").run()
+    const run = await runSync(env, w.targetId, { trigger: 'schedule', attempt: 2 })
+    expect(run.counts.deleted).toBe(1)
+    expect(provider.remote.has('A')).toBe(false)
+    expect(await ledger(w.targetId)).toEqual([])
+  })
+
+  it('a ledger write failure after a successful push leaves the pending rows (nothing orphaned)', async () => {
+    const w = await setupSyncWorld(env, { secrets: { A: '1' } })
+    const realBatch = env.DB.batch.bind(env.DB)
+    let calls = 0
+    env.DB.batch = (async (statements: unknown[]) => {
+      calls += 1
+      // 1st batch = intent rows, 2nd = the confirmation after the push: fail it.
+      if (calls === 2) throw new Error('D1 down')
+      return realBatch(statements as never)
+    }) as typeof env.DB.batch
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    env.DB.batch = realBatch
+    expect(run.status).not.toBe('succeeded')
+    expect(provider.remote.get('A')).toBe('1')
+    expect(await ledgerRows(w.targetId)).toEqual({ A: 'pending' })
+  })
+})
+
+describe('provider capacity', () => {
+  it('counts names already on the target, not only wanted: foreign secrets plus new names over the cap block the run', async () => {
+    provider = installFakeProvider({ maxItems: 4 })
+    const w = await setupSyncWorld(env, { secrets: { A_NEW: '1', B_NEW: '2' } })
+    provider.remote.set('FOREIGN_1', 'x')
+    provider.remote.set('FOREIGN_2', 'y')
+    provider.remote.set('FOREIGN_3', 'z')
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    // 3 foreign + 2 wanted = 5 > 4: exactly one name over, the last in sort order.
+    expect(planned.plan.blockers).toEqual([{ code: 'TOO_MANY_ITEMS', names: ['B_NEW'] }])
+    expect(planned.plan.create).toEqual(['A_NEW'])
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION' })
+    expect(provider.pushCalls).toHaveLength(0)
+  })
+
+  it('names we update (already there) cost nothing, deletes free capacity, and a full target with no creates is fine', async () => {
+    provider = installFakeProvider({ maxItems: 3 })
+    const w = await setupSyncWorld(env, { deleteRemoved: true, secrets: { A: '1', B: '2', C: '3' } })
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    // at the cap with only updates: fine
+    await env.DB.prepare("DELETE FROM secrets WHERE name = 'A'").run()
+    await seedSecret(env, w.projectId, w.envId, 'A', '1-new')
+    let planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    expect(planned.plan.blockers).toEqual([])
+    expect(planned.plan.update).toEqual(['A'])
+    // swap C for D: the delete frees the slot the create needs
+    await env.DB.prepare("DELETE FROM secrets WHERE name = 'C'").run()
+    await seedSecret(env, w.projectId, w.envId, 'D', '4')
+    planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    expect(planned.plan.blockers).toEqual([])
+    expect(planned.plan).toMatchObject({ create: ['D'], delete: ['C'] })
+    // ...but without the toggle nothing is freed
+    await env.DB.prepare('UPDATE sync_targets SET delete_removed = 0 WHERE id = ?').bind(w.targetId).run()
+    planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    expect(planned.plan.blockers).toEqual([{ code: 'TOO_MANY_ITEMS', names: ['D'] }])
+  })
+
+  it('a target already over the cap because of foreign secrets still allows updates', async () => {
+    provider = installFakeProvider({ maxItems: 2 })
+    const w = await setupSyncWorld(env, { secrets: { A: '1' } })
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    for (const n of ['F1', 'F2', 'F3']) provider.remote.set(n, 'x')
+    await env.DB.prepare("DELETE FROM secrets WHERE name = 'A'").run()
+    await seedSecret(env, w.projectId, w.envId, 'A', 'changed')
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'succeeded', counts: { updated: 1 } })
+  })
+})
+
+describe('denylist inside the engine', () => {
+  it('planSync refuses a denied script and a denied account, before decrypting or calling the provider', async () => {
+    const w = await setupSyncWorld(env)
+    await env.DB.prepare('UPDATE sync_targets SET resource_json = ? WHERE id = ?').bind(JSON.stringify({ scriptName: 'HushVault-Web-Local' }), w.targetId).run()
+    expect(await planSync(env, await target(w), provider)).toEqual({ ok: false, code: 'TARGET_NOT_ALLOWED' })
+    await env.DB.prepare('UPDATE sync_targets SET resource_json = ? WHERE id = ?').bind(JSON.stringify({ scriptName: 'customer-app', accountId: 'ABCDEF0123456789abcdef0123456789' }), w.targetId).run()
+    env.HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = 'x, abcdef0123456789ABCDEF0123456789'
+    expect(await planSync(env, await target(w), provider)).toEqual({ ok: false, code: 'TARGET_NOT_ALLOWED' })
+    expect(provider.listCalls).toBe(0)
+    expect(provider.credentialsSeen).toEqual([])
+  })
+
+  it('runSync records a failed TARGET_NOT_ALLOWED run, flags the target, and sends nothing (also for the connection account)', async () => {
+    const w = await setupSyncWorld(env)
+    env.HUSHVAULT_SYNC_DENY_SCRIPTS = 'worker-a'
+    const run = await runSync(env, w.targetId, { trigger: 'schedule' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'TARGET_NOT_ALLOWED', nextRetryAt: null })
+    expect((await target(w)).status).toBe('needs_attention')
+    expect(provider.listCalls).toBe(0)
+    expect(provider.pushCalls).toHaveLength(0)
+
+    env.HUSHVAULT_SYNC_DENY_SCRIPTS = ''
+    // the fixture connection's config is { accountId: 'acc1' }
+    env.HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = 'ACC1'
+    const viaConnection = await runSync(env, w.targetId, { trigger: 'schedule' })
+    expect(viaConnection).toMatchObject({ status: 'failed', errorCode: 'TARGET_NOT_ALLOWED' })
+    expect(provider.listCalls).toBe(0)
+    expect(provider.credentialsSeen).toEqual([])
+
+    env.HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = ''
+    expect((await runSync(env, w.targetId, { trigger: 'manual' })).status).toBe('succeeded')
+    expect((await target(w)).status).toBe('active')
+  })
+})
+
+describe('needs_attention and distinct resolution codes', () => {
+  it('COMPUTED_ERROR and CREDENTIAL_UNAVAILABLE flag the target and do not retry', async () => {
+    const w = await setupSyncWorld(env, { secrets: { GOOD: 'g' } })
+    await seedComputed(env, w.projectId, w.envId, 'BROKEN', '${DOES_NOT_EXIST}')
+    const computed = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(computed).toMatchObject({ status: 'failed', errorCode: 'COMPUTED_ERROR', nextRetryAt: null })
+    expect((await target(w)).status).toBe('needs_attention')
+
+    const v = await setupSyncWorld(env)
+    await env.DB.prepare('UPDATE integration_connections SET encrypted_credential = ? WHERE id = ?').bind('garbage', v.connectionId).run()
+    const cred = await runSync(env, v.targetId, { trigger: 'manual' })
+    expect(cred).toMatchObject({ status: 'failed', errorCode: 'CREDENTIAL_UNAVAILABLE', nextRetryAt: null })
+    expect((await target(v)).status).toBe('needs_attention')
+  })
+
+  it('a secret that cannot be decrypted is DECRYPTION_FAILED, not COMPUTED_ERROR', async () => {
+    const w = await setupSyncWorld(env, { secrets: { GOOD: 'g' } })
+    const row = await env.DB.prepare("SELECT id FROM secrets WHERE name = 'GOOD'").first<{ id: string }>()
+    await env.SECRETS_KV.delete(`secret:${row!.id}`)
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'DECRYPTION_FAILED', nextRetryAt: null })
+    expect((await target(w)).status).toBe('needs_attention')
+    expect(provider.listCalls).toBe(0)
+  })
+})
+
+describe('retry scheduling', () => {
+  const t0 = new Date('2026-01-01T00:00:00.000Z')
+  const hi = () => 1
+  const lo = () => 0
+
+  it('a rate limit waits at least 5 minutes, or Retry-After when longer', () => {
+    expect(RATE_LIMIT_MIN_WAIT_MS).toBe(5 * 60_000)
+    expect(new Date(computeNextRetryAt('PROVIDER_RATE_LIMIT', 1, t0, lo)!).getTime() - t0.getTime()).toBe(300_000)
+    expect(new Date(computeNextRetryAt('PROVIDER_RATE_LIMIT', 1, t0, lo, 1200)!).getTime() - t0.getTime()).toBe(1_200_000)
+    expect(new Date(computeNextRetryAt('PROVIDER_RATE_LIMIT', 1, t0, hi, 10)!).getTime() - t0.getTime()).toBe(300_000)
+    // other retryable codes keep the normal backoff, and Retry-After does not apply to them
+    expect(computeNextRetryAt('PROVIDER_ERROR', 1, t0, hi, 1200)).toBe('2026-01-01T00:00:30.000Z')
+    expect(computeNextRetryAt('PROVIDER_RATE_LIMIT', MAX_SYNC_ATTEMPTS, t0, lo)).toBeNull()
+  })
+
+  it('the engine applies the floor and carries the provider Retry-After through chunk and item results', async () => {
+    const w = await setupSyncWorld(env)
+    provider.script.push(() => ({ ok: false, code: 'PROVIDER_RATE_LIMIT' }))
+    const plain = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(new Date(plain.nextRetryAt!).getTime() - Date.now()).toBeGreaterThan(295_000)
+
+    provider.script.push(() => ({ ok: false, code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 1800 }))
+    const chunkLevel = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(new Date(chunkLevel.nextRetryAt!).getTime() - Date.now()).toBeGreaterThan(1_795_000)
+
+    provider.script.push(() => ({ ok: true, results: [{ name: 'DB_URL', ok: false, code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 2400 }, { name: 'API_KEY', ok: false, code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 600 }] }))
+    const itemLevel = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(new Date(itemLevel.nextRetryAt!).getTime() - Date.now()).toBeGreaterThan(2_395_000)
+  })
+
+  it('a list-stage rate limit also waits (Retry-After carried from listNames)', async () => {
+    const w = await setupSyncWorld(env)
+    const original = provider.listNames
+    provider.listNames = async () => ({ ok: false, code: 'PROVIDER_RATE_LIMIT', retryAfterSeconds: 900 })
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    provider.listNames = original
+    expect(run.errorCode).toBe('PROVIDER_RATE_LIMIT')
+    expect(new Date(run.nextRetryAt!).getTime() - Date.now()).toBeGreaterThan(895_000)
+  })
+
+  it('retryability looks at every error of the run, not only the most actionable one', async () => {
+    const w = await setupSyncWorld(env, { secrets: { A: '1', B: '2' } })
+    provider.script.push(() => ({ ok: true, results: [{ name: 'A', ok: false, code: 'PROVIDER_VALIDATION' }, { name: 'B', ok: false, code: 'PROVIDER_ERROR' }] }))
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run.errorCode).toBe('PROVIDER_VALIDATION') // most actionable...
+    expect(run.nextRetryAt).not.toBeNull() // ...but B can be retried
+    expect((await target(w)).status).toBe('needs_attention') // and A needs a person
+  })
+
+  it('starting a run clears next_retry_at on the target\'s other runs; so does a success; a failure keeps only its own', async () => {
+    const w = await setupSyncWorld(env)
+    const seedOld = async (id: string) => env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, started_at, finished_at, next_retry_at) VALUES (?, ?, 'schedule', 'failed', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z', '2099-01-01T00:00:00.000Z')").bind(id, w.targetId).run()
+    const pending = async () => (await env.DB.prepare('SELECT id FROM sync_runs WHERE target_id = ? AND next_retry_at IS NOT NULL ORDER BY id').bind(w.targetId).all<{ id: string }>()).results.map((r) => r.id)
+    await seedOld('isr_old1')
+    await seedOld('isr_old2')
+    provider.script.push(() => ({ ok: false, code: 'PROVIDER_ERROR' }))
+    const failed = await runSync(env, w.targetId, { trigger: 'schedule', attempt: 2 })
+    expect(await pending()).toEqual([failed.id]) // old ones cleared at start; only the new retry is scheduled
+    const ok = await runSync(env, w.targetId, { trigger: 'schedule', attempt: 3 })
+    expect(ok.status).toBe('succeeded')
+    expect(await pending()).toEqual([])
+  })
+
+  it('a run that cannot start (single flight) clears nothing', async () => {
+    const w = await setupSyncWorld(env)
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, started_at, finished_at, next_retry_at) VALUES ('isr_retry', ?, 'schedule', 'failed', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z', '2099-01-01T00:00:00.000Z')").bind(w.targetId).run()
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, started_at, lease_until) VALUES ('isr_live', ?, 'manual', 'running', 1, ?, '2999-01-01T00:00:00.000Z')").bind(w.targetId, new Date().toISOString()).run()
+    const busy = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(busy.id).toBe('isr_live')
+    expect((await runRow('isr_retry'))!['next_retry_at']).toBe('2099-01-01T00:00:00.000Z')
+  })
+})
+
+describe('name filter changes forget instead of delete', () => {
+  it('a name that fell out of the wanted set only because the filter changed is dropped from the ledger and never deleted on the target', async () => {
+    const w = await setupSyncWorld(env, { deleteRemoved: true, secrets: { APP_ONE: '1', APP_TWO: '2', OTHER: '3', GONE: '4' } })
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(await ledger(w.targetId)).toEqual(['APP_ONE', 'APP_TWO', 'GONE', 'OTHER'])
+    // GONE leaves the environment; OTHER and APP_TWO fall out of the filter.
+    await env.DB.prepare("DELETE FROM secrets WHERE name = 'GONE'").run()
+    await env.DB.prepare('UPDATE sync_targets SET name_filter_json = ? WHERE id = ?').bind(JSON.stringify({ prefix: 'APP_', deny: ['APP_TWO'] }), w.targetId).run()
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    expect(planned.plan.delete).toEqual(['GONE'])
+    expect(planned.forget.sort()).toEqual(['APP_TWO', 'OTHER'])
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'succeeded', counts: { deleted: 1 } })
+    expect([...provider.remote.keys()].sort()).toEqual(['APP_ONE', 'APP_TWO', 'OTHER'])
+    expect(await ledger(w.targetId)).toEqual(['APP_ONE'])
+  })
+})
+
+describe('stale runs cannot write after the target changed', () => {
+  it('a resource change during a chunk blocks the ledger writes and every later chunk', async () => {
+    const w = await swapEnvWorld()
+    provider.script.push(async () => {
+      // What PATCH /targets/:id does when the resource changes: new resource, ledger reset.
+      await env.DB.prepare('UPDATE sync_targets SET resource_json = ? WHERE id = ?').bind(JSON.stringify({ scriptName: 'worker-b' }), w.targetId).run()
+      await env.DB.prepare('DELETE FROM sync_items WHERE target_id = ?').bind(w.targetId).run()
+      return undefined
+    })
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run.status).not.toBe('succeeded')
+    expect(provider.pushCalls).toHaveLength(1) // the delete chunk was never sent to the old Worker
+    expect(await ledger(w.targetId)).toEqual([]) // nothing written against the new resource
+  })
+
+  it('a soft-deleted target gets no ledger rows from an in-flight run', async () => {
+    const w = await setupSyncWorld(env, { secrets: { A: '1' } })
+    provider.script.push(async () => {
+      await env.DB.prepare('UPDATE sync_targets SET deleted_at = ? WHERE id = ?').bind(new Date().toISOString(), w.targetId).run()
+      await env.DB.prepare('DELETE FROM sync_items WHERE target_id = ?').bind(w.targetId).run()
+      return undefined
+    })
+    await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(await ledger(w.targetId)).toEqual([])
+  })
+})
+
+describe('finishing a run', () => {
+  const failBatchesContaining = (needle: string, times: number) => {
+    const real = env.DB.batch.bind(env.DB)
+    let left = times
+    env.DB.batch = (async (statements: Array<{ sql: string }>) => {
+      if (left > 0 && statements.some((s) => s.sql.includes(needle))) {
+        left -= 1
+        throw new Error('D1 unavailable')
+      }
+      return real(statements as never)
+    }) as typeof env.DB.batch
+    return () => { env.DB.batch = real }
+  }
+
+  it('retries the final run+target batch once', async () => {
+    const w = await setupSyncWorld(env)
+    const restore = failBatchesContaining('UPDATE sync_targets SET last_run_at', 1)
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    restore()
+    expect(run.status).toBe('succeeded')
+    expect(await runRow(run.id)).toMatchObject({ status: 'succeeded' })
+    expect((await target(w)).lastRunAt).not.toBeNull()
+  })
+
+  it('if the batch fails twice the run is marked failed (never left running) with a retry', async () => {
+    const w = await setupSyncWorld(env)
+    const restore = failBatchesContaining('UPDATE sync_targets SET last_run_at', 2)
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    restore()
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_ERROR' })
+    expect(run.nextRetryAt).not.toBeNull()
+    expect(await runRow(run.id)).toMatchObject({ status: 'failed', error_code: 'PROVIDER_ERROR', lease_until: null })
+    // the single-flight slot is free again
+    expect((await runSync(env, w.targetId, { trigger: 'manual' })).status).toBe('succeeded')
+  })
+
+  it('only closes a run that is still running: a run taken over by a newer one is not overwritten', async () => {
+    const w = await setupSyncWorld(env)
+    let runId = ''
+    provider.script.push(async () => {
+      const row = await env.DB.prepare("SELECT id FROM sync_runs WHERE status = 'running'").first<{ id: string }>()
+      runId = row!.id
+      // Another worker closed this run (expired lease) while it was still pushing.
+      await env.DB.prepare("UPDATE sync_runs SET status = 'failed', error_code = 'TIMEOUT', finished_at = ?, lease_until = NULL WHERE id = ?").bind('2026-05-05T00:00:00.000Z', runId).run()
+      return undefined
+    })
+    const before = await target(w)
+    const result = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(await runRow(runId)).toMatchObject({ status: 'failed', error_code: 'TIMEOUT', finished_at: '2026-05-05T00:00:00.000Z' })
+    expect(result).toMatchObject({ id: runId, status: 'failed', errorCode: 'TIMEOUT' })
+    expect((await target(w)).lastRunAt).toBe(before.lastRunAt) // the stale run did not touch the target either
+  })
+})
+
+describe('lease extension', () => {
+  it('uses real elapsed time (Date.now), not the injected start time', async () => {
+    const w = await swapEnvWorld()
+    const real = Date.now.bind(Date)
+    let skew = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => real() + skew)
+    const start = new Date('2026-04-01T00:00:00.000Z')
+    let leaseSeenByChunk2 = ''
+    provider.script.push(
+      () => { skew = 4 * 60_000; return undefined }, // chunk 1 "takes" 4 minutes
+      async () => {
+        const row = await env.DB.prepare("SELECT lease_until FROM sync_runs WHERE status = 'running'").first<{ lease_until: string }>()
+        leaseSeenByChunk2 = row!.lease_until
+        return undefined
+      },
+    )
+    const run = await runSync(env, w.targetId, { trigger: 'manual', now: start })
+    expect(run).toMatchObject({ status: 'succeeded' })
+    // start + 4 min elapsed + the 5 min lease; a start-time based lease would still read start + 5 min.
+    expect(new Date(leaseSeenByChunk2).getTime()).toBeGreaterThanOrEqual(start.getTime() + 9 * 60_000)
+    expect(new Date(leaseSeenByChunk2).getTime()).toBeLessThan(start.getTime() + 9 * 60_000 + 30_000)
+  })
+})
+
+describe('single plan for the run endpoint', () => {
+  it('returnBlocked hands back the plan from the one plan the run made, keeps no run row, and reads the environment once', async () => {
+    const w = await setupSyncWorld(env, { secrets: { OK: 'a', BLANK: '' } })
+    const result = await runSync(env, w.targetId, { trigger: 'manual', actorId: w.userId, returnBlocked: true })
+    expect(result).toMatchObject({ blocked: { blockers: [{ code: 'EMPTY_VALUE', names: ['BLANK'] }], create: ['OK'] } })
+    expect(provider.listCalls).toBe(1)
+    expect(provider.pushCalls).toHaveLength(0)
+    expect(await env.DB.prepare('SELECT id FROM sync_runs').first()).toBeNull()
+    expect(await auditActions(env, w.orgId)).toEqual(['secret.read_bulk'])
+  })
+
+  it('an active run is returned before anything is planned (no decryption, no provider call, no audit)', async () => {
+    const w = await setupSyncWorld(env)
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, started_at, lease_until) VALUES ('isr_live', ?, 'manual', 'running', 1, ?, '2999-01-01T00:00:00.000Z')").bind(w.targetId, new Date().toISOString()).run()
+    const result = await runSync(env, w.targetId, { trigger: 'manual', actorId: w.userId, returnBlocked: true })
+    expect(result).toMatchObject({ id: 'isr_live', status: 'running' })
+    expect(provider.listCalls).toBe(0)
+    expect(await auditActions(env, w.orgId)).toEqual([])
+  })
+
+  it('without returnBlocked a blocked plan is still a recorded failed run (scheduler behaviour)', async () => {
+    const w = await setupSyncWorld(env, { secrets: { BLANK: '' } })
+    const run = await runSync(env, w.targetId, { trigger: 'schedule' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION' })
+    expect(await runRow(run.id)).not.toBeNull()
   })
 })

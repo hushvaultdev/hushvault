@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { Env } from '../index'
 import { encryptCredentialWithRing } from '../crypto/envelope'
 import { getProvider, connectableProviderIds } from '../integrations/provider'
-import { isDeniedScript } from '../integrations/providers/cloudflare-workers'
+import { isDeniedAccount, isTargetDenied } from '../integrations/target-denylist'
 import { SyncEngineError, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
 import { isSyncProvider } from '../integrations/sync-types'
 import { createPrefixedId } from '../lib/auth'
@@ -100,6 +100,7 @@ integrationsRouter.post('/connections', ...adminOnly, integrationWriteRateLimit,
   if (!config) {
     return c.json({ error: 'VALIDATION_ERROR', message: 'Invalid provider settings' }, 400)
   }
+  if (isDeniedAccount(c.env, config['accountId'])) return c.json(deniedBody, 422)
 
   const clash = await c.env.DB.prepare('SELECT id FROM integration_connections WHERE org_id = ? AND provider = ? AND label = ? LIMIT 1').bind(auth.orgId, body.provider, body.label).first()
   if (clash) {
@@ -229,6 +230,16 @@ const patchTargetSchema = z.object({
   deleteRemoved: z.boolean().optional(),
 }).strict()
 
+function canonicalFilter(f: { prefix?: string; deny?: string[] }): string {
+  return JSON.stringify({ prefix: f.prefix ?? '', deny: [...(f.deny ?? [])].sort() })
+}
+
+/** True when a run is queued or running with an unexpired lease (an expired lease is a crashed run). */
+async function hasActiveRun(env: Env, targetId: string, nowIso: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 AS active FROM sync_runs WHERE target_id = ? AND status IN ('queued', 'running') AND (lease_until IS NULL OR lease_until >= ?) LIMIT 1").bind(targetId, nowIso).first()
+  return row !== null
+}
+
 function canonicalResource(resource: Record<string, string>): string {
   return JSON.stringify(Object.keys(resource).sort().map((k) => [k, resource[k]]))
 }
@@ -255,7 +266,7 @@ async function checkResource(env: Env, orgId: string, conn: ConnRow, raw: unknow
   if (config['accountId'] !== undefined && resource['accountId'] !== undefined && config['accountId'] !== resource['accountId']) {
     return { ok: false, status: 400, error: 'VALIDATION_ERROR', message: 'Target account does not match the connection' }
   }
-  if (resource['scriptName'] !== undefined && isDeniedScript(env, resource['scriptName'])) {
+  if (isTargetDenied(env, resource, config)) {
     return { ok: false, status: 422, error: 'TARGET_NOT_ALLOWED', message: 'This Worker cannot be used as a sync target' }
   }
   const same = await env.DB.prepare('SELECT id, resource_json FROM sync_targets WHERE org_id = ? AND connection_id = ? AND deleted_at IS NULL').bind(orgId, conn.id).all<{ id: string; resource_json: string }>()
@@ -275,6 +286,8 @@ const SYNC_ERROR_RESPONSES: Record<string, { status: 422 | 429 | 502; message: s
   PROVIDER_AUTH: { status: 422, message: 'The provider rejected the stored credential' },
   CREDENTIAL_UNAVAILABLE: { status: 422, message: 'The stored credential could not be used; rotate it' },
   COMPUTED_ERROR: { status: 422, message: 'The environment could not be resolved (check computed secrets)' },
+  DECRYPTION_FAILED: { status: 422, message: 'The environment secrets could not be decrypted' },
+  TARGET_NOT_ALLOWED: { status: 422, message: 'This Worker cannot be used as a sync target' },
   TARGET_NOT_FOUND: { status: 422, message: 'The provider could not find the target' },
   PROVIDER_RATE_LIMIT: { status: 429, message: 'The provider is rate limiting requests; try again shortly' },
   PROVIDER_VALIDATION: { status: 502, message: 'The provider rejected the request' },
@@ -288,6 +301,7 @@ function syncFailure(code: SyncErrorCode) {
 }
 
 const notFound = (what: string) => ({ error: 'NOT_FOUND', message: `${what} not found` })
+const busyBody = { error: 'BUSY', message: 'A sync is queued or running for this target; change its settings after it finishes' }
 const deniedBody = { error: 'TARGET_NOT_ALLOWED', message: 'This Worker cannot be used as a sync target' }
 
 // POST /api/integrations/targets
@@ -355,14 +369,23 @@ integrationsRouter.patch('/targets/:id', ...adminOnly, integrationWriteRateLimit
   }
   const nameFilter = body.nameFilter !== undefined ? cleanFilter(body.nameFilter) : target.nameFilter
   const deleteRemoved = body.deleteRemoved ?? target.deleteRemoved
+  const filterChanged = canonicalFilter(nameFilter) !== canonicalFilter(target.nameFilter)
+  // Changing what is synced (resource or filter) while a run is queued or running would let that run act on the
+  // old settings: refuse. The UPDATE below repeats the check atomically for the race between check and write.
+  const structural = resourceChanged || filterChanged
   const now = new Date().toISOString()
+  if (structural && await hasActiveRun(c.env, id, now)) return c.json(busyBody, 409)
+  const noActiveRun = "(? = 0 OR NOT EXISTS (SELECT 1 FROM sync_runs WHERE target_id = ? AND status IN ('queued', 'running') AND (lease_until IS NULL OR lease_until >= ?)))"
   const statements = [
-    c.env.DB.prepare("UPDATE sync_targets SET resource_json = ?, name_filter_json = ?, delete_removed = ?, status = CASE WHEN ? = 1 THEN 'active' ELSE status END, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL")
-      .bind(JSON.stringify(resource), JSON.stringify(nameFilter), deleteRemoved ? 1 : 0, resourceChanged ? 1 : 0, now, id, auth.orgId),
+    c.env.DB.prepare(`UPDATE sync_targets SET resource_json = ?, name_filter_json = ?, delete_removed = ?, status = CASE WHEN ? = 1 THEN 'active' ELSE status END, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL AND ${noActiveRun}`)
+      .bind(JSON.stringify(resource), JSON.stringify(nameFilter), deleteRemoved ? 1 : 0, resourceChanged ? 1 : 0, now, id, auth.orgId, structural ? 1 : 0, id, now),
   ]
   // The ledger describes names HushVault wrote to the OLD resource. On a new resource it must not authorise deletes.
-  if (resourceChanged) statements.push(c.env.DB.prepare('DELETE FROM sync_items WHERE target_id = ?').bind(id))
-  await c.env.DB.batch(statements)
+  if (resourceChanged) {
+    statements.push(c.env.DB.prepare(`DELETE FROM sync_items WHERE target_id = ? AND ${noActiveRun}`).bind(id, 1, id, now))
+  }
+  const written = await c.env.DB.batch(statements)
+  if (structural && Number(written[0]?.meta?.changes ?? 0) === 0) return c.json(busyBody, 409)
 
   await audit(c, auth, 'sync.target.update', id, 'sync_target')
   const updated = await loadSyncTarget(c.env, id, auth.orgId)
@@ -377,13 +400,19 @@ integrationsRouter.delete('/targets/:id', ...adminOnly, integrationWriteRateLimi
   const now = new Date().toISOString()
   const result = await c.env.DB.prepare('UPDATE sync_targets SET deleted_at = ?, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL').bind(now, now, id, auth.orgId).run()
   if (Number(result.meta.changes ?? 0) !== 1) return c.json(notFound('Sync target'), 404)
+  // A deleted target must not be retried: drop any scheduled retry of its runs.
+  await c.env.DB.prepare('UPDATE sync_runs SET next_retry_at = NULL WHERE target_id = ? AND next_retry_at IS NOT NULL').bind(id).run()
   await audit(c, auth, 'sync.target.delete', id, 'sync_target')
   return c.json({ data: { deleted: true } })
 })
 
-/** Re-check the denylist at use time: the var may have changed since the target was created. */
+/** Early denylist answer for the routes. The engine enforces the same rule again (and checks the connection's account). */
 function targetDenied(env: Env, resource: Record<string, string>): boolean {
-  return resource['scriptName'] !== undefined && isDeniedScript(env, resource['scriptName'])
+  return isTargetDenied(env, resource)
+}
+
+function requestMeta(c: Parameters<typeof getRequestIp>[0] & { req: { header: (n: string) => string | undefined } }) {
+  return { ip: getRequestIp(c), userAgent: c.req.header('user-agent') ?? null }
 }
 
 // POST /api/integrations/targets/:id/preview - names only
@@ -394,7 +423,7 @@ integrationsRouter.post('/targets/:id/preview', ...adminOnly, integrationPreview
   if (!target) return c.json(notFound('Sync target'), 404)
   if (targetDenied(c.env, target.resource)) return c.json(deniedBody, 422)
   try {
-    const result = await previewSync(c.env, auth.orgId, id, { actorId: auth.userId, actorType: 'user' })
+    const result = await previewSync(c.env, auth.orgId, id, { actorId: auth.userId, actorType: 'user', ...requestMeta(c) })
     if (!result.ok) {
       const failure = syncFailure(result.code)
       return c.json(failure.body, failure.status)
@@ -416,16 +445,20 @@ integrationsRouter.post('/targets/:id/run', ...adminOnly, integrationRunRateLimi
   if (!target) return c.json(notFound('Sync target'), 404)
   if (targetDenied(c.env, target.resource)) return c.json(deniedBody, 422)
   try {
-    // A plan with blockers is refused up front (422 SYNC_BLOCKED with the plan) instead of recording a failed run.
-    const preview = await previewSync(c.env, auth.orgId, id, { actorId: auth.userId, actorType: 'user' })
-    if (!preview.ok) {
-      const failure = syncFailure(preview.code)
+    // One plan only: runSync checks for an active run first, plans once, and hands a blocked plan back
+    // (422 SYNC_BLOCKED with the plan) instead of recording a failed run.
+    const run = await runSync(c.env, id, { trigger: 'manual', actorId: auth.userId, orgId: auth.orgId, returnBlocked: true, ...requestMeta(c) })
+    if ('blocked' in run) {
+      return c.json({ error: 'SYNC_BLOCKED', message: 'The plan has blockers; fix them before running', plan: run.blocked }, 422)
+    }
+    // A run that failed before anything was sent (resolution, credential, denylist or the provider's name list)
+    // keeps the long-standing contract of a mapped HTTP error; it is recorded as a failed run as well. A failure
+    // while pushing is a normal 200 with the failed run.
+    const c0 = run.counts
+    if (run.status === 'failed' && run.errorCode !== null && c0.failed === 0 && c0.created + c0.updated + c0.deleted === 0 && c0.skipped === 0) {
+      const failure = syncFailure(run.errorCode)
       return c.json(failure.body, failure.status)
     }
-    if (preview.plan.blockers.length > 0) {
-      return c.json({ error: 'SYNC_BLOCKED', message: 'The plan has blockers; fix them before running', plan: preview.plan }, 422)
-    }
-    const run = await runSync(c.env, id, { trigger: 'manual', actorId: auth.userId, orgId: auth.orgId })
     return c.json({ data: run })
   } catch (err) {
     if (err instanceof SyncEngineError) {

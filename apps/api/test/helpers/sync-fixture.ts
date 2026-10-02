@@ -17,7 +17,7 @@ export type FakeProvider = SyncProvider & {
   pushCalls: SyncOp[][]
   credentialsSeen: string[]
   /** Return a PushResult to override the normal behaviour for one push call. */
-  script: Array<(input: PushInput) => PushResult | Promise<PushResult> | undefined>
+  script: Array<(input: PushInput) => PushResult | Promise<PushResult | undefined> | undefined>
   /** If set, the next listNames fails with this code. */
   listError: ProviderErrorCode | null
   /** If set, every push awaits it first (concurrency tests). */
@@ -49,9 +49,10 @@ export function makeFakeProvider(limits: Partial<ProviderLimits> = {}): FakeProv
       provider.pushCalls.push(input.ops.map((o) => ({ ...o })))
       provider.credentialsSeen.push(input.credential)
       if (provider.gate) await provider.gate
-      const scripted = provider.script.shift()?.(input)
-      if (scripted !== undefined) {
-        const result = await scripted
+      // A script entry may return a PushResult (sync or async) to override the call, or undefined (also from an
+      // async function) to run a side effect and then behave normally.
+      const result = await provider.script.shift()?.(input)
+      if (result !== undefined) {
         if (result.ok) {
           // Apply only the items the script reports ok, like a real partial failure.
           for (const r of result.results) {

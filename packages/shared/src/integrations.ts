@@ -103,6 +103,8 @@ export type SyncErrorCode =
   | 'TARGET_NOT_FOUND'
   | 'COMPUTED_ERROR'
   | 'CREDENTIAL_UNAVAILABLE'
+  | 'DECRYPTION_FAILED'
+  | 'TARGET_NOT_ALLOWED'
   | 'TIMEOUT'
 
 export interface SyncNameFilter {
@@ -139,7 +141,7 @@ export interface SyncPlanDto {
   /** Target already has this name and HushVault never created it: left untouched. */
   conflict: string[]
   /** Reasons a run cannot start (e.g. over the provider's limits). Empty when the plan is runnable. */
-  blockers: { code: SyncErrorCode | 'TOO_MANY_ITEMS' | 'VALUE_TOO_LARGE' | 'NAME_INVALID'; names: string[] }[]
+  blockers: { code: SyncErrorCode | 'TOO_MANY_ITEMS' | 'VALUE_TOO_LARGE' | 'NAME_INVALID' | 'EMPTY_VALUE'; names: string[] }[]
 }
 
 export interface SyncRunDto {
