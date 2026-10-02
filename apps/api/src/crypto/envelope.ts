@@ -10,6 +10,8 @@ const ALGORITHM = 'AES-GCM'
 const KEY_LENGTH = 256
 const IV_LENGTH = 12 // 96-bit IV for GCM
 const FORMAT_V2 = 'v2' // blob prefix: AES-GCM with additional authenticated data (record context)
+const FORMAT_CRED = 'c2' // blob prefix for integration credentials (a different AAD domain from secrets)
+const TAGS = new Set([FORMAT_V2, FORMAT_CRED])
 
 /** Identifies the record a ciphertext belongs to; bound into the GCM tag so blobs cannot be moved. */
 export type SecretContext = { projectId: string; envId: string; secretId: string }
@@ -56,7 +58,7 @@ export async function exportKey(key: CryptoKey): Promise<string> {
  * Encrypt plaintext with a CryptoKey
  * Returns: "base64(iv):base64(ciphertext+authTag)"
  */
-export async function encrypt(plaintext: string, key: CryptoKey, aad?: Uint8Array): Promise<string> {
+export async function encrypt(plaintext: string, key: CryptoKey, aad?: Uint8Array, tag: string = FORMAT_V2): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH))
   const encoded = new TextEncoder().encode(plaintext)
 
@@ -64,7 +66,7 @@ export async function encrypt(plaintext: string, key: CryptoKey, aad?: Uint8Arra
   const ciphertext = await crypto.subtle.encrypt(params, key, encoded)
 
   const body = `${bufferToBase64(iv)}:${bufferToBase64(ciphertext)}`
-  return aad ? `${FORMAT_V2}:${body}` : body
+  return aad ? `${tag}:${body}` : body
 }
 
 /**
@@ -75,7 +77,7 @@ export async function decrypt(encrypted: string, key: CryptoKey, aad?: Uint8Arra
   const parts = encrypted.split(':')
   // Format and AAD must agree: a v2 blob is never decrypted without its context and a legacy
   // blob is never accepted where a context is required (no silent downgrade).
-  const isV2 = parts[0] === FORMAT_V2
+  const isV2 = TAGS.has(parts[0] ?? '')
   if (isV2 !== Boolean(aad)) throw new Error('Invalid encrypted format')
   const [ivB64, ciphertextB64] = isV2 ? parts.slice(1) : parts
   if (!ivB64 || !ciphertextB64 || parts.length !== (isV2 ? 3 : 2)) throw new Error('Invalid encrypted format')
@@ -219,8 +221,53 @@ export async function canUnwrapDek(wrappedDek: string, key: CryptoKey, secretId:
 }
 
 /** AAD for a wrapped DEK, chosen by its stored format (legacy blobs have none). */
-function wrapAadFor(wrappedDek: string, secretId: string): Uint8Array | undefined {
-  return wrappedDek.startsWith(`${FORMAT_V2}:`) ? wrapAad(secretId) : undefined
+function wrapAadFor(wrappedDek: string, recordId: string): Uint8Array | undefined {
+  if (wrappedDek.startsWith(`${FORMAT_V2}:`)) return wrapAad(recordId)
+  if (wrappedDek.startsWith(`${FORMAT_CRED}:`)) return credentialWrapAad(recordId)
+  return undefined
+}
+
+// ---------------------------------------------------------------------------
+// Integration credentials (issue #39). Same envelope and key ring as secrets (so key rotation re-wraps
+// them), but a different blob tag and AAD domain: a secret blob can never be substituted for a
+// credential blob, nor one connection's credential for another's or another organisation's.
+// ---------------------------------------------------------------------------
+
+export type CredentialContext = { orgId: string; connectionId: string }
+
+export function credentialAad(ctx: CredentialContext): Uint8Array {
+  return new TextEncoder().encode(`hushvault|credential|v2|${contextPart(ctx.orgId)}|${contextPart(ctx.connectionId)}`)
+}
+
+export function credentialWrapAad(connectionId: string): Uint8Array {
+  return new TextEncoder().encode(`hushvault|credential-wrap|v2|${contextPart(connectionId)}`)
+}
+
+export async function encryptCredentialWithRing(value: string, ring: KeyRing, ctx: CredentialContext): Promise<{
+  encryptedCredential: string
+  wrappedDek: string
+  keyVersion: string
+}> {
+  const kek = await ring.getKey(ring.activeVersion)
+  const dek = await generateDek()
+  const encryptedCredential = await encrypt(value, dek, credentialAad(ctx), FORMAT_CRED)
+  const wrappedDek = await encrypt(await exportKey(dek), kek, credentialWrapAad(ctx.connectionId), FORMAT_CRED)
+  return { encryptedCredential, wrappedDek, keyVersion: ring.activeVersion }
+}
+
+export async function decryptCredentialWithRing(
+  encryptedCredential: string,
+  wrappedDek: string,
+  keyVersion: string,
+  ring: KeyRing,
+  ctx: CredentialContext,
+): Promise<string> {
+  if (!encryptedCredential.startsWith(`${FORMAT_CRED}:`) || !wrappedDek.startsWith(`${FORMAT_CRED}:`)) throw new Error('Invalid encrypted format')
+  const kek = await ring.getKey(keyVersion)
+  const dekBuffer = base64ToBuffer(await decrypt(wrappedDek, kek, credentialWrapAad(ctx.connectionId)))
+  if (dekBuffer.byteLength !== KEK_BYTES) throw new Error('Invalid DEK')
+  const dek = await crypto.subtle.importKey('raw', dekBuffer, { name: ALGORITHM, length: KEY_LENGTH }, false, ['decrypt'])
+  return decrypt(encryptedCredential, dek, credentialAad(ctx))
 }
 
 /** Envelope-encrypt under the ring's active key, bound to the record context. Always writes v2. */
@@ -265,7 +312,8 @@ export async function rewrapDek(wrappedDek: string, fromKey: CryptoKey, toKey: C
   const aad = wrapAadFor(wrappedDek, secretId)
   const dekBase64 = await decrypt(wrappedDek, fromKey, aad)
   if (base64ToBuffer(dekBase64).byteLength !== KEK_BYTES) throw new Error('Invalid DEK')
-  const rewrapped = await encrypt(dekBase64, toKey, aad)
+  // Keep the blob's format tag (secret vs credential) so its AAD domain does not change.
+  const rewrapped = await encrypt(dekBase64, toKey, aad, wrappedDek.startsWith(`${FORMAT_CRED}:`) ? FORMAT_CRED : FORMAT_V2)
   if ((await decrypt(rewrapped, toKey, aad)) !== dekBase64) throw new Error('Re-wrap verification failed')
   return rewrapped
 }

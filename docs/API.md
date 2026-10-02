@@ -448,6 +448,24 @@ expired or `maxViews` has been reached.
 
 ---
 
+## Integrations
+
+Outbound credential vault (issue #39). No integration can sync yet; the first provider (Cloudflare Workers) arrives with M3.
+Everything that touches a connection is **JWT only (API keys get `403`), admin or owner, rate limited (20/min) and audited**.
+The credential is accepted once and never returned, logged or echoed in an error; responses carry metadata only. It is stored as
+ciphertext (format tag `c2:`) bound by AES-GCM AAD to `(organisation id, connection id)` and re-wrapped by key rotation like a secret.
+
+| Endpoint | Auth | Notes |
+|----------|------|-------|
+| `GET /api/integrations/providers` | any signed-in user | Registry from `packages/shared/src/integrations.ts`: `id, name, status, directions, summary, connectable`. `connectable` is true only for providers implemented in this deployment. |
+| `POST /api/integrations/connections` | admin, JWT | Body `{ provider, label (1-64), credential (8-4096 chars), config? }`. The provider verifies the credential with a read-only call first. `201` metadata `{ id, provider, label, config, createdAt, updatedAt, lastVerifiedAt }`. Errors: `400 UNSUPPORTED_PROVIDER` / `VALIDATION_ERROR`, `409 CONFLICT` (label in use) / `LIMIT_REACHED` (20 per org), `422 CREDENTIAL_REJECTED`, `429 PROVIDER_RATE_LIMIT`, `502 PROVIDER_ERROR`. |
+| `GET /api/integrations/connections` | admin, JWT | Metadata list for the organisation. |
+| `PUT /api/integrations/connections/:id/credential` | admin, JWT | Body `{ credential }`. Verifies, re-encrypts, updates. `404` for another organisation's id. |
+| `DELETE /api/integrations/connections/:id` | admin, JWT | Revokes: the credential and its wrapped key are deleted with the row. |
+
+Audit actions: `integration.connect`, `integration.update`, `integration.revoke` (resource id only). `GET /api/security/key-rotation`
+now also reports `rows.connections` per key version.
+
 ## Security
 
 ### GET /api/security/key-rotation

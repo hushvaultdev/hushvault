@@ -104,6 +104,25 @@ export function requireRole(minimum: AuthContext['role']): MiddlewareHandler<{ B
   }
 }
 
+/**
+ * Humans only: refuses API keys. Used for endpoints where a stolen CI key must not be able to act
+ * (managing outbound credentials, re-pointing syncs).
+ */
+export const requireHuman: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
+  const auth = c.get('auth')
+  if (!auth || auth.actorType !== 'user') {
+    return c.json({ error: 'FORBIDDEN', message: 'This action requires signing in as a user; API keys cannot do it' }, 403)
+  }
+  return next()
+}
+
+export const integrationWriteRateLimit = createRateLimitMiddleware({
+  scope: 'integration-write',
+  limit: 20,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
 export const loginRateLimit = createRateLimitMiddleware({
   scope: 'auth-login',
   limit: 10,

@@ -172,9 +172,10 @@ export const keyRotations = sqliteTable('key_rotations', {
   fromVersion: text('from_version').notNull(),
   toVersion: text('to_version').notNull(),
   status: text('status', { enum: ['running', 'paused', 'completed', 'completed_with_errors', 'failed'] }).notNull(),
-  phase: text('phase', { enum: ['secrets', 'history'] }).notNull().default('secrets'),
+  phase: text('phase', { enum: ['secrets', 'history', 'connections'] }).notNull().default('secrets'),
   secretsCursor: text('secrets_cursor'),
   historyCursor: text('history_cursor'),
+  connectionsCursor: text('connections_cursor'),
   rewrapped: integer('rewrapped').notNull().default(0),
   skipped: integer('skipped').notNull().default(0),
   failed: integer('failed').notNull().default(0),
@@ -188,7 +189,7 @@ export const keyRotations = sqliteTable('key_rotations', {
 
 export const keyRotationFailures = sqliteTable('key_rotation_failures', {
   rotationId: text('rotation_id').notNull(),
-  tableName: text('table_name', { enum: ['secrets', 'secret_history'] }).notNull(),
+  tableName: text('table_name', { enum: ['secrets', 'secret_history', 'integration_connections'] }).notNull(),
   rowId: text('row_id').notNull(),
   errorCode: text('error_code').notNull(),
 }, (t) => [primaryKey({ columns: [t.rotationId, t.tableName, t.rowId] })])
@@ -209,4 +210,27 @@ export const authTokens = sqliteTable('auth_tokens', {
 }, (t) => [
   index('auth_tokens_user_purpose_idx').on(t.userId, t.purpose),
   index('auth_tokens_expires_idx').on(t.expiresAt),
+])
+
+// ─────────────────────────────────────────────
+// Integrations (issue #39)
+// ─────────────────────────────────────────────
+
+// Outbound credential vault: ciphertext only. Never selected into API responses.
+export const integrationConnections = sqliteTable('integration_connections', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  label: text('label').notNull(),
+  configJson: text('config_json').notNull().default('{}'), // non-secret provider settings
+  encryptedCredential: text('encrypted_credential').notNull(),
+  wrappedDek: text('wrapped_dek').notNull(),
+  keyVersion: text('key_version').notNull(),
+  createdBy: text('created_by').references(() => users.id),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  lastVerifiedAt: text('last_verified_at'),
+}, (t) => [
+  index('integration_connections_org_idx').on(t.orgId),
+  uniqueIndex('integration_connections_label_idx').on(t.orgId, t.provider, t.label),
 ])

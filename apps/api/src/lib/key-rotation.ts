@@ -25,16 +25,25 @@ const MAX_BATCH_SIZE = 500
 const WRITE_CHUNK = 50
 const LEASE_MS = 90_000
 
-type Table = 'secrets' | 'secret_history'
+// The rotation walks these in order. `recordId` is the id the wrapped DEK is bound to by AAD
+// (a history row is bound to its secret; a connection to itself).
+const PHASES = [
+  { phase: 'secrets', table: 'secrets', cursor: 'secrets_cursor', recordId: 'id' },
+  { phase: 'history', table: 'secret_history', cursor: 'history_cursor', recordId: 'secret_id' },
+  { phase: 'connections', table: 'integration_connections', cursor: 'connections_cursor', recordId: 'id' },
+] as const
+type PhaseSpec = (typeof PHASES)[number]
+type Table = PhaseSpec['table']
 
 type RotationRow = {
   id: string
   from_version: string
   to_version: string
   status: string
-  phase: 'secrets' | 'history'
+  phase: PhaseSpec['phase']
   secrets_cursor: string | null
   history_cursor: string | null
+  connections_cursor: string | null
   rewrapped: number
   skipped: number
   failed: number
@@ -147,15 +156,15 @@ export async function rotationTick(env: Env, options: TickOptions = {}): Promise
  * not silently skipped.
  */
 async function bootstrap(env: Env, ring: KeyRing, nowIso: string): Promise<TickResult> {
-  const used = await env.DB.prepare('SELECT key_version AS v FROM secrets UNION SELECT key_version FROM secret_history').all<{ v: string }>()
+  const used = await env.DB.prepare('SELECT key_version AS v FROM secrets UNION SELECT key_version FROM secret_history UNION SELECT key_version FROM integration_connections').all<{ v: string }>()
   const versions = (used.results ?? []).map((r) => r.v)
   const others = versions.filter((v) => v !== ring.activeVersion).sort((x, y) => Number(x.slice(1)) - Number(y.slice(1)))
   const version = others[0] ?? ring.activeVersion
 
   const key = await ring.getKey(version)
   // Refuse to enshrine a key that cannot unwrap the data it is supposed to protect.
-  for (const table of ['secrets', 'secret_history'] as const) {
-    const sample = await env.DB.prepare(`SELECT wrapped_dek, ${table === 'secrets' ? 'id' : 'secret_id'} AS secret_id FROM ${table} WHERE key_version = ? LIMIT 1`).bind(version).first<{ wrapped_dek: string; secret_id: string }>()
+  for (const { table, recordId } of PHASES) {
+    const sample = await env.DB.prepare(`SELECT wrapped_dek, ${recordId} AS secret_id FROM ${table} WHERE key_version = ? LIMIT 1`).bind(version).first<{ wrapped_dek: string; secret_id: string }>()
     if (sample && !(await canUnwrapDek(sample.wrapped_dek, key, sample.secret_id))) {
       console.error(JSON.stringify({ level: 'error', event: 'key_rotation.key_check_failed', keyVersion: version }))
       return { state: 'error', code: 'KEY_CHECK_FAILED' }
@@ -265,12 +274,13 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
       return await holdOnError(env, job, err instanceof KeyRingError ? err.code : 'KEY_INVALID', nowIso)
     }
 
-    const table: Table = job.phase === 'secrets' ? 'secrets' : 'secret_history'
-    const cursor = (job.phase === 'secrets' ? job.secrets_cursor : job.history_cursor) ?? ''
+    const spec = PHASES.find((p) => p.phase === job.phase) ?? PHASES[0]
+    const table: Table = spec.table
+    const cursor = (job[spec.cursor] as string | null) ?? ''
     const limit = batchSizeFrom(env, options.batchSize)
 
     const { results } = await env.DB.prepare(
-      `SELECT id, ${table === 'secrets' ? 'id' : 'secret_id'} AS secret_id, wrapped_dek, key_version FROM ${table} WHERE id > ? AND key_version <> ? AND id NOT IN (SELECT row_id FROM key_rotation_failures WHERE rotation_id = ? AND table_name = ?) ORDER BY id LIMIT ?`,
+      `SELECT id, ${spec.recordId} AS secret_id, wrapped_dek, key_version FROM ${table} WHERE id > ? AND key_version <> ? AND id NOT IN (SELECT row_id FROM key_rotation_failures WHERE rotation_id = ? AND table_name = ?) ORDER BY id LIMIT ?`,
     ).bind(cursor, job.to_version, job.id, table, limit).all<{ id: string; secret_id: string; wrapped_dek: string; key_version: string }>()
     const rows = results ?? []
 
@@ -308,7 +318,7 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
       }
       const last = chunk[chunk.length - 1]
       const progress = env.DB.prepare(
-        `UPDATE key_rotations SET ${job.phase === 'secrets' ? 'secrets_cursor' : 'history_cursor'} = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
+        `UPDATE key_rotations SET ${spec.cursor} = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
       ).bind(last?.id ?? cursor, nowIso, job.id)
       const batchResults = await env.DB.batch([...writes, ...failures, progress])
       for (let i = 0; i < writes.length; i += 1) {
@@ -326,16 +336,17 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
     }
 
     // This phase is exhausted from the cursor onward.
-    if (job.phase === 'secrets') {
-      await env.DB.prepare("UPDATE key_rotations SET phase = 'history', history_cursor = NULL, updated_at = ? WHERE id = ? AND status = 'running'").bind(nowIso, job.id).run()
+    const next = PHASES[PHASES.findIndex((p) => p.phase === spec.phase) + 1]
+    if (next) {
+      await env.DB.prepare(`UPDATE key_rotations SET phase = ?, ${next.cursor} = NULL, updated_at = ? WHERE id = ? AND status = 'running'`).bind(next.phase, nowIso, job.id).run()
       return { state: 'progress', rewrapped, skipped, failed }
     }
 
-    // History done. Convergence: rows written under the old version by a stale isolate (or restored
+    // Every table done. Convergence: rows written under the old version by a stale isolate (or restored
     // from a backup) behind the cursor start another pass instead of being missed.
     const remaining = await countRemaining(env, job)
     if (remaining > 0) {
-      await env.DB.prepare("UPDATE key_rotations SET phase = 'secrets', secrets_cursor = NULL, history_cursor = NULL, updated_at = ? WHERE id = ? AND status = 'running'").bind(nowIso, job.id).run()
+      await env.DB.prepare("UPDATE key_rotations SET phase = 'secrets', secrets_cursor = NULL, history_cursor = NULL, connections_cursor = NULL, updated_at = ? WHERE id = ? AND status = 'running'").bind(nowIso, job.id).run()
       return { state: 'progress', rewrapped, skipped, failed }
     }
 
@@ -356,7 +367,7 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
 
 async function countRemaining(env: Env, job: RotationRow): Promise<number> {
   let total = 0
-  for (const table of ['secrets', 'secret_history'] as const) {
+  for (const { table } of PHASES) {
     const row = await env.DB.prepare(
       `SELECT count(*) AS n FROM ${table} WHERE key_version <> ? AND id NOT IN (SELECT row_id FROM key_rotation_failures WHERE rotation_id = ? AND table_name = ?)`,
     ).bind(job.to_version, job.id, table).first<{ n: number }>()

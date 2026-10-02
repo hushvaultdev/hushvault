@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { decryptSecretWithRing, encryptSecretWithRing, loadKeyRing, makeKeyCheck, type KeyRing } from '../src/crypto/envelope'
 import { rotationTick, type TickResult } from '../src/lib/key-rotation'
 import { createPrefixedId } from '../src/lib/auth'
+import { encryptCredentialWithRing } from '../src/crypto/envelope'
+import { readCredential } from '../src/lib/integration-credentials'
 import { createTestEnv, seedProject, seedEnvironment, seedUser, type TestEnv } from './helpers/env'
 
 const b64 = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
@@ -363,5 +365,31 @@ describe('key rotation engine', () => {
     for (const needle of [ctx.env.ENCRYPTION_MASTER_KEY, String(ctx.env['ENCRYPTION_KEY_V2']), ...wrapped, ...expected.values()]) {
       expect(haystack).not.toContain(needle)
     }
+  })
+
+  it('re-wraps integration credentials too, so the old key can be retired without losing them', async () => {
+    const ctx = await setup()
+    await seedMany(ctx, 2)
+    const now = new Date().toISOString()
+    const ids: string[] = []
+    for (let i = 0; i < 3; i += 1) {
+      const id = createPrefixedId('icn')
+      ids.push(id)
+      const sealed = await encryptCredentialWithRing(`cred-${i}-secret`, ringOf(ctx.env, 'v1'), { orgId: ctx.orgId, connectionId: id })
+      await ctx.env.DB.prepare(
+        'INSERT INTO integration_connections (id, org_id, provider, label, encrypted_credential, wrapped_dek, key_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(id, ctx.orgId, 'cloudflare-workers', `c${i}`, sealed.encryptedCredential, sealed.wrappedDek, sealed.keyVersion, now, now).run()
+    }
+    await rotationTick(ctx.env as never) // bootstrap v1
+    activate(ctx.env, 'v2')
+    await rotationTick(ctx.env as never) // activate
+    const results = await runToEnd(ctx.env)
+    expect(results[results.length - 1]).toMatchObject({ state: 'completed', failed: 0 })
+
+    const rows = await ctx.env.DB.prepare('SELECT key_version FROM integration_connections').all<{ key_version: string }>()
+    expect(rows.results.every((r) => r.key_version === 'v2')).toBe(true)
+    // Decrypts with ONLY the v2 key present (v1 retired).
+    const onlyV2 = { ...(ctx.env as object), ENCRYPTION_MASTER_KEY: '' } as never
+    expect(await readCredential(onlyV2, ctx.orgId, ids[1] as string)).toBe('cred-1-secret')
   })
 })
