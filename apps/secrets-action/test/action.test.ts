@@ -8,6 +8,7 @@ const require_ = createRequire(import.meta.url)
 const action = require_('../src/index.js') as {
   mask: (v: string) => void
   appendFileCommand: (file: string, name: string, value: string) => void
+  exportableName: (name: string) => boolean
   main: () => Promise<void>
 }
 
@@ -122,5 +123,46 @@ describe('main', () => {
     setup({ secrets: [{ name: 'GOOD', value: 'v' }, { name: 'NO_VALUE' }, { value: 'no-name' }, null] })
     await action.main()
     expect(readFileSync(process.env['GITHUB_OUTPUT'] as string, 'utf8')).toBe('names=["GOOD"]\n')
+  })
+
+  it('ATTACK: refuses to export a secret whose name would change how the job runs', async () => {
+    // Creating a secret needs only the `member` role, so a name like LD_PRELOAD must never reach $GITHUB_ENV:
+    // that is arbitrary code execution in the job, with its GITHUB_TOKEN and any cloud credentials.
+    setup({ secrets: [{ name: 'LD_PRELOAD', value: '/tmp/evil.so' }, { name: 'DB_URL', value: 'ok' }] })
+    await expect(action.main()).rejects.toThrow('exit')
+    expect(exited).toBe(1)
+    expect(out.join('')).toContain('Refusing to export LD_PRELOAD')
+    expect(readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')).toBe('')
+  })
+
+  it('a prefix makes an otherwise unsafe name exportable', async () => {
+    setup({ secrets: [{ name: 'PATH', value: '/tmp/evil' }] })
+    process.env['INPUT_PREFIX'] = 'APP_'
+    await action.main()
+    expect(readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')).toMatch(/^APP_PATH<<HV_/)
+  })
+
+  it('refuses to send a token to a host the audience was not minted for', async () => {
+    setup()
+    process.env['INPUT_AUDIENCE'] = 'https://api.hushvault.dev'
+    process.env['INPUT_API-URL'] = 'https://attacker.example'
+    await expect(action.main()).rejects.toThrow('exit')
+    expect(out.join('')).toContain('audience must match api-url')
+  })
+})
+
+describe('exportableName', () => {
+  it('refuses loader, path, interpreter and runner-credential names, and odd shapes', () => {
+    for (const name of ['PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'NODE_OPTIONS',
+      'GITHUB_TOKEN', 'GITHUB_ENV', 'RUNNER_TEMP', 'ACTIONS_ID_TOKEN_REQUEST_URL', 'GIT_SSH_COMMAND', 'BASH_ENV',
+      'PYTHONPATH', 'RUBYOPT', 'PERL5OPT', 'IFS', 'SHELLOPTS', 'INPUT_API-URL']) {
+      expect(action.exportableName(name), name).toBe(false)
+    }
+    for (const name of ['', '1BAD', 'WITH-DASH', 'WITH SPACE', 'WITH=EQUALS', 'a\nb']) {
+      expect(action.exportableName(name), JSON.stringify(name)).toBe(false)
+    }
+    for (const name of ['DB_URL', 'API_KEY', 'STRIPE_SECRET', '_PRIVATE', 'PATHOLOGY', 'MY_GITHUB_TOKEN']) {
+      expect(action.exportableName(name), name).toBe(true)
+    }
   })
 })

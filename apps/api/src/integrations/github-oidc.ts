@@ -22,6 +22,15 @@ export const DEFAULT_GITHUB_JWKS_URL = 'https://token.actions.githubusercontent.
  */
 export const DENIED_EVENT_NAMES: readonly string[] = ['pull_request', 'pull_request_target']
 
+/**
+ * Events that may mint a token. An allowlist, not a denylist: `issue_comment`, `pull_request_review`,
+ * `workflow_run`, `fork` and friends ALSO run in the base repository's context with a trusted-looking `ref`, and the
+ * list of such triggers grows. A token with no `event_name` matches nothing.
+ */
+export const ALLOWED_EVENT_NAMES: readonly string[] = [
+  'push', 'workflow_dispatch', 'schedule', 'release', 'merge_group', 'deployment', 'deployment_status',
+]
+
 /** Claims this code reads. GitHub sends many more; anything not listed here is ignored. */
 export type GitHubOidcClaims = {
   iss?: string
@@ -71,8 +80,9 @@ export type OidcRule = {
  * environment, and the matching claim must be present: a token with neither matches nothing.
  */
 export function ruleMatches(rule: OidcRule, claims: GitHubOidcClaims): boolean {
-  // An untrusted-pull-request context can carry a trusted-looking ref or environment: never honour it.
-  if (typeof claims.event_name === 'string' && DENIED_EVENT_NAMES.includes(claims.event_name)) return false
+  // A base-context trigger (pull_request_target, issue_comment, workflow_run, ...) can carry a trusted-looking ref
+  // or environment while running code an untrusted contributor influenced. Only explicitly safe events may mint.
+  if (typeof claims.event_name !== 'string' || !ALLOWED_EVENT_NAMES.includes(claims.event_name)) return false
   if (typeof claims.repository !== 'string' || claims.repository.toLowerCase() !== rule.repository) return false
   // GitHub documents repository_id as a string, but accept a number defensively rather than failing open.
   if (rule.repositoryId !== null && toClaimString(claims.repository_id) !== rule.repositoryId) return false

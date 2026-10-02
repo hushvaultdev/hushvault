@@ -792,7 +792,8 @@ authRoutes.post('/github-oidc', oidcExchangeRateLimit, zValidator('json', github
     // One opaque response for every verification failure: a forger learns nothing about which part was wrong.
     // The code is logged (never the token) so an operator can tell a misconfiguration from an attack.
     console.error(JSON.stringify({ level: 'warn', event: 'auth.oidc.rejected', code: verified.code }))
-    const status = verified.code === 'JWKS_UNAVAILABLE' ? 503 : 401
+    // A key-server problem on our side is an outage, not a verdict on the caller's token.
+    const status = verified.code === 'JWKS_UNAVAILABLE' || verified.code === 'KEY_LOOKUP_THROTTLED' ? 503 : 401
     return c.json({ error: 'OIDC_REJECTED', message: 'The OIDC token was not accepted' }, status)
   }
 
@@ -800,7 +801,7 @@ authRoutes.post('/github-oidc', oidcExchangeRateLimit, zValidator('json', github
   const repository = typeof claims.repository === 'string' ? claims.repository.toLowerCase() : ''
   const rows = repository
     ? await c.env.DB.prepare(
-        'SELECT id, org_id, env_id, repository, repository_id, ref, environment FROM oidc_repo_rules WHERE env_id = ? AND repository = ? LIMIT 50',
+        'SELECT id, org_id, env_id, repository, repository_id, ref, environment FROM oidc_repo_rules WHERE env_id = ? AND repository = ? ORDER BY created_at LIMIT 100',
       ).bind(envId, repository).all<{ id: string; org_id: string; env_id: string; repository: string; repository_id: string | null; ref: string | null; environment: string | null }>()
     : { results: [] }
 
@@ -809,7 +810,14 @@ authRoutes.post('/github-oidc', oidcExchangeRateLimit, zValidator('json', github
     .find((r) => ruleMatches(r, claims))
 
   if (!rule) {
-    console.error(JSON.stringify({ level: 'warn', event: 'auth.oidc.no_rule' }))
+    // The repository, ref and environment are public facts about the caller's own workflow, not secrets: logging
+    // them is what lets an operator tell a typo'd rule from a targeted probe.
+    console.error(JSON.stringify({
+      level: 'warn', event: 'auth.oidc.no_rule', repository, envId,
+      ref: typeof claims.ref === 'string' ? claims.ref : null,
+      environment: typeof claims.environment === 'string' ? claims.environment : null,
+      eventName: typeof claims.event_name === 'string' ? claims.event_name : null,
+    }))
     return c.json({ error: 'NOT_ALLOWED', message: 'No rule grants this workflow access to that environment' }, 403)
   }
 

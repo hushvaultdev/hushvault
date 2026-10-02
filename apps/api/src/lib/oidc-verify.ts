@@ -10,7 +10,10 @@
 import type { Env } from '../index'
 
 export const JWKS_CACHE_TTL_SECONDS = 3600
-export const JWKS_REFETCH_COOLDOWN_SECONDS = 60
+/** Window for the refetch budget, and for remembering a key id that was already looked up and missed. */
+export const JWKS_REFETCH_WINDOW_SECONDS = 60
+/** Refetches allowed per window: well above the one a genuine rotation needs, far below a flood. */
+export const JWKS_REFETCH_BUDGET = 10
 export const JWKS_FETCH_TIMEOUT_MS = 5000
 export const MAX_JWKS_BYTES = 64 * 1024
 /** Tokens are short-lived; allow a little clock drift in both directions. */
@@ -25,6 +28,7 @@ export type OidcFailure =
   | 'WRONG_ISSUER'
   | 'WRONG_AUDIENCE'
   | 'JWKS_UNAVAILABLE'     // could not fetch or parse the key set
+  | 'KEY_LOOKUP_THROTTLED' // too many unknown key ids just now: an outage on our side, not a bad token
 
 export type OidcResult<C> = { ok: true; claims: C } | { ok: false; code: OidcFailure }
 
@@ -56,6 +60,9 @@ async function fetchJwks(jwksUrl: string): Promise<Jwks | null> {
   try {
     const res = await fetch(jwksUrl, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT_MS) })
     if (!res.ok) return null
+    // Check the advertised size before materialising the body, then again after (the header can lie).
+    const declared = Number.parseInt(res.headers.get('content-length') ?? '', 10)
+    if (Number.isFinite(declared) && declared > MAX_JWKS_BYTES) return null
     const body = await res.text()
     if (body.length > MAX_JWKS_BYTES) return null
     const parsed = JSON.parse(body) as Jwks
@@ -83,23 +90,45 @@ async function writeCache(env: Env, jwksUrl: string, jwks: Jwks): Promise<void> 
 }
 
 /**
- * Refetch throttle. A fetch that resolves the key (cold cache, genuine rotation) costs nothing; only a fetch that
- * was WASTED — the key set did not contain the kid, or could not be fetched — starts a cooldown, so a flood of junk
- * `kid`s cannot turn into a flood of outbound requests while legitimate rotations are never delayed.
+ * Refetch throttling, deliberately NOT a single on/off flag. A binary cooldown would let one junk key id per window
+ * stop a genuine GitHub key rotation from ever being picked up, breaking every customer's CI until it expired.
+ * Two guards instead: a key id that was already fetched and missed is remembered briefly, so repeating it costs
+ * nothing; and a per-window budget, which a flood exhausts but a rotation (one refetch) never does. An exhausted
+ * budget means "cannot look this up right now", which the caller reports as an outage, not as a bad token.
  */
-async function refetchAllowed(env: Env, jwksUrl: string): Promise<boolean> {
+async function missKey(jwksUrl: string, kid: string): Promise<string> {
+  // Hashed, so an arbitrary kid can never shape a KV key.
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(kid))
+  return `${cacheKey(jwksUrl)}:miss:${[...new Uint8Array(digest).slice(0, 8)].map((b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+async function kidRecentlyMissed(env: Env, jwksUrl: string, kid: string): Promise<boolean> {
   try {
-    return !(await env.SECRETS_KV.get(`${cacheKey(jwksUrl)}:cooldown`))
+    return Boolean(await env.SECRETS_KV.get(await missKey(jwksUrl, kid)))
   } catch {
-    return true // without KV the request itself is still rate limited
+    return false
   }
 }
 
-async function startCooldown(env: Env, jwksUrl: string): Promise<void> {
+async function rememberMiss(env: Env, jwksUrl: string, kid: string): Promise<void> {
   try {
-    await env.SECRETS_KV.put(`${cacheKey(jwksUrl)}:cooldown`, '1', { expirationTtl: JWKS_REFETCH_COOLDOWN_SECONDS })
+    await env.SECRETS_KV.put(await missKey(jwksUrl, kid), '1', { expirationTtl: JWKS_REFETCH_WINDOW_SECONDS })
   } catch {
-    // throttling is best effort
+    // best effort
+  }
+}
+
+/** Consume one refetch from this window's budget. False when the budget is spent. */
+async function spendRefetch(env: Env, jwksUrl: string): Promise<boolean> {
+  const key = `${cacheKey(jwksUrl)}:refetches`
+  try {
+    const spent = Number.parseInt((await env.SECRETS_KV.get(key)) ?? '0', 10)
+    const used = Number.isFinite(spent) ? spent : 0
+    if (used >= JWKS_REFETCH_BUDGET) return false
+    await env.SECRETS_KV.put(key, String(used + 1), { expirationTtl: JWKS_REFETCH_WINDOW_SECONDS })
+    return true
+  } catch {
+    return true // without KV the request itself is still rate limited
   }
 }
 
@@ -107,8 +136,17 @@ function findKey(jwks: Jwks | null, kid: string): Jwk | null {
   return jwks?.keys?.find((k) => k.kid === kid && (k.kty === 'RSA') && (k.alg === undefined || k.alg === 'RS256') && (k.use === undefined || k.use === 'sig')) ?? null
 }
 
+/** 2048 bits. WebCrypto will happily import a 512-bit key, which is forgeable. */
+const MIN_RSA_MODULUS_BYTES = 256
+
 async function importRsa(jwk: Jwk): Promise<CryptoKey | null> {
   if (!jwk.n || !jwk.e) return null
+  try {
+    const normalized = jwk.n.replace(/-/g, '+').replace(/_/g, '/')
+    if (atob(normalized + '='.repeat((4 - (normalized.length % 4)) % 4)).length < MIN_RSA_MODULUS_BYTES) return null
+  } catch {
+    return null
+  }
   try {
     return await crypto.subtle.importKey(
       'jwk',
@@ -163,16 +201,15 @@ export async function verifyOidcToken<C extends { iss?: string; aud?: string | s
   let jwk = findKey(jwks, header.kid)
   if (!jwk) {
     // Unknown key: either the cache is cold or GitHub rotated. Refetch at most once per cooldown.
-    if (!(await refetchAllowed(env, expect.jwksUrl))) return { ok: false, code: 'UNKNOWN_KEY' }
+    // Already looked this key id up and missed it recently: answer from memory, spend no budget.
+    if (await kidRecentlyMissed(env, expect.jwksUrl, header.kid)) return { ok: false, code: 'UNKNOWN_KEY' }
+    if (!(await spendRefetch(env, expect.jwksUrl))) return { ok: false, code: 'KEY_LOOKUP_THROTTLED' }
     jwks = await fetchJwks(expect.jwksUrl)
-    if (!jwks) {
-      await startCooldown(env, expect.jwksUrl)
-      return { ok: false, code: 'JWKS_UNAVAILABLE' }
-    }
+    if (!jwks) return { ok: false, code: 'JWKS_UNAVAILABLE' }
     await writeCache(env, expect.jwksUrl, jwks)
     jwk = findKey(jwks, header.kid)
     if (!jwk) {
-      await startCooldown(env, expect.jwksUrl)
+      await rememberMiss(env, expect.jwksUrl, header.kid)
       return { ok: false, code: 'UNKNOWN_KEY' }
     }
   }

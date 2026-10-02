@@ -12,6 +12,13 @@ async function world(env: TestEnv) {
   return { admin, projectId, envId }
 }
 
+/** A CI token is only live while the rule that minted it exists, so tests that use one must seed the rule. */
+async function seedRule(env: TestEnv, id: string, orgId: string, envId: string) {
+  await env.DB.prepare(
+    "INSERT INTO oidc_repo_rules (id, org_id, env_id, provider, repository, ref, created_at) VALUES (?, ?, ?, 'github', 'acme/app', 'refs/heads/main', ?)",
+  ).bind(id, orgId, envId, new Date().toISOString()).run()
+}
+
 const rule = (envId: string, over: Record<string, unknown> = {}) => ({ envId, repository: 'Acme/App', ref: 'refs/heads/main', ...over })
 
 describe('CI access rules', () => {
@@ -95,6 +102,7 @@ describe('CI tokens', () => {
     const env = createTestEnv()
     const { admin, envId, projectId } = await world(env)
     const otherEnv = await seedEnvironment(env, projectId, 'other')
+    await seedRule(env, 'ocr_1', admin.orgId, envId)
     const ci = await signCiToken({ ruleId: 'ocr_1', orgId: admin.orgId, envId }, env.JWT_SECRET)
 
     const ok = await call(env, 'GET', `/api/environments/${envId}/resolved?values=true`, { token: ci.token })
@@ -135,9 +143,36 @@ describe('CI tokens', () => {
   it('a read by a CI token is audited with no actor id (there is no person behind it)', async () => {
     const env = createTestEnv()
     const { admin, envId } = await world(env)
+    await seedRule(env, 'ocr_1', admin.orgId, envId)
     const ci = await signCiToken({ ruleId: 'ocr_1', orgId: admin.orgId, envId }, env.JWT_SECRET)
     await call(env, 'GET', `/api/environments/${envId}/resolved?values=true`, { token: ci.token })
-    const row = await env.DB.prepare("SELECT actor_id, actor_type, org_id FROM audit_log WHERE action = 'secret.read_bulk' ORDER BY timestamp DESC LIMIT 1").first<{ actor_id: string | null; actor_type: string; org_id: string }>()
-    expect(row).toMatchObject({ actor_id: null, actor_type: 'system', org_id: admin.orgId })
+    const row = await env.DB.prepare("SELECT actor_id, actor_type, org_id, resource_type, resource_id FROM audit_log WHERE action = 'secret.read_bulk' ORDER BY timestamp DESC LIMIT 1").first<{ actor_id: string | null; actor_type: string; org_id: string; resource_type: string; resource_id: string }>()
+    // Attributed to the rule, so an operator can tell WHICH repository read the secrets.
+    expect(row).toMatchObject({ actor_id: null, actor_type: 'system', org_id: admin.orgId, resource_type: 'oidc_repo_rule', resource_id: 'ocr_1' })
+  })
+
+  it('deleting the rule revokes tokens it already issued, rather than leaving them live until they expire', async () => {
+    const env = createTestEnv()
+    const { admin, envId } = await world(env)
+    const created = await call(env, 'POST', '/api/ci-access/github/rules', { token: admin.token, json: rule(envId) })
+    const ci = await signCiToken({ ruleId: created.body.data.id, orgId: admin.orgId, envId }, env.JWT_SECRET)
+    const path = `/api/environments/${envId}/resolved?values=true`
+    expect((await call(env, 'GET', path, { token: ci.token })).status).toBe(200)
+
+    expect((await call(env, 'DELETE', `/api/ci-access/github/rules/${created.body.data.id}`, { token: admin.token })).status).toBe(200)
+    const after = await call(env, 'GET', path, { token: ci.token })
+    expect(after.status).toBe(401)
+    expect(JSON.stringify(after.body)).not.toContain('CANARY')
+  })
+
+  it('a token naming a rule that belongs to another organisation or environment is refused', async () => {
+    const env = createTestEnv()
+    const a = await world(env)
+    const b = await world(env)
+    await seedRule(env, 'ocr_a', a.admin.orgId, a.envId)
+    const wrongOrg = await signCiToken({ ruleId: 'ocr_a', orgId: b.admin.orgId, envId: a.envId }, env.JWT_SECRET)
+    expect((await call(env, 'GET', `/api/environments/${a.envId}/resolved`, { token: wrongOrg.token })).status).toBe(401)
+    const wrongEnv = await signCiToken({ ruleId: 'ocr_a', orgId: a.admin.orgId, envId: b.envId }, env.JWT_SECRET)
+    expect((await call(env, 'GET', `/api/environments/${b.envId}/resolved`, { token: wrongEnv.token })).status).toBe(401)
   })
 })

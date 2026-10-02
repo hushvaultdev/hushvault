@@ -78,7 +78,9 @@ ciAccessRouter.post('/github/rules', ...adminOnly, integrationWriteRateLimit, zV
     ).bind(id, auth.orgId, body.envId, body.repository.toLowerCase(), body.repositoryId ?? null, body.ref ?? null, body.environment ?? null, auth.userId, now, auth.orgId, MAX_RULES_PER_ORG).run()
   } catch (err) {
     if (/UNIQUE/i.test(err instanceof Error ? err.message : String(err))) {
-      return c.json({ error: 'CONFLICT', message: 'An identical rule already exists' }, 409)
+      // Deliberately specific: the unique index ignores repository_id, so an admin hardening an existing rule by
+      // pinning the id lands here and must know the old, unpinned rule is still live and still granting access.
+      return c.json({ error: 'CONFLICT', message: 'A rule for this environment, repository and ref/environment already exists. Delete it first — adding a second rule would leave the existing one granting access.' }, 409)
     }
     throw err
   }

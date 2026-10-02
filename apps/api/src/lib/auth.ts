@@ -80,6 +80,9 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
   }
 
   const payload = decodeJson<JwtPayload>(payloadPart)
+  // A scoped CI token is signed with the same secret and must never be accepted as a user session, even if it
+  // later grows a `role`-shaped field. See lib/ci-tokens.ts.
+  if ((payload as { kind?: unknown }).kind !== undefined) throw new Error('Unsupported token')
   if (!payload.sub || !payload.orgId || !payload.role || payload.iss !== 'hushvault' || payload.aud !== 'hushvault-api' || !payload.exp || payload.exp <= Math.floor(Date.now() / 1000)) {
     throw new Error('Expired token')
   }

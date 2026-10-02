@@ -7,10 +7,25 @@
 //  - A value is masked with ::add-mask:: BEFORE it can reach any other output, and masks are flushed line by line.
 //  - Values are never printed, never put in an output, and never written to a file other than $GITHUB_ENV.
 //  - No HushVault token is ever stored in the repository: the only credential is the OIDC token GitHub mints.
+//  - A secret NAME is never exported if it could change how the job runs (see UNSAFE_NAMES): writing LD_PRELOAD or
+//    PATH into $GITHUB_ENV is arbitrary code execution on the runner, so whoever can add a secret must not be able
+//    to reach it. Creating a secret only needs the `member` role, which is far below the admin who grants CI access.
 //  - No third-party dependencies, so nothing else in the dependency tree can read the values.
 'use strict'
 
 const fs = require('node:fs')
+
+/**
+ * Names that must never be written to $GITHUB_ENV. These change how later steps execute (loader, lookup path,
+ * interpreter flags) or impersonate the runner's own credentials. A deny list is paired with a strict name shape, so
+ * anything unusual is refused rather than exported.
+ */
+const UNSAFE_NAMES = /^(PATH|HOME|IFS|CI|SHELL|SHELLOPTS|BASH_ENV|ENV|PS4|PERL5OPT|PYTHONPATH|PYTHONSTARTUP|RUBYOPT|NODE_OPTIONS|NODE_PATH|LD_.*|DYLD_.*|GIT_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|INPUT_.*)$/
+const NAME_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function exportableName(name) {
+  return NAME_SHAPE.test(name) && !UNSAFE_NAMES.test(name)
+}
 
 function input(name, fallback = '') {
   const value = process.env[`INPUT_${name.replace(/ /g, '_').toUpperCase()}`]
@@ -74,6 +89,12 @@ async function main() {
   }
   if (prefix && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(prefix)) fail('prefix must be a valid environment-variable prefix.')
 
+  // L5: a changed api-url must not be able to send a token minted for the real API somewhere else. The audience
+  // follows api-url unless both were set deliberately and agree.
+  if (new URL(audience).host !== new URL(apiUrl).host) {
+    fail('audience must match api-url: a token minted for one host must never be sent to another.')
+  }
+
   const oidcToken = await requestOidcToken(audience)
   const exchange = await hushvault(apiUrl, '/api/auth/github-oidc', {
     method: 'POST',
@@ -105,6 +126,12 @@ async function main() {
   if (exportEnv) {
     const file = process.env['GITHUB_ENV']
     if (!file) fail('GITHUB_ENV is not set; cannot export secrets.')
+    // Refuse loudly rather than skipping quietly: a silently missing variable is debugged for an hour, and a
+    // deliberately planted one is exactly what an operator needs to be told about.
+    const unsafe = names.filter((name) => !exportableName(`${prefix}${name}`))
+    if (unsafe.length > 0) {
+      fail(`Refusing to export ${unsafe.join(', ')}: that name would change how this job runs. Rename the secret in HushVault, or set the action's "prefix" input.`)
+    }
     for (const secret of read.body.data.secrets) {
       if (!secret || typeof secret.name !== 'string' || typeof secret.value !== 'string') continue
       appendFileCommand(file, `${prefix}${secret.name}`, secret.value)
@@ -119,4 +146,4 @@ if (require.main === module) {
   main().catch((err) => fail(`Unexpected failure: ${err && err.message ? err.message : 'unknown error'}`))
 }
 
-module.exports = { mask, appendFileCommand, main }
+module.exports = { mask, appendFileCommand, exportableName, main }

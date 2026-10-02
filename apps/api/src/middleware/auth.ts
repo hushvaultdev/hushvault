@@ -48,6 +48,13 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
     if (!ciTokenMayReach(c.req.method, new URL(c.req.url).pathname, ci.envId)) {
       return c.json({ error: 'FORBIDDEN', message: 'This token may only read the environment it was issued for' }, 403)
     }
+    // Deleting the rule is an admin's only lever after a compromise, so it must revoke tokens already issued
+    // rather than leaving them live until they expire. One indexed primary-key read.
+    const rule = await c.env.DB.prepare('SELECT env_id, org_id FROM oidc_repo_rules WHERE id = ? LIMIT 1')
+      .bind(ci.sub).first<{ env_id: string; org_id: string }>()
+    if (!rule || rule.env_id !== ci.envId || rule.org_id !== ci.orgId) {
+      return c.json({ error: 'UNAUTHORIZED', message: 'This token is no longer valid' }, 401)
+    }
     c.set('auth', { userId: '', orgId: ci.orgId, role: 'viewer', actorType: 'system', scope: { envId: ci.envId, ruleId: ci.sub } })
     return next()
   }

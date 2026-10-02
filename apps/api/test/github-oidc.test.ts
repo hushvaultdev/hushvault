@@ -58,7 +58,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('ruleMatches', () => {
   const base = { id: 'ocr_1', orgId: 'o', envId: 'e', repository: 'acme/app', repositoryId: null, ref: 'refs/heads/main', environment: null }
-  const claims = { repository: 'acme/app', repository_id: '12345', ref: 'refs/heads/main' }
+  const claims = { repository: 'acme/app', repository_id: '12345', ref: 'refs/heads/main', event_name: 'push' }
 
   it('matches exactly and never by prefix, case or a missing claim', () => {
     expect(ruleMatches(base, claims)).toBe(true)
@@ -71,13 +71,16 @@ describe('ruleMatches', () => {
     expect(ruleMatches({ ...base, ref: null, environment: null }, claims)).toBe(false) // a rule with no constraint matches nothing
   })
 
-  it('never matches a pull request context, whose ref or environment looks trusted but is not', () => {
-    for (const event_name of ['pull_request', 'pull_request_target']) {
+  it('only an allow-listed event may mint: base-context triggers and a missing event are refused', () => {
+    // issue_comment / workflow_run / fork also run with a trusted-looking ref in the base repository.
+    for (const event_name of ['pull_request', 'pull_request_target', 'issue_comment', 'pull_request_review', 'workflow_run', 'fork', 'watch']) {
       expect(ruleMatches(base, { ...claims, event_name })).toBe(false)
       expect(ruleMatches({ ...base, ref: null, environment: 'production' }, { ...claims, environment: 'production', event_name })).toBe(false)
     }
+    expect(ruleMatches(base, { ...claims, event_name: undefined })).toBe(false)
     expect(ruleMatches(base, { ...claims, event_name: 'push' })).toBe(true)
     expect(ruleMatches(base, { ...claims, event_name: 'workflow_dispatch' })).toBe(true)
+    expect(ruleMatches(base, { ...claims, event_name: 'schedule' })).toBe(true)
   })
 
   it('honours a pinned repository id, so a rename or transfer cannot inherit the grant', () => {
@@ -130,8 +133,11 @@ describe('POST /api/auth/github-oidc', () => {
     expect((await exchange({ token: await githubToken({ repository: 'acme/other' }), envId: w.envId })).status).toBe(403)
     // A pull_request ref is a different ref, so it does not inherit a branch rule.
     expect((await exchange({ token: await githubToken({ ref: 'refs/pull/7/merge', event_name: 'pull_request' }), envId: w.envId })).status).toBe(403)
-    // ATTACK: pull_request_target runs in the BASE repo context, so its ref IS the trusted branch. Still refused.
-    expect((await exchange({ token: await githubToken({ event_name: 'pull_request_target' }), envId: w.envId })).status).toBe(403)
+    // ATTACK: pull_request_target and issue_comment run in the BASE repo context, so their ref IS the trusted
+    // branch. Both are still refused, because only allow-listed events may mint.
+    for (const event_name of ['pull_request_target', 'issue_comment', 'workflow_run']) {
+      expect((await exchange({ token: await githubToken({ event_name }), envId: w.envId })).status).toBe(403)
+    }
   })
 
   it('ATTACK: a rule in one organisation cannot be used to read another organisation; cross-org env ids are refused', async () => {

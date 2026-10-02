@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CLOCK_SKEW_SECONDS, JWKS_REFETCH_COOLDOWN_SECONDS, verifyOidcToken } from '../src/lib/oidc-verify'
+import { CLOCK_SKEW_SECONDS, JWKS_REFETCH_BUDGET, verifyOidcToken } from '../src/lib/oidc-verify'
 import { createTestEnv, type TestEnv } from './helpers/env'
 
 const ISSUER = 'https://token.actions.githubusercontent.com'
@@ -111,24 +111,39 @@ describe('verifyOidcToken', () => {
     expect(await verify(future)).toEqual({ ok: false, code: 'EXPIRED' })
   })
 
-  it('handles key rotation: an unknown kid refetches once, then the cooldown stops a flood', async () => {
+  it('handles key rotation, and a junk-kid flood can never block a genuine rotation', async () => {
     const old = await makeKey('old')
     serveJwks([old.jwk])
     expect((await verify(await makeToken(old))).ok).toBe(true) // caches {old}
     const fresh = await makeKey('new')
     serveJwks([old.jwk, fresh.jwk])
     fetchCalls = []
-    expect((await verify(await makeToken(fresh))).ok).toBe(true) // refetched
+    expect((await verify(await makeToken(fresh))).ok).toBe(true) // refetched and found
     expect(fetchCalls).toHaveLength(1)
 
-    // A flood of junk kids costs one wasted fetch, then the cooldown answers from cache.
+    // Repeating ONE junk kid costs a single fetch: the miss is remembered.
     const junk = await makeKey('junk')
     for (let i = 0; i < 5; i += 1) expect(await verify(await makeToken(junk))).toEqual({ ok: false, code: 'UNKNOWN_KEY' })
     expect(fetchCalls).toHaveLength(2)
-    expect(JWKS_REFETCH_COOLDOWN_SECONDS).toBeGreaterThan(0)
-    // The cooldown does not break a real token: it is still served from the cached key set.
-    expect((await verify(await makeToken(fresh))).ok).toBe(true)
-    expect(fetchCalls).toHaveLength(2)
+  })
+
+  it('a flood of DISTINCT junk kids exhausts a budget and is reported as an outage, not as a bad token', async () => {
+    const first = await makeKey('k0')
+    serveJwks([first.jwk])
+    expect((await verify(await makeToken(first))).ok).toBe(true)
+
+    let throttled = 0
+    for (let i = 0; i < JWKS_REFETCH_BUDGET + 5; i += 1) {
+      const junk = await makeKey(`junk-${i}`)
+      const res = await verify(await makeToken(junk))
+      expect(res.ok).toBe(false)
+      if (!res.ok && res.code === 'KEY_LOOKUP_THROTTLED') throttled += 1
+    }
+    expect(throttled).toBeGreaterThan(0)
+    // Fetches are capped by the budget, not by the number of junk tokens.
+    expect(fetchCalls.length).toBeLessThanOrEqual(JWKS_REFETCH_BUDGET + 1)
+    // THE POINT: a real token whose key is already cached still verifies while the flood is going on.
+    expect((await verify(await makeToken(first))).ok).toBe(true)
   })
 
   it('reports an unavailable key set rather than accepting the token', async () => {

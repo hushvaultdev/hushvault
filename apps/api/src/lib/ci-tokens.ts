@@ -2,8 +2,9 @@
 //
 // Issued by the OIDC exchange, never by a password or an API key. A CI token carries no user and no role: it
 // names one organisation and one environment, and `requireAuth` lets it reach exactly one read endpoint. It is
-// signed with JWT_SECRET like a session token but carries `kind: 'ci-env'`, so the two can never be confused:
-// a session verifier rejects it (no role) and this verifier rejects a session token (no kind).
+// signed with JWT_SECRET like a session token but separated from one on BOTH sides and in two independent ways:
+// it carries `kind: 'ci-env'` (which verifyJwt rejects outright) and a different audience, so neither verifier can
+// ever be made to accept the other's token by adding a field.
 import { createBase64Url, decodeBase64Url, timingSafeEqual } from './auth'
 
 /** Long enough for a job step to fetch secrets, short enough that leaking a log line ages out fast. */
@@ -16,7 +17,7 @@ export type CiTokenPayload = {
   orgId: string
   envId: string
   iss: 'hushvault'
-  aud: 'hushvault-api'
+  aud: 'hushvault-ci'
   iat: number
   exp: number
 }
@@ -40,7 +41,7 @@ export async function signCiToken(
   const iat = Math.floor(now.getTime() / 1000)
   const payload: CiTokenPayload = {
     kind: 'ci-env', sub: input.ruleId, orgId: input.orgId, envId: input.envId,
-    iss: 'hushvault', aud: 'hushvault-api', iat, exp: iat + CI_TOKEN_TTL_SECONDS,
+    iss: 'hushvault', aud: 'hushvault-ci', iat, exp: iat + CI_TOKEN_TTL_SECONDS,
   }
   const body = `${createBase64Url(textEncoder.encode(JSON.stringify({ alg: 'HS256', typ: 'JWT' })))}.${createBase64Url(textEncoder.encode(JSON.stringify(payload)))}`
   return {
@@ -60,7 +61,7 @@ export async function verifyCiToken(token: string, secret: string, now: Date = n
     if (header.alg !== 'HS256' || header.typ !== 'JWT') return null
     if (!timingSafeEqual(await sign(secret, `${headerPart}.${payloadPart}`), signaturePart)) return null
     const payload = JSON.parse(textDecoder.decode(decodeBase64Url(payloadPart))) as CiTokenPayload
-    if (payload.kind !== 'ci-env' || payload.iss !== 'hushvault' || payload.aud !== 'hushvault-api') return null
+    if (payload.kind !== 'ci-env' || payload.iss !== 'hushvault' || payload.aud !== 'hushvault-ci') return null
     if (!payload.sub || !payload.orgId || !payload.envId) return null
     if (typeof payload.exp !== 'number' || payload.exp <= Math.floor(now.getTime() / 1000)) return null
     return payload

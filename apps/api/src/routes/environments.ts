@@ -105,8 +105,9 @@ environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
       actorId: auth.userId,
       actorType: auth.actorType,
       action: 'secret.read_bulk',
-      resourceType: 'environment',
-      resourceId: result.environmentId,
+      // A CI read is attributed to the rule that authorised it; a human read to the environment.
+      resourceType: auth.scope ? 'oidc_repo_rule' : 'environment',
+      resourceId: auth.scope ? auth.scope.ruleId : result.environmentId,
       ip: getRequestIp(c),
       userAgent: c.req.header('user-agent') ?? null,
     })

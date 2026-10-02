@@ -22,6 +22,8 @@ curl -X POST "$HUSHVAULT_API_URL/api/ci-access/github/rules" \
 - `repository` is `owner/name`, matched exactly (case-insensitively).
 - `repositoryId` is GitHub's immutable numeric id. **Set it.** Without it, renaming or transferring the repository away
   leaves the rule matching whoever takes the old name.
+- Adding a rule that differs only by `repositoryId` is rejected as a conflict **and the unpinned rule stays live**.
+  To pin an existing rule, delete it first, then create the pinned one.
 - Exactly one of `ref` (e.g. `refs/heads/main`) or `environment` (a GitHub environment name). Both are matched exactly,
   so a rule for `refs/heads/main` does not cover `refs/heads/main-hotfix`, a tag, or a pull request.
 
@@ -56,6 +58,11 @@ jobs:
 The action masks every value before it can reach the log, writes values only to `$GITHUB_ENV`, and outputs the secret
 **names** only. It has no third-party dependencies.
 
+**It refuses to export a name that would change how the job runs** — `PATH`, `LD_PRELOAD`, `NODE_OPTIONS`, `GITHUB_*`,
+`RUNNER_*` and similar. Writing those into `$GITHUB_ENV` is arbitrary code execution on the runner, and creating a
+secret only needs the `member` role, well below the admin who grants CI access. If you hit this, rename the secret or
+set `prefix`. The run fails loudly rather than skipping the variable silently.
+
 ## What the API does
 
 `POST /api/auth/github-oidc` with `{ token, envId }` (unauthenticated — the signed GitHub token is the credential):
@@ -63,11 +70,13 @@ The action masks every value before it can reach the log, writes values only to 
 1. Verifies RS256 against GitHub's published keys (cached one hour; an unknown key id triggers at most one refetch per
    minute, so junk tokens cannot become an outbound flood).
 2. Checks the issuer, the audience and the time window (60 s clock skew) **before** reading any claim for authorisation.
-3. Finds a rule for `envId` whose claims match exactly.
+3. Finds a rule for `envId` whose claims match exactly, and whose event is allow-listed.
 4. Returns a 10-minute token scoped to that one environment and audits `auth.oidc.exchange` as the `system` actor.
 
 Every verification failure returns the same opaque `401 OIDC_REJECTED`, so a forger learns nothing about which part was
-wrong; the reason is logged (never the token). A key-server outage is `503`, not `401`. No rule is `403 NOT_ALLOWED`.
+wrong; the reason is logged (never the token). A key-server outage — or a flood of unknown key ids exhausting the
+refetch budget — is `503`, not `401`, so an outage is never mistaken for a bad token. No rule is `403 NOT_ALLOWED`,
+logged with the repository, ref and environment so an operator can tell a typo from a probe.
 
 The issued token reaches exactly one endpoint — `GET /api/environments/<its own env>/resolved` — enforced in the auth
 middleware as an allowlist, so any other route is refused by default.
@@ -83,6 +92,13 @@ middleware as an allowlist, so any other route is refused by default.
 ## Limits and caveats
 
 - Read-only, one environment per token, ten minutes.
+- **Inherited secrets are included.** Reading an environment resolves branch inheritance, so a token for `staging`
+  also returns everything `staging` inherits from its parent. Grant the narrowest environment, not a leaf of a deep
+  chain, if that matters to you.
+- Deleting a rule revokes the tokens it already issued, so it is a real kill switch rather than a ten-minute wait.
+- Only these events may mint a token: `push`, `workflow_dispatch`, `schedule`, `release`, `merge_group`,
+  `deployment`, `deployment_status`. Anything else — including `issue_comment`, `workflow_run` and the pull-request
+  triggers — is refused, because those run in the base repository's context with a trusted-looking ref.
 - A rule grants a *branch or GitHub environment*, not a repository as a whole. There is no wildcard, by design.
 - Pull requests are refused by event name (above), so neither a fork PR nor `pull_request_target` can mint a token.
   **Not verified in a live run.**
