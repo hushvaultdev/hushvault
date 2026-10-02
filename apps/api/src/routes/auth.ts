@@ -4,6 +4,9 @@ import type { Context } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { z } from 'zod'
 import type { Env } from '../index'
+import { githubOidcConfig, ruleMatches, type GitHubOidcClaims } from '../integrations/github-oidc'
+import { verifyOidcToken } from '../lib/oidc-verify'
+import { signCiToken } from '../lib/ci-tokens'
 import { createApiKey, createPrefixedId, hashPassword, timingSafeEqual, verifyPassword } from '../lib/auth'
 import type { OAuthIdentity } from '../lib/oauth'
 import {
@@ -30,6 +33,7 @@ import {
   forgotPasswordRateLimit,
   loginRateLimit,
   oauthRateLimit,
+  oidcExchangeRateLimit,
   refreshRateLimit,
   registerRateLimit,
   requireAuth,
@@ -767,8 +771,60 @@ authRoutes.get('/google/callback', oauthRateLimit, async (c) => {
   return completeOAuthLogin(c, 'google', { ...identity, email: identity.email })
 })
 
-// POST /api/auth/github-oidc — exchange GitHub Actions OIDC token (CI/CD). Separate
-// from the web sign-in flow above; still pending.
-authRoutes.post('/github-oidc', async (c) => {
-  return c.json({ error: 'NOT_IMPLEMENTED', message: 'GitHub OIDC exchange is not yet implemented' }, 501)
+// POST /api/auth/github-oidc — exchange a GitHub Actions OIDC token for a short-lived, read-only token scoped to
+// one environment (issue #43). Unauthenticated by design: the signed token from GitHub IS the credential, so no
+// HushVault secret ever lives in a workflow. Nothing in the token is trusted until its signature verifies, and
+// authorisation then needs an explicit rule created by an admin.
+const githubOidcSchema = z.object({
+  token: z.string().min(40).max(8192),
+  envId: z.string().min(1).max(64),
+}).strict()
+
+authRoutes.post('/github-oidc', oidcExchangeRateLimit, zValidator('json', githubOidcSchema, (result, c) => {
+  if (!result.success) return c.json({ error: 'VALIDATION_ERROR', message: 'Invalid request' }, 400)
+  return undefined
+}), async (c) => {
+  const { token, envId } = c.req.valid('json')
+  const config = githubOidcConfig(c.env)
+
+  const verified = await verifyOidcToken<GitHubOidcClaims>(c.env, token, config)
+  if (!verified.ok) {
+    // One opaque response for every verification failure: a forger learns nothing about which part was wrong.
+    // The code is logged (never the token) so an operator can tell a misconfiguration from an attack.
+    console.error(JSON.stringify({ level: 'warn', event: 'auth.oidc.rejected', code: verified.code }))
+    const status = verified.code === 'JWKS_UNAVAILABLE' ? 503 : 401
+    return c.json({ error: 'OIDC_REJECTED', message: 'The OIDC token was not accepted' }, status)
+  }
+
+  const claims = verified.claims
+  const repository = typeof claims.repository === 'string' ? claims.repository.toLowerCase() : ''
+  const rows = repository
+    ? await c.env.DB.prepare(
+        'SELECT id, org_id, env_id, repository, repository_id, ref, environment FROM oidc_repo_rules WHERE env_id = ? AND repository = ? LIMIT 50',
+      ).bind(envId, repository).all<{ id: string; org_id: string; env_id: string; repository: string; repository_id: string | null; ref: string | null; environment: string | null }>()
+    : { results: [] }
+
+  const rule = (rows.results ?? [])
+    .map((r) => ({ id: r.id, orgId: r.org_id, envId: r.env_id, repository: r.repository, repositoryId: r.repository_id, ref: r.ref, environment: r.environment }))
+    .find((r) => ruleMatches(r, claims))
+
+  if (!rule) {
+    console.error(JSON.stringify({ level: 'warn', event: 'auth.oidc.no_rule' }))
+    return c.json({ error: 'NOT_ALLOWED', message: 'No rule grants this workflow access to that environment' }, 403)
+  }
+
+  const issued = await signCiToken({ ruleId: rule.id, orgId: rule.orgId, envId: rule.envId }, c.env.JWT_SECRET)
+  await c.env.DB.prepare('UPDATE oidc_repo_rules SET last_used_at = ? WHERE id = ?').bind(new Date().toISOString(), rule.id).run()
+  await writeAuditLog(c.env, {
+    orgId: rule.orgId,
+    actorId: null,
+    actorType: 'system',
+    action: 'auth.oidc.exchange',
+    resourceType: 'oidc_repo_rule',
+    resourceId: rule.id,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+
+  return c.json({ data: { token: issued.token, expiresIn: issued.expiresIn, expiresAt: issued.expiresAt, envId: rule.envId, orgId: rule.orgId } })
 })

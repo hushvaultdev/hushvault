@@ -181,6 +181,15 @@ export const requireCurrentAdmin: MiddlewareHandler<{ Bindings: Env }> = async (
   return next()
 }
 
+// The OIDC exchange is unauthenticated by design (the signed GitHub token is the credential): cap it per IP and
+// fail closed, because each call can cost a JWKS fetch and a signature verification.
+export const oidcExchangeRateLimit = createRateLimitMiddleware({
+  scope: 'auth-oidc',
+  limit: 30,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
 export const loginRateLimit = createRateLimitMiddleware({
   scope: 'auth-login',
   limit: 10,
