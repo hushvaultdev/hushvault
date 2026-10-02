@@ -53,12 +53,13 @@ describe('appendFileCommand', () => {
 })
 
 describe('main', () => {
-  function setup(opts: { exchangeStatus?: number; readStatus?: number; secrets?: unknown[] } = {}) {
+  function setup(opts: { exchangeStatus?: number; readStatus?: number; secrets?: unknown[]; prefix?: string } = {}) {
     process.env['INPUT_API-URL'] = 'https://api.test'
     process.env['INPUT_ENVIRONMENT-ID'] = 'env_1'
     process.env['INPUT_AUDIENCE'] = 'https://api.test'
     process.env['ACTIONS_ID_TOKEN_REQUEST_URL'] = 'https://ghtoken.test/req?x=1'
     process.env['ACTIONS_ID_TOKEN_REQUEST_TOKEN'] = 'gh-request-token'
+    process.env['INPUT_PREFIX'] = opts.prefix ?? 'APP_'
     process.env['GITHUB_ENV'] = join(dir, 'github_env')
     process.env['GITHUB_OUTPUT'] = join(dir, 'github_output')
     writeFileSync(process.env['GITHUB_ENV'], '')
@@ -95,7 +96,7 @@ describe('main', () => {
     expect(printed).toContain('Loaded 2 secrets from HushVault.')
 
     const env = readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')
-    expect(env).toContain('DB_URL<<HV_')
+    expect(env).toContain('APP_DB_URL<<HV_')
     expect(env).toContain(SECRET)
     // The output carries names only.
     const output = readFileSync(process.env['GITHUB_OUTPUT'] as string, 'utf8')
@@ -127,7 +128,7 @@ describe('main', () => {
   })
 
   it('with an explicit names list, only those are exported and the backstop list does not block the author', async () => {
-    setup({ secrets: [{ name: 'DB_URL', value: 'a' }, { name: 'API_KEY', value: 'b' }, { name: 'LD_PRELOAD', value: '/tmp/evil.so' }] })
+    setup({ secrets: [{ name: 'DB_URL', value: 'a' }, { name: 'API_KEY', value: 'b' }, { name: 'LD_PRELOAD', value: '/tmp/evil.so' }], prefix: '' })
     process.env['INPUT_NAMES'] = 'DB_URL, LD_PRELOAD'
     await action.main()
     const env = readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')
@@ -135,36 +136,54 @@ describe('main', () => {
     expect(env).toContain('LD_PRELOAD<<HV_') // the workflow author asked for it explicitly
     expect(env).not.toContain('API_KEY')
     expect(readFileSync(process.env['GITHUB_OUTPUT'] as string, 'utf8')).toBe('names=["DB_URL","API_KEY","LD_PRELOAD"]\n')
+    expect(env).toContain('LD_PRELOAD<<HV_')
   })
 
   it('fails when a requested name is not in the environment, rather than exporting nothing quietly', async () => {
-    setup({ secrets: [{ name: 'DB_URL', value: 'a' }] })
+    setup({ secrets: [{ name: 'DB_URL', value: 'a' }], prefix: '' })
     process.env['INPUT_NAMES'] = 'DB_URL MISSING_ONE'
     await expect(action.main()).rejects.toThrow('exit')
     expect(out.join('')).toContain('Not found in that environment: MISSING_ONE')
   })
 
-  it('warns when exporting under raw names with no prefix and no list', async () => {
-    setup({ secrets: [{ name: 'DB_URL', value: 'a' }] })
+  it('a prefix neutralises every dangerous name, including the ones a denylist missed', async () => {
+    // CC, MAKE, MAKEFLAGS and CDPATH were all proven to give code execution; under a prefix none of them is the
+    // variable the toolchain reads, which is why the prefix — not the list — is the control.
+    setup({ secrets: [{ name: 'CC', value: 'x' }, { name: 'MAKE', value: 'x' }, { name: 'MAKEFLAGS', value: 'x' }, { name: 'CDPATH', value: 'x' }, { name: 'STATE_isPost', value: 'x' }] })
     await action.main()
-    expect(out.join('')).toContain('::warning::Exporting secrets under their own names')
+    const env = readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')
+    for (const name of ['CC', 'MAKE', 'MAKEFLAGS', 'CDPATH', 'STATE_isPost']) {
+      expect(env).toContain(`APP_${name}<<HV_`)
+      expect(env).not.toMatch(new RegExp(`^${name}<<`, 'm'))
+    }
   })
 
-  it('ATTACK: refuses to export a secret whose name would change how the job runs', async () => {
-    // Creating a secret needs only the `member` role, so a name like LD_PRELOAD must never reach $GITHUB_ENV:
-    // that is arbitrary code execution in the job, with its GITHUB_TOKEN and any cloud credentials.
-    setup({ secrets: [{ name: 'LD_PRELOAD', value: '/tmp/evil.so' }, { name: 'DB_URL', value: 'ok' }] })
+  it('a prefix makes an otherwise unsafe name exportable, but a dangerous prefix is still caught', async () => {
+    setup({ secrets: [{ name: 'PATH', value: '/tmp/evil' }] })
+    await action.main()
+    expect(readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')).toMatch(/^APP_PATH<<HV_/)
+
+    setup({ secrets: [{ name: 'PRELOAD', value: '/tmp/evil.so' }], prefix: 'LD_' })
+    await expect(action.main()).rejects.toThrow('exit')
+    expect(out.join('')).toContain('Refusing to export LD_PRELOAD')
+  })
+
+  it('ATTACK: refuses to run at all when neither prefix nor names is set', async () => {
+    // Otherwise a `member` picks the variable names, and CC / MAKE / CDPATH / LD_PRELOAD are code execution.
+    setup({ secrets: [{ name: 'CC', value: 'touch /tmp/pwned; true' }], prefix: '' })
     await expect(action.main()).rejects.toThrow('exit')
     expect(exited).toBe(1)
-    expect(out.join('')).toContain('Refusing to export LD_PRELOAD')
+    expect(out.join('')).toContain('Set "prefix"')
     expect(readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')).toBe('')
   })
 
-  it('a prefix makes an otherwise unsafe name exportable', async () => {
-    setup({ secrets: [{ name: 'PATH', value: '/tmp/evil' }] })
-    process.env['INPUT_PREFIX'] = 'APP_'
+  it('names alone is enough, and the names a denylist would have missed are the author\'s own choice', async () => {
+    setup({ secrets: [{ name: 'CC', value: 'cc' }, { name: 'DB_URL', value: 'x' }], prefix: '' })
+    process.env['INPUT_NAMES'] = 'DB_URL'
     await action.main()
-    expect(readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')).toMatch(/^APP_PATH<<HV_/)
+    const env = readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')
+    expect(env).toContain('DB_URL<<HV_')
+    expect(env).not.toContain('CC<<')
   })
 
   it('refuses to send a token to a host the audience was not minted for', async () => {

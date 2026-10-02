@@ -17,7 +17,9 @@ inputs:
     required: false
     default: https://api.hushvault.dev
   export-env:
-    description: Export each secret as an environment variable for later steps.
+    description: >-
+      Export each secret as an environment variable for later steps. Requires either "prefix" or "names", so that you
+      decide which variables this job gets rather than whoever can add a secret to the environment.
     required: false
     default: 'true'
   prefix:

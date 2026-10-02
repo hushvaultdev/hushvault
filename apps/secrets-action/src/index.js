@@ -18,14 +18,15 @@ const fs = require('node:fs')
 const NAME_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
- * Names known to change how a later step executes — loaders, lookup paths, interpreter and build-tool flags,
- * package sources, proxies — or to impersonate the runner's own credentials.
+ * Names known to change how a later step executes. This is NOT the security boundary and was never able to be one:
+ * two independent reviews enumerated bypasses (first case variants and `_JAVA_OPTIONS`/`npm_config_*`, then `CC`,
+ * `MAKE`, `MAKEFLAGS`, `CDPATH`, `STATE_*` and ~140 more), because "variables that change how a process runs" is an
+ * open-ended set that every compiler, runtime and build tool extends. Chasing it with a list is a losing game.
  *
- * This list is a BACKSTOP, not the security boundary. "Variables that change how a process runs" is an open-ended
- * set (every language runtime and build tool adds its own), and a list can only ever chase it. The actual boundary
- * is `prefix` or `names`: both put the workflow author — who already controls what the job runs — in charge of which
- * variables appear, instead of whoever can add a secret. Matching is case-insensitive because runner environments
- * on Windows are, and because `path` is read by plenty of tooling on Linux too.
+ * The boundary is instead that `export-env` REQUIRES `prefix` or `names` (see main()), so the workflow author — who
+ * already controls what the job runs — decides which variables appear, rather than whoever can add a secret. This
+ * list now only catches a prefix that is itself dangerous (`prefix: LD_` + a secret named `PRELOAD`). Matching is
+ * case-insensitive because Windows runner environments are, and `path` is read by plenty of Linux tooling too.
  */
 const UNSAFE_NAMES = /^(PATH|HOME|IFS|CI|SHELL|SHELLOPTS|BASH_ENV|ENV|PS4|PROMPT_COMMAND|EDITOR|VISUAL|PAGER|MANPAGER|LESSOPEN|TERMINFO|TMPDIR|LD_.*|DYLD_.*|GIT_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|INPUT_.*|NODE_.*|NPM_.*|npm_config_.*|YARN_.*|PNPM_.*|PYTHON.*|PIP_.*|VIRTUAL_ENV|CONDA_.*|RUBY.*|GEM_.*|BUNDLE_.*|PERL.*|JAVA_.*|_JAVA_.*|JDK_.*|JRE_.*|CLASSPATH|GRADLE_.*|MAVEN_.*|SBT_.*|GO(FLAGS|PATH|ROOT|PROXY|PRIVATE|BIN|CACHE|MODCACHE|TOOLCHAIN|ENV|INSECURE|SUMDB|NOSUMDB|NOPROXY|DEBUG)|CGO_.*|RUSTFLAGS|RUSTC.*|RUSTUP_.*|CARGO_.*|DOTNET_.*|NUGET_.*|COMPLUS_.*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|SSL_CERT_.*|CURL_.*|REQUESTS_CA_BUNDLE|AWS_.*|AZURE_.*|GOOGLE_.*|GCLOUD_.*|CLOUDSDK_.*|DOCKER_.*|KUBE.*|LD|PRELOAD)$/i
 
@@ -102,6 +103,12 @@ async function main() {
   for (const name of only) {
     if (!NAME_SHAPE.test(name)) fail(`"names" contains an invalid secret name: ${name}`)
   }
+  // Without one of these, whoever can add a secret to the environment chooses a variable name this job will read —
+  // and names like CC, MAKE, CDPATH or LD_PRELOAD turn that into code execution on the runner. Adding a secret needs
+  // only the `member` role, far below the admin who granted this repository access, so the decision belongs here.
+  if (exportEnv && !prefix && only.length === 0) {
+    fail('Set "prefix" (e.g. prefix: APP_) or "names" (e.g. names: DB_URL API_KEY) so that you, not whoever can add a secret, decide which environment variables this job gets. Use export-env: false to skip exporting entirely.')
+  }
   if (!environmentId) fail('environment-id is required.')
   if (!/^https:\/\//.test(apiUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiUrl)) {
     fail('api-url must use https.')
@@ -151,16 +158,12 @@ async function main() {
     const missing = only.filter((name) => !names.includes(name))
     if (missing.length > 0) fail(`Not found in that environment: ${missing.join(', ')}`)
 
-    // With `names`, the workflow author chose exactly what enters the environment, so the backstop list does not
-    // apply — they already control what the job runs. Without it, the list is all that stands between someone who
-    // can add a secret and the job's execution, so a hit is a hard failure, not a silent skip.
+    // With `names` the author named every variable, so nothing more to check. With `prefix` they chose the namespace
+    // but not the names inside it, so a prefix that is itself dangerous is still caught.
     if (only.length === 0) {
       const unsafe = selected.filter((name) => !exportableName(`${prefix}${name}`))
       if (unsafe.length > 0) {
-        fail(`Refusing to export ${unsafe.join(', ')}: that name could change how this job runs. Set the action's "prefix" input, list the secrets you want in "names", or rename the secret in HushVault.`)
-      }
-      if (!prefix) {
-        process.stdout.write('::warning::Exporting secrets under their own names. Anyone who can add a secret to this environment can then set a variable this job reads. Set "prefix" or "names" to decide that yourself.\n')
+        fail(`Refusing to export ${unsafe.map((n) => `${prefix}${n}`).join(', ')}: that name could change how this job runs. Choose a different "prefix", or list the secrets you want in "names".`)
       }
     }
     for (const secret of read.body.data.secrets) {

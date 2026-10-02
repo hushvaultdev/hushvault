@@ -58,26 +58,29 @@ jobs:
 The action masks every value before it can reach the log, writes values only to `$GITHUB_ENV`, and outputs the secret
 **names** only. It has no third-party dependencies.
 
-### Choose which variables the job gets
+### You choose which variables the job gets (required)
 
-Writing a variable like `PATH`, `LD_PRELOAD`, `NODE_OPTIONS` or `npm_config_script_shell` into `$GITHUB_ENV` is
-arbitrary code execution on the runner. Creating a secret only needs the `member` role — well below the admin who
-grants CI access — so by default **whoever can add a secret could choose a variable your job reads.**
-
-Two ways to take that decision back, both recommended over the default:
+`export-env` needs either `prefix` or `names`:
 
 ```yaml
 with:
-  prefix: APP_          # every secret becomes APP_<NAME>; nothing can collide with a runtime variable
+  environment-id: env_...
+  prefix: APP_          # every secret becomes APP_<NAME>
 # or
-  names: DB_URL API_KEY # only these are exported; the run fails if one is missing
+  names: DB_URL API_KEY # only these, and the run fails if one is missing
 ```
 
-Without either, the action refuses names it recognises as dangerous (case-insensitively, including the `LD_*`,
-`NODE_*`, `npm_config_*`, `JAVA_*`, `GO*`, `*_PROXY`, `GITHUB_*` and `RUNNER_*` families) and prints a warning. Treat
-that list as a backstop, not a guarantee: "variables that change how a process runs" is an open-ended set, and every
-runtime adds its own. `prefix` and `names` are the actual boundary, because they put the workflow author — who
-already controls what the job runs — in charge.
+This is a hard requirement, not a recommendation. Writing a variable like `PATH`, `LD_PRELOAD`, `CC`, `MAKE`,
+`CDPATH` or `npm_config_script_shell` into `$GITHUB_ENV` is arbitrary code execution on the runner, and creating a
+secret needs only the `member` role — far below the admin who granted the repository access. Without a prefix or an
+explicit list, **whoever can add a secret would be choosing variable names your job reads.**
+
+Two reviews tried to solve this with a list of dangerous names instead; both enumerated bypasses (the second found
+~145, including `CC`, `MAKE`, `MAKEFLAGS` and `CDPATH` with working proofs). "Variables that change how a process
+runs" is an open-ended set that every compiler and runtime extends, so the list is kept only to catch a prefix that
+is itself dangerous (`prefix: LD_` with a secret named `PRELOAD`). The control is that you pick the names.
+
+Use `export-env: false` if you only want the `names` output and will read values yourself.
 
 ## What the API does
 

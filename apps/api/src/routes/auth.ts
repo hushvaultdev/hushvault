@@ -787,8 +787,10 @@ authRoutes.post('/github-oidc', oidcExchangeRateLimit, zValidator('json', github
   const { token, envId } = c.req.valid('json')
   const config = githubOidcConfig(c.env)
 
-  // The caller's address scopes the key-refetch budget, so a prober cannot starve everyone else's rotations.
-  const verified = await verifyOidcToken<GitHubOidcClaims>(c.env, token, { ...config, callerKey: getRequestIp(c) ?? 'unknown' })
+  // The caller's address scopes the key-refetch budget, so a prober cannot starve everyone else's rotations. Only
+  // cf-connecting-ip is trusted here (as in the rate limiter): x-forwarded-for is client-controlled, so accepting it
+  // would let one caller mint itself an unlimited number of buckets.
+  const verified = await verifyOidcToken<GitHubOidcClaims>(c.env, token, { ...config, callerKey: c.req.header('cf-connecting-ip') ?? 'unknown' })
   if (!verified.ok) {
     // One opaque response for every verification failure: a forger learns nothing about which part was wrong.
     // The code is logged (never the token) so an operator can tell a misconfiguration from an attack.

@@ -153,6 +153,21 @@ describe('verifyOidcToken', () => {
     expect(JWKS_REFETCH_BUDGET_GLOBAL).toBeGreaterThan(JWKS_REFETCH_BUDGET_PER_CALLER)
   })
 
+  it('CONCURRENT junk kids are capped too (a sequential test would pass even without an atomic counter)', async () => {
+    const good = await makeKey('cached')
+    serveJwks([good.jwk])
+    const caller = { ...expectation, callerKey: '203.0.113.77' }
+    expect((await verifyOidcToken(env as never, await makeToken(good), caller)).ok).toBe(true)
+    fetchCalls = []
+
+    const tokens = await Promise.all(Array.from({ length: 40 }, async (_, i) => makeToken(await makeKey(`burst-${i}`))))
+    const results = await Promise.all(tokens.map((token) => verifyOidcToken(env as never, token, caller)))
+    expect(results.every((r) => !r.ok)).toBe(true)
+    // The budget is spent through the shared limiter, so parallel arrival cannot each read "0 used".
+    expect(fetchCalls.length).toBeLessThanOrEqual(JWKS_REFETCH_BUDGET_PER_CALLER)
+    expect((await verifyOidcToken(env as never, await makeToken(good), caller)).ok).toBe(true)
+  })
+
   it('reports an unavailable key set rather than accepting the token', async () => {
     const key = await makeKey('k1')
     serveJwks([], { status: 500 })

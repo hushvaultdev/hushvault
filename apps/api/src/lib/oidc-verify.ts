@@ -172,7 +172,10 @@ async function importRsa(jwk: Jwk): Promise<CryptoKey | null> {
 export type OidcExpectation = {
   issuer: string
   jwksUrl: string
-  /** Identifies the caller for the refetch budget (the request IP). Falls back to a shared bucket when absent. */
+  /**
+   * Identifies the caller for the refetch budget. Must come from a header the client cannot set (cf-connecting-ip),
+   * never x-forwarded-for: otherwise a caller picks its own bucket and the per-caller cap means nothing.
+   */
   callerKey?: string
   /** The token's `aud` must equal this exactly (string form) or contain it (array form). */
   audience: string
