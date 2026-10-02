@@ -30,7 +30,7 @@ export default function FAQPage() {
           <h2>How do I use it?</h2>
           <p>
             Install the CLI, login, initialize a project, then add secrets with `hushvault set`.
-            Use `hushvault run` to inject secrets into any command. A GitHub Actions integration is planned but not available yet.
+            Use `hushvault run` to inject secrets into any command. Integrations are planned but not available yet.
           </p>
           <Link className={styles['link']} href="/docs">Read the docs for setup examples.</Link>
         </article>

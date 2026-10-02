@@ -1,3 +1,5 @@
+import { plannedNamesPhrase } from '@hushvault/shared/integrations'
+
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -14,7 +16,7 @@ const workflowSteps = [
   },
   {
     title: 'Inject secrets where you run',
-    body: 'Inject secrets into any command with the CLI today. Cloudflare Pages and GitHub Actions sync are planned and not available yet.',
+    body: `Inject secrets into any command with the CLI today. ${plannedNamesPhrase()} integrations are planned and not available yet.`,
   },
   {
     title: 'Grow into governance',
@@ -32,7 +34,7 @@ const trustPoints = [
 const comparison = [
   { label: 'Computed secrets', hushvault: 'Server-side ${NAME} templates, included', others: 'Varies by vendor' },
   { label: 'Branch inheritance', hushvault: 'Built into the core workflow', others: 'Varies by vendor' },
-  { label: 'Cloudflare-native runtime', hushvault: 'Workers, D1, and KV; self-host for $0 (Pages sync planned)', others: 'Varies by vendor' },
+  { label: 'Cloudflare-native runtime', hushvault: 'Workers, D1, and KV; self-host for $0', others: 'Varies by vendor' },
 ]
 
 export default function HomePage() {

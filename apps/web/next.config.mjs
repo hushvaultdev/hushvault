@@ -31,6 +31,8 @@ const csp = [
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // @hushvault/shared/integrations is consumed as TypeScript source (no build step needed for web verify).
+  transpilePackages: ['@hushvault/shared'],
   async headers() {
     return [
       {

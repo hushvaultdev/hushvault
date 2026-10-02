@@ -21,17 +21,18 @@
 - GitHub and Google OAuth sign-in
 - One-time share links (API only; there is no web page for opening a link yet)
 - GitHub secret-scanning callback (revokes leaked HushVault API keys)
+- Email verification and password reset (on the dev deployment; production rollout pending)
+- Short-lived sessions with rotating refresh tokens, and ciphertext bound to its record (AAD)
 - CLI: `login`, `init`, `set`, `get`, `run`, `share`
 - Web dashboard: sign-in, projects, secrets, audit log
 
 **Planned, not built**
 
-- Cloudflare Pages sync and other integrations (GitHub Actions sync and action, Slack, webhooks)
+- Integrations, all planned: Cloudflare Workers secrets push, GitHub Actions, Cloudflare Pages, Slack, webhooks (status in `packages/shared/src/integrations.ts`)
 - Stripe billing, hosted paid plans, and plan-limit enforcement
 - SSO/SAML
 - Team invites and member management
-- Password reset and email verification flows
-- Secret rotation and automated master-key rotation tooling
+- Rotation of secret values and compromise-response re-encryption (master-key rotation exists; see docs/ENCRYPTION.md)
 - Public web page for opening share links
 - Compliance attestations (e.g. SOC 2). None are held today.
 
