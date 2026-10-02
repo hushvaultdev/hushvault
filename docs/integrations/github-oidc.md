@@ -58,10 +58,26 @@ jobs:
 The action masks every value before it can reach the log, writes values only to `$GITHUB_ENV`, and outputs the secret
 **names** only. It has no third-party dependencies.
 
-**It refuses to export a name that would change how the job runs** — `PATH`, `LD_PRELOAD`, `NODE_OPTIONS`, `GITHUB_*`,
-`RUNNER_*` and similar. Writing those into `$GITHUB_ENV` is arbitrary code execution on the runner, and creating a
-secret only needs the `member` role, well below the admin who grants CI access. If you hit this, rename the secret or
-set `prefix`. The run fails loudly rather than skipping the variable silently.
+### Choose which variables the job gets
+
+Writing a variable like `PATH`, `LD_PRELOAD`, `NODE_OPTIONS` or `npm_config_script_shell` into `$GITHUB_ENV` is
+arbitrary code execution on the runner. Creating a secret only needs the `member` role — well below the admin who
+grants CI access — so by default **whoever can add a secret could choose a variable your job reads.**
+
+Two ways to take that decision back, both recommended over the default:
+
+```yaml
+with:
+  prefix: APP_          # every secret becomes APP_<NAME>; nothing can collide with a runtime variable
+# or
+  names: DB_URL API_KEY # only these are exported; the run fails if one is missing
+```
+
+Without either, the action refuses names it recognises as dangerous (case-insensitively, including the `LD_*`,
+`NODE_*`, `npm_config_*`, `JAVA_*`, `GO*`, `*_PROXY`, `GITHUB_*` and `RUNNER_*` families) and prints a warning. Treat
+that list as a backstop, not a guarantee: "variables that change how a process runs" is an open-ended set, and every
+runtime adds its own. `prefix` and `names` are the actual boundary, because they put the workflow author — who
+already controls what the job runs — in charge.
 
 ## What the API does
 

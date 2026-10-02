@@ -21,7 +21,15 @@ inputs:
     required: false
     default: 'true'
   prefix:
-    description: Optional prefix applied to exported variable names.
+    description: >-
+      Prefix applied to exported variable names. Recommended: it puts you, not whoever can add a secret, in control
+      of which variables this job ends up reading.
+    required: false
+    default: ''
+  names:
+    description: >-
+      Optional whitespace/comma-separated list of secret names to export. When set, only these are exported and the
+      run fails if one is missing — the strongest option, because you choose exactly what enters the environment.
     required: false
     default: ''
 outputs:

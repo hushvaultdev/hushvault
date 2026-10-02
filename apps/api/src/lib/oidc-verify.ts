@@ -8,12 +8,15 @@
 // request in the common case. An unknown `kid` triggers at most one refetch, with a cooldown, so a flood of junk
 // tokens cannot turn into a flood of outbound requests.
 import type { Env } from '../index'
+import { consumeIdentityLimit } from '../middleware/rate-limit'
 
 export const JWKS_CACHE_TTL_SECONDS = 3600
 /** Window for the refetch budget, and for remembering a key id that was already looked up and missed. */
 export const JWKS_REFETCH_WINDOW_SECONDS = 60
-/** Refetches allowed per window: well above the one a genuine rotation needs, far below a flood. */
-export const JWKS_REFETCH_BUDGET = 10
+/** Refetches one caller may trigger per window. A rotation needs one; a prober burns only its own budget. */
+export const JWKS_REFETCH_BUDGET_PER_CALLER = 3
+/** Refetches across all callers per window. Bounds outbound amplification when many addresses probe at once. */
+export const JWKS_REFETCH_BUDGET_GLOBAL = 60
 export const JWKS_FETCH_TIMEOUT_MS = 5000
 export const MAX_JWKS_BYTES = 64 * 1024
 /** Tokens are short-lived; allow a little clock drift in both directions. */
@@ -118,18 +121,24 @@ async function rememberMiss(env: Env, jwksUrl: string, kid: string): Promise<voi
   }
 }
 
-/** Consume one refetch from this window's budget. False when the budget is spent. */
-async function spendRefetch(env: Env, jwksUrl: string): Promise<boolean> {
-  const key = `${cacheKey(jwksUrl)}:refetches`
-  try {
-    const spent = Number.parseInt((await env.SECRETS_KV.get(key)) ?? '0', 10)
-    const used = Number.isFinite(spent) ? spent : 0
-    if (used >= JWKS_REFETCH_BUDGET) return false
-    await env.SECRETS_KV.put(key, String(used + 1), { expirationTtl: JWKS_REFETCH_WINDOW_SECONDS })
-    return true
-  } catch {
-    return true // without KV the request itself is still rate limited
-  }
+/**
+ * Consume one refetch from the budget. Two counters, both through the Durable Object limiter rather than a KV
+ * read-modify-write: KV is not atomic, so concurrent requests would each read the same count and every one of them
+ * would fetch — the cap would exist only for serialized traffic.
+ *   - per caller, so someone probing with junk key ids exhausts their own budget and nobody else's;
+ *   - global, so many addresses probing at once still cannot amplify into unbounded outbound requests.
+ */
+async function spendRefetch(env: Env, jwksUrl: string, callerKey: string): Promise<boolean> {
+  const windowMs = JWKS_REFETCH_WINDOW_SECONDS * 1000
+  const caller = await consumeIdentityLimit(env, {
+    scope: 'jwks-refetch-caller', identity: `${jwksUrl}|${callerKey}`, limit: JWKS_REFETCH_BUDGET_PER_CALLER, windowMs,
+  })
+  if ('allowed' in caller && !caller.allowed) return false
+  const global = await consumeIdentityLimit(env, {
+    scope: 'jwks-refetch', identity: jwksUrl, limit: JWKS_REFETCH_BUDGET_GLOBAL, windowMs,
+  })
+  // An unavailable limiter must not stop a key rotation being picked up; the endpoint is rate limited anyway.
+  return !('allowed' in global) || global.allowed
 }
 
 function findKey(jwks: Jwks | null, kid: string): Jwk | null {
@@ -163,6 +172,8 @@ async function importRsa(jwk: Jwk): Promise<CryptoKey | null> {
 export type OidcExpectation = {
   issuer: string
   jwksUrl: string
+  /** Identifies the caller for the refetch budget (the request IP). Falls back to a shared bucket when absent. */
+  callerKey?: string
   /** The token's `aud` must equal this exactly (string form) or contain it (array form). */
   audience: string
 }
@@ -203,7 +214,7 @@ export async function verifyOidcToken<C extends { iss?: string; aud?: string | s
     // Unknown key: either the cache is cold or GitHub rotated. Refetch at most once per cooldown.
     // Already looked this key id up and missed it recently: answer from memory, spend no budget.
     if (await kidRecentlyMissed(env, expect.jwksUrl, header.kid)) return { ok: false, code: 'UNKNOWN_KEY' }
-    if (!(await spendRefetch(env, expect.jwksUrl))) return { ok: false, code: 'KEY_LOOKUP_THROTTLED' }
+    if (!(await spendRefetch(env, expect.jwksUrl, expect.callerKey ?? 'unknown'))) return { ok: false, code: 'KEY_LOOKUP_THROTTLED' }
     jwks = await fetchJwks(expect.jwksUrl)
     if (!jwks) return { ok: false, code: 'JWKS_UNAVAILABLE' }
     await writeCache(env, expect.jwksUrl, jwks)

@@ -9,6 +9,7 @@ const action = require_('../src/index.js') as {
   mask: (v: string) => void
   appendFileCommand: (file: string, name: string, value: string) => void
   exportableName: (name: string) => boolean
+  parseNames: (raw: string) => string[]
   main: () => Promise<void>
 }
 
@@ -125,6 +126,30 @@ describe('main', () => {
     expect(readFileSync(process.env['GITHUB_OUTPUT'] as string, 'utf8')).toBe('names=["GOOD"]\n')
   })
 
+  it('with an explicit names list, only those are exported and the backstop list does not block the author', async () => {
+    setup({ secrets: [{ name: 'DB_URL', value: 'a' }, { name: 'API_KEY', value: 'b' }, { name: 'LD_PRELOAD', value: '/tmp/evil.so' }] })
+    process.env['INPUT_NAMES'] = 'DB_URL, LD_PRELOAD'
+    await action.main()
+    const env = readFileSync(process.env['GITHUB_ENV'] as string, 'utf8')
+    expect(env).toContain('DB_URL<<HV_')
+    expect(env).toContain('LD_PRELOAD<<HV_') // the workflow author asked for it explicitly
+    expect(env).not.toContain('API_KEY')
+    expect(readFileSync(process.env['GITHUB_OUTPUT'] as string, 'utf8')).toBe('names=["DB_URL","API_KEY","LD_PRELOAD"]\n')
+  })
+
+  it('fails when a requested name is not in the environment, rather than exporting nothing quietly', async () => {
+    setup({ secrets: [{ name: 'DB_URL', value: 'a' }] })
+    process.env['INPUT_NAMES'] = 'DB_URL MISSING_ONE'
+    await expect(action.main()).rejects.toThrow('exit')
+    expect(out.join('')).toContain('Not found in that environment: MISSING_ONE')
+  })
+
+  it('warns when exporting under raw names with no prefix and no list', async () => {
+    setup({ secrets: [{ name: 'DB_URL', value: 'a' }] })
+    await action.main()
+    expect(out.join('')).toContain('::warning::Exporting secrets under their own names')
+  })
+
   it('ATTACK: refuses to export a secret whose name would change how the job runs', async () => {
     // Creating a secret needs only the `member` role, so a name like LD_PRELOAD must never reach $GITHUB_ENV:
     // that is arbitrary code execution in the job, with its GITHUB_TOKEN and any cloud credentials.
@@ -152,17 +177,32 @@ describe('main', () => {
 })
 
 describe('exportableName', () => {
-  it('refuses loader, path, interpreter and runner-credential names, and odd shapes', () => {
+  it('refuses loader, path, interpreter, build-tool and runner-credential names in any case, and odd shapes', () => {
     for (const name of ['PATH', 'HOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'DYLD_INSERT_LIBRARIES', 'NODE_OPTIONS',
       'GITHUB_TOKEN', 'GITHUB_ENV', 'RUNNER_TEMP', 'ACTIONS_ID_TOKEN_REQUEST_URL', 'GIT_SSH_COMMAND', 'BASH_ENV',
-      'PYTHONPATH', 'RUBYOPT', 'PERL5OPT', 'IFS', 'SHELLOPTS', 'INPUT_API-URL']) {
+      'PYTHONPATH', 'RUBYOPT', 'PERL5OPT', 'IFS', 'SHELLOPTS', 'INPUT_API-URL',
+      // Every name a verification pass proved was exportable before this was made case-insensitive and widened.
+      'ld_preload', 'Ld_Preload', 'lD_PRELOAD', 'path', 'Path', 'pAtH', 'github_token', 'Github_Token',
+      'node_options', 'Node_Options', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS',
+      'DOTNET_STARTUP_HOOKS', 'HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS',
+      'npm_config_script_shell', 'npm_config_registry', 'GRADLE_OPTS', 'MAVEN_OPTS', 'PYTHONHOME', 'RUBYLIB',
+      'PERL5LIB', 'CLASSPATH', 'LESSOPEN', 'BUNDLE_GEMFILE', 'PIP_INDEX_URL', 'GOFLAGS', 'PROMPT_COMMAND',
+      'TERMINFO', 'MANPAGER', 'EDITOR', 'GOFLAGS', 'GOPROXY', 'RUSTFLAGS', 'CARGO_HOME']) {
       expect(action.exportableName(name), name).toBe(false)
     }
     for (const name of ['', '1BAD', 'WITH-DASH', 'WITH SPACE', 'WITH=EQUALS', 'a\nb']) {
       expect(action.exportableName(name), JSON.stringify(name)).toBe(false)
     }
-    for (const name of ['DB_URL', 'API_KEY', 'STRIPE_SECRET', '_PRIVATE', 'PATHOLOGY', 'MY_GITHUB_TOKEN']) {
+    // Not over-broad: ordinary names that merely start with a risky prefix stay exportable.
+    for (const name of ['DB_URL', 'API_KEY', 'STRIPE_SECRET', '_PRIVATE', 'MY_GITHUB_TOKEN', 'SENTRY_DSN', 'GOOD', 'GOAL', 'ENVOY_KEY']) {
       expect(action.exportableName(name), name).toBe(true)
     }
+  })
+})
+
+describe('names allowlist', () => {
+  it('parses whitespace and comma separated lists', () => {
+    expect(action.parseNames('')).toEqual([])
+    expect(action.parseNames(' A_B, C_D\n E_F ')).toEqual(['A_B', 'C_D', 'E_F'])
   })
 })

@@ -15,16 +15,31 @@
 
 const fs = require('node:fs')
 
-/**
- * Names that must never be written to $GITHUB_ENV. These change how later steps execute (loader, lookup path,
- * interpreter flags) or impersonate the runner's own credentials. A deny list is paired with a strict name shape, so
- * anything unusual is refused rather than exported.
- */
-const UNSAFE_NAMES = /^(PATH|HOME|IFS|CI|SHELL|SHELLOPTS|BASH_ENV|ENV|PS4|PERL5OPT|PYTHONPATH|PYTHONSTARTUP|RUBYOPT|NODE_OPTIONS|NODE_PATH|LD_.*|DYLD_.*|GIT_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|INPUT_.*)$/
 const NAME_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+/**
+ * Names known to change how a later step executes — loaders, lookup paths, interpreter and build-tool flags,
+ * package sources, proxies — or to impersonate the runner's own credentials.
+ *
+ * This list is a BACKSTOP, not the security boundary. "Variables that change how a process runs" is an open-ended
+ * set (every language runtime and build tool adds its own), and a list can only ever chase it. The actual boundary
+ * is `prefix` or `names`: both put the workflow author — who already controls what the job runs — in charge of which
+ * variables appear, instead of whoever can add a secret. Matching is case-insensitive because runner environments
+ * on Windows are, and because `path` is read by plenty of tooling on Linux too.
+ */
+const UNSAFE_NAMES = /^(PATH|HOME|IFS|CI|SHELL|SHELLOPTS|BASH_ENV|ENV|PS4|PROMPT_COMMAND|EDITOR|VISUAL|PAGER|MANPAGER|LESSOPEN|TERMINFO|TMPDIR|LD_.*|DYLD_.*|GIT_.*|GITHUB_.*|RUNNER_.*|ACTIONS_.*|INPUT_.*|NODE_.*|NPM_.*|npm_config_.*|YARN_.*|PNPM_.*|PYTHON.*|PIP_.*|VIRTUAL_ENV|CONDA_.*|RUBY.*|GEM_.*|BUNDLE_.*|PERL.*|JAVA_.*|_JAVA_.*|JDK_.*|JRE_.*|CLASSPATH|GRADLE_.*|MAVEN_.*|SBT_.*|GO(FLAGS|PATH|ROOT|PROXY|PRIVATE|BIN|CACHE|MODCACHE|TOOLCHAIN|ENV|INSECURE|SUMDB|NOSUMDB|NOPROXY|DEBUG)|CGO_.*|RUSTFLAGS|RUSTC.*|RUSTUP_.*|CARGO_.*|DOTNET_.*|NUGET_.*|COMPLUS_.*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|SSL_CERT_.*|CURL_.*|REQUESTS_CA_BUNDLE|AWS_.*|AZURE_.*|GOOGLE_.*|GCLOUD_.*|CLOUDSDK_.*|DOCKER_.*|KUBE.*|LD|PRELOAD)$/i
+
+/**
+ * May this name be written to $GITHUB_ENV? `prefix` is included in the check, so a prefix that itself creates a
+ * dangerous name (prefix `LD_` + secret `PRELOAD`) is caught too.
+ */
 function exportableName(name) {
   return NAME_SHAPE.test(name) && !UNSAFE_NAMES.test(name)
+}
+
+/** Parse the optional `names` input: an explicit allowlist chosen by the workflow author. */
+function parseNames(raw) {
+  return raw.split(/[\s,]+/).map((n) => n.trim()).filter((n) => n.length > 0)
 }
 
 function input(name, fallback = '') {
@@ -83,6 +98,10 @@ async function main() {
   const audience = input('audience', 'https://api.hushvault.dev')
   const exportEnv = input('export-env', 'true') !== 'false'
   const prefix = input('prefix', '')
+  const only = parseNames(input('names', ''))
+  for (const name of only) {
+    if (!NAME_SHAPE.test(name)) fail(`"names" contains an invalid secret name: ${name}`)
+  }
   if (!environmentId) fail('environment-id is required.')
   if (!/^https:\/\//.test(apiUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(apiUrl)) {
     fail('api-url must use https.')
@@ -128,12 +147,25 @@ async function main() {
     if (!file) fail('GITHUB_ENV is not set; cannot export secrets.')
     // Refuse loudly rather than skipping quietly: a silently missing variable is debugged for an hour, and a
     // deliberately planted one is exactly what an operator needs to be told about.
-    const unsafe = names.filter((name) => !exportableName(`${prefix}${name}`))
-    if (unsafe.length > 0) {
-      fail(`Refusing to export ${unsafe.join(', ')}: that name would change how this job runs. Rename the secret in HushVault, or set the action's "prefix" input.`)
+    const selected = only.length > 0 ? names.filter((name) => only.includes(name)) : names
+    const missing = only.filter((name) => !names.includes(name))
+    if (missing.length > 0) fail(`Not found in that environment: ${missing.join(', ')}`)
+
+    // With `names`, the workflow author chose exactly what enters the environment, so the backstop list does not
+    // apply — they already control what the job runs. Without it, the list is all that stands between someone who
+    // can add a secret and the job's execution, so a hit is a hard failure, not a silent skip.
+    if (only.length === 0) {
+      const unsafe = selected.filter((name) => !exportableName(`${prefix}${name}`))
+      if (unsafe.length > 0) {
+        fail(`Refusing to export ${unsafe.join(', ')}: that name could change how this job runs. Set the action's "prefix" input, list the secrets you want in "names", or rename the secret in HushVault.`)
+      }
+      if (!prefix) {
+        process.stdout.write('::warning::Exporting secrets under their own names. Anyone who can add a secret to this environment can then set a variable this job reads. Set "prefix" or "names" to decide that yourself.\n')
+      }
     }
     for (const secret of read.body.data.secrets) {
       if (!secret || typeof secret.name !== 'string' || typeof secret.value !== 'string') continue
+      if (!selected.includes(secret.name)) continue
       appendFileCommand(file, `${prefix}${secret.name}`, secret.value)
     }
   }
@@ -146,4 +178,4 @@ if (require.main === module) {
   main().catch((err) => fail(`Unexpected failure: ${err && err.message ? err.message : 'unknown error'}`))
 }
 
-module.exports = { mask, appendFileCommand, exportableName, main }
+module.exports = { mask, appendFileCommand, exportableName, parseNames, main }

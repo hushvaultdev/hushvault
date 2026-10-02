@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CLOCK_SKEW_SECONDS, JWKS_REFETCH_BUDGET, verifyOidcToken } from '../src/lib/oidc-verify'
+import { CLOCK_SKEW_SECONDS, JWKS_REFETCH_BUDGET_GLOBAL, JWKS_REFETCH_BUDGET_PER_CALLER, verifyOidcToken } from '../src/lib/oidc-verify'
 import { createTestEnv, type TestEnv } from './helpers/env'
 
 const ISSUER = 'https://token.actions.githubusercontent.com'
@@ -127,23 +127,30 @@ describe('verifyOidcToken', () => {
     expect(fetchCalls).toHaveLength(2)
   })
 
-  it('a flood of DISTINCT junk kids exhausts a budget and is reported as an outage, not as a bad token', async () => {
+  it('a flood of DISTINCT junk kids exhausts only that caller\'s budget, and reads as an outage not a bad token', async () => {
     const first = await makeKey('k0')
     serveJwks([first.jwk])
-    expect((await verify(await makeToken(first))).ok).toBe(true)
+    const attacker = { ...expectation, callerKey: '203.0.113.9' }
+    expect((await verifyOidcToken(env as never, await makeToken(first), attacker)).ok).toBe(true)
 
     let throttled = 0
-    for (let i = 0; i < JWKS_REFETCH_BUDGET + 5; i += 1) {
+    for (let i = 0; i < JWKS_REFETCH_BUDGET_PER_CALLER + 3; i += 1) {
       const junk = await makeKey(`junk-${i}`)
-      const res = await verify(await makeToken(junk))
+      const res = await verifyOidcToken(env as never, await makeToken(junk), attacker)
       expect(res.ok).toBe(false)
       if (!res.ok && res.code === 'KEY_LOOKUP_THROTTLED') throttled += 1
     }
     expect(throttled).toBeGreaterThan(0)
-    // Fetches are capped by the budget, not by the number of junk tokens.
-    expect(fetchCalls.length).toBeLessThanOrEqual(JWKS_REFETCH_BUDGET + 1)
-    // THE POINT: a real token whose key is already cached still verifies while the flood is going on.
-    expect((await verify(await makeToken(first))).ok).toBe(true)
+    expect(fetchCalls.length).toBeLessThanOrEqual(JWKS_REFETCH_BUDGET_PER_CALLER + 1)
+
+    // A cached key still verifies for the attacker...
+    expect((await verifyOidcToken(env as never, await makeToken(first), attacker)).ok).toBe(true)
+    // ...and THE POINT: another caller's genuine key rotation is unaffected by that flood.
+    const rotated = await makeKey('rotated')
+    serveJwks([first.jwk, rotated.jwk])
+    const victim = { ...expectation, callerKey: '198.51.100.4' }
+    expect((await verifyOidcToken(env as never, await makeToken(rotated), victim)).ok).toBe(true)
+    expect(JWKS_REFETCH_BUDGET_GLOBAL).toBeGreaterThan(JWKS_REFETCH_BUDGET_PER_CALLER)
   })
 
   it('reports an unavailable key set rather than accepting the token', async () => {

@@ -787,7 +787,8 @@ authRoutes.post('/github-oidc', oidcExchangeRateLimit, zValidator('json', github
   const { token, envId } = c.req.valid('json')
   const config = githubOidcConfig(c.env)
 
-  const verified = await verifyOidcToken<GitHubOidcClaims>(c.env, token, config)
+  // The caller's address scopes the key-refetch budget, so a prober cannot starve everyone else's rotations.
+  const verified = await verifyOidcToken<GitHubOidcClaims>(c.env, token, { ...config, callerKey: getRequestIp(c) ?? 'unknown' })
   if (!verified.ok) {
     // One opaque response for every verification failure: a forger learns nothing about which part was wrong.
     // The code is logged (never the token) so an operator can tell a misconfiguration from an attack.
