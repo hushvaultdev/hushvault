@@ -76,6 +76,15 @@ Rows written before AAD are `enc_version = 1` (migration `0008`) and still read 
 when the secret next changes; old history can be deleted instead), then set `ENFORCE_AAD=true` so a v1 row
 can no longer be used for a downgrade.
 
+**Integration credentials (issue #39)** use the same envelope and key ring but the tag `c2:` and a separate AAD domain:
+```
+credential AAD = "hushvault|credential|v2|<orgId>|<connectionId>"
+wrap       AAD = "hushvault|credential-wrap|v2|<connectionId>"
+```
+A secret blob can therefore never be substituted for a credential (or the reverse), nor one connection's credential for
+another's. Rotation re-wraps `integration_connections` as a third phase after `secrets` and `secret_history`, preserving the
+`c2:` tag. An HKDF-derived per-purpose KEK is not implemented (the AAD domain separation is).
+
 The IV and ciphertext+tag are stored together to enable decryption without separate IV storage.
 There is no separate auth-tag segment: WebCrypto appends the 16-byte GCM tag to the ciphertext, so the
 format has exactly two colon-separated parts.

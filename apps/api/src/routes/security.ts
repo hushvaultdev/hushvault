@@ -20,8 +20,14 @@ router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
     'SELECT h.key_version AS version, count(*) AS n FROM secret_history h INNER JOIN secrets s ON s.id = h.secret_id INNER JOIN projects p ON p.id = s.project_id WHERE p.org_id = ? GROUP BY h.key_version',
   ).bind(auth.orgId).all<{ version: string; n: number }>()
 
+  const connectionRows = await c.env.DB.prepare(
+    'SELECT key_version AS version, count(*) AS n FROM integration_connections WHERE org_id = ? GROUP BY key_version',
+  ).bind(auth.orgId).all<{ version: string; n: number }>()
+
   const secrets: Record<string, number> = {}
   const history: Record<string, number> = {}
+  const connections: Record<string, number> = {}
+  for (const r of connectionRows.results ?? []) connections[r.version] = r.n
   for (const r of secretRows.results ?? []) secrets[r.version] = r.n
   for (const r of historyRows.results ?? []) history[r.version] = r.n
 
@@ -29,13 +35,13 @@ router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
     'SELECT status, phase, started_at, completed_at FROM key_rotations ORDER BY started_at DESC LIMIT 1',
   ).first<{ status: string; phase: string; started_at: string; completed_at: string | null }>()
 
-  const versionsInUse = new Set([...Object.keys(secrets), ...Object.keys(history)])
+  const versionsInUse = new Set([...Object.keys(secrets), ...Object.keys(history), ...Object.keys(connections)])
   const oldVersionsInUse = [...versionsInUse].filter((v) => v !== active?.version).sort()
 
   return c.json({
     data: {
       activeVersion: active?.version ?? null,
-      rows: { secrets, history },
+      rows: { secrets, history, connections },
       oldVersionsInUse,
       job: job
         ? {

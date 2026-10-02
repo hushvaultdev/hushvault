@@ -8,6 +8,7 @@ import { environmentRoutes } from './routes/environments'
 import { secretRoutes } from './routes/secrets'
 import { shareRoutes } from './routes/share'
 import { auditRoutes } from './routes/audit'
+import { integrationsRouter } from './routes/integrations'
 import { securityRoutes } from './routes/security'
 import { secretScannerRouter } from './routes/secret-scanner'
 import { securityHeaders } from './middleware/security-headers'
@@ -124,6 +125,7 @@ app.route('/api/share', shareRoutes)
 app.route('/api/audit', auditRoutes)
 app.route('/api/security', securityRoutes)
 app.route('/api/integrations/secret-scanner', secretScannerRouter)
+app.route('/api/integrations', integrationsRouter)
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404))
