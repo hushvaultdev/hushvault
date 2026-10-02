@@ -34,6 +34,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   TARGET_NOT_FOUND: 'The target resource (for example the Worker) was not found. Check it still exists, or edit the target to point at the right one.',
   COMPUTED_ERROR: 'A computed secret could not be resolved. Fix its ${NAME} references in the project, then run again.',
   CREDENTIAL_UNAVAILABLE: 'The stored credential could not be used. Rotate the credential on the connection, then run again.',
+  DECRYPTION_FAILED: 'HushVault could not decrypt something it needed. Contact support if this repeats.',
+  TARGET_NOT_ALLOWED: 'This Worker cannot be a sync target (it is protected or in a blocked account). Remove the target.',
+  EMPTY_VALUE: 'A secret has an empty value, which Cloudflare may reject. Give it a value or filter it out.',
   TIMEOUT: 'The run timed out before finishing. Run again; partial progress is kept.',
 }
 
