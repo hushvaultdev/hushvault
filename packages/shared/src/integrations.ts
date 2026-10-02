@@ -87,3 +87,84 @@ export function promotionEvidence(id: string): { provider: string; test: string;
     docs: `docs/integrations/${id}.md`,
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// API contract for sync targets and runs (issues #40, #41). Names only: no endpoint ever carries a
+// secret value or a provider credential. All timestamps are ISO strings.
+// ---------------------------------------------------------------------------------------------
+
+export type SyncRunStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed'
+export type SyncTrigger = 'manual' | 'change' | 'schedule'
+export type SyncErrorCode =
+  | 'PROVIDER_AUTH'
+  | 'PROVIDER_RATE_LIMIT'
+  | 'PROVIDER_VALIDATION'
+  | 'PROVIDER_ERROR'
+  | 'TARGET_NOT_FOUND'
+  | 'COMPUTED_ERROR'
+  | 'CREDENTIAL_UNAVAILABLE'
+  | 'TIMEOUT'
+
+export interface SyncNameFilter {
+  /** Only names starting with this prefix are pushed (the prefix is kept in the target name). */
+  prefix?: string
+  /** Names that are never pushed (local-only). */
+  deny?: string[]
+}
+
+export interface SyncTargetDto {
+  id: string
+  projectId: string
+  envId: string
+  connectionId: string
+  provider: string
+  /** Provider-specific identifiers only, e.g. { accountId, scriptName } for Cloudflare Workers. */
+  resource: Record<string, string>
+  nameFilter: SyncNameFilter
+  /** When true, names HushVault created that no longer exist in the environment are deleted on the target. */
+  deleteRemoved: boolean
+  status: 'active' | 'needs_attention'
+  lastRunAt: string | null
+  lastRunStatus: SyncRunStatus | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** Names grouped by what a run would do. Never values. */
+export interface SyncPlanDto {
+  create: string[]
+  update: string[]
+  delete: string[]
+  skip: string[]
+  /** Target already has this name and HushVault never created it: left untouched. */
+  conflict: string[]
+  /** Reasons a run cannot start (e.g. over the provider's limits). Empty when the plan is runnable. */
+  blockers: { code: SyncErrorCode | 'TOO_MANY_ITEMS' | 'VALUE_TOO_LARGE' | 'NAME_INVALID'; names: string[] }[]
+}
+
+export interface SyncRunDto {
+  id: string
+  targetId: string
+  trigger: SyncTrigger
+  status: SyncRunStatus
+  attempt: number
+  counts: { created: number; updated: number; deleted: number; skipped: number; failed: number }
+  errorCode: SyncErrorCode | null
+  startedAt: string
+  finishedAt: string | null
+  nextRetryAt: string | null
+}
+
+/**
+ * Endpoints (all under /api/integrations, JWT-only, admin+, membership re-read; run and preview are rate limited):
+ *   POST   /targets                 body { projectId, envId, connectionId, resource, nameFilter?, deleteRemoved? } -> 201 { data: SyncTargetDto }
+ *   GET    /targets                 -> { data: SyncTargetDto[] }
+ *   PATCH  /targets/:id             body { resource?, nameFilter?, deleteRemoved? } (the connection cannot be changed) -> { data: SyncTargetDto }
+ *   DELETE /targets/:id             -> { data: { deleted: true } }
+ *   POST   /targets/:id/preview     -> { data: SyncPlanDto }
+ *   POST   /targets/:id/run         -> { data: SyncRunDto }   (a plan with blockers is a 422 SYNC_BLOCKED carrying { plan })
+ *   GET    /targets/:id/runs        -> { data: SyncRunDto[] } newest first, max 50
+ *   GET    /runs/:runId             -> { data: SyncRunDto }
+ * Errors: standard { error, message }. Free plan: at most 2 targets per organisation (409 PLAN_LIMIT).
+ */
+export const FREE_PLAN_MAX_SYNC_TARGETS = 2
