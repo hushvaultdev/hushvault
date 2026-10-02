@@ -107,11 +107,11 @@ enabled = true
 crons = ["* * * * *"]
 
 # Cloudflare Email Service send binding (issue #26, #76). DISABLED until the sending domain is
-# onboarded (issue #75): uncomment, then deploy. Without it the code sends nothing and the auth
-# endpoints still respond normally. `allowed_sender_addresses` pins the binding to MAIL_FROM.
-# [[env.dev.send_email]]
-# name = "EMAIL"
-# allowed_sender_addresses = ["no-reply@hushvault.dev"]
+# onboarded (issue #75). Enabled for dev; production stays commented until the #26 code and
+# migrations 0006-0008 are rolled out there. `allowed_sender_addresses` pins the binding to MAIL_FROM.
+[[env.dev.send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["no-reply@hushvault.dev"]
 
 # Single-level subdomain on purpose: I believe Cloudflare's free universal
 # certificate covers only one subdomain level (api.beta.hushvault.dev could need
