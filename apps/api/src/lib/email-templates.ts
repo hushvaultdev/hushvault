@@ -46,10 +46,11 @@ export function verifyEmailMessage(to: string, link: string): EmailMessage {
   return { to, subject: 'Confirm your HushVault email address', text, html }
 }
 
-export function resetPasswordMessage(to: string, link: string): EmailMessage {
+export function resetPasswordMessage(to: string, link: string, oauthOnly = false): EmailMessage {
   const { text, html } = layout(
     'Reset your password',
     [
+      ...(oauthOnly ? ['Your account normally signs in with GitHub or Google. This link lets you add a password as well.'] : []),
       'We received a request to reset the password for your HushVault account. The link works once and expires in 60 minutes.',
       'If you did not request this, ignore this email; your password will not change.',
     ],

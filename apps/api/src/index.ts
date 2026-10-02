@@ -31,6 +31,9 @@ export type Env = {
   // Transactional email (issue #26): Cloudflare Email Service binding + sender address.
   EMAIL?: EmailBinding
   MAIL_FROM?: string
+  // Daily cap on verification/reset mail (default 200); REQUIRE_VERIFIED_EMAIL=1 gates sensitive actions.
+  EMAIL_DAILY_BUDGET?: string
+  REQUIRE_VERIFIED_EMAIL?: string
   JWT_SECRET: string
   STRIPE_SECRET_KEY?: string
   STRIPE_WEBHOOK_SECRET?: string

@@ -42,9 +42,9 @@ async function importHmacKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', textEncoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
 }
 
-export async function signJwt(payload: Omit<JwtPayload, 'iat' | 'exp' | 'iss' | 'aud'>, secret: string, ttlSeconds = 60 * 60 * 24 * 7): Promise<string> {
+export async function signJwt(payload: Omit<JwtPayload, 'iat' | 'exp' | 'iss' | 'aud'>, secret: string, ttlSeconds = 60 * 60 * 24 * 7, issuedAt?: number): Promise<string> {
   const header = { alg: 'HS256', typ: 'JWT' }
-  const iat = Math.floor(Date.now() / 1000)
+  const iat = issuedAt ?? Math.floor(Date.now() / 1000)
   const body: JwtPayload = {
     ...payload,
     iss: 'hushvault',

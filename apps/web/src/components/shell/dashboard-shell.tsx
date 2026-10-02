@@ -6,6 +6,8 @@ import { usePathname } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/lib/auth-context'
 
+import { VerifyBanner } from './verify-banner'
+
 import styles from './dashboard-shell.module.css'
 
 const s = (name: string) => styles[name]
@@ -57,7 +59,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
             <Button variant="ghost" onClick={logout}>Sign out</Button>
           </div>
         </header>
-        <main className={s('content')}>{children}</main>
+        <main className={s('content')}>
+          <VerifyBanner />
+          {children}
+        </main>
       </div>
     </div>
   )

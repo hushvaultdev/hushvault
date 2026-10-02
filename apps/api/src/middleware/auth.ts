@@ -1,6 +1,6 @@
 import type { MiddlewareHandler } from 'hono'
 import type { Env } from '../index'
-import { hashApiKey, verifyJwt } from '../lib/auth'
+import { hashApiKey, verifyJwt, type JwtPayload } from '../lib/auth'
 import { createRateLimitMiddleware } from './rate-limit'
 
 export type AuthContext = {
@@ -30,8 +30,21 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
     return c.json({ error: 'UNAUTHORIZED', message: 'Authentication required' }, 401)
   }
 
+  let jwtPayload: JwtPayload | null = null
   try {
-    const jwtPayload = await verifyJwt(token, c.env.JWT_SECRET)
+    jwtPayload = await verifyJwt(token, c.env.JWT_SECRET)
+  } catch {
+    jwtPayload = null // not a valid JWT: fall through to the API key check
+  }
+
+  if (jwtPayload) {
+    // Session invalidation (password reset / account takeover): reject tokens issued before the
+    // user's marker, and tokens of deleted users. One primary-key read per JWT request.
+    const user = await c.env.DB.prepare('SELECT sessions_valid_after FROM users WHERE id = ? LIMIT 1')
+      .bind(jwtPayload.sub).first<{ sessions_valid_after: number }>()
+    if (!user || jwtPayload.iat < user.sessions_valid_after) {
+      return c.json({ error: 'UNAUTHORIZED', message: 'Session expired. Please sign in again.' }, 401)
+    }
     c.set('auth', {
       userId: jwtPayload.sub,
       orgId: jwtPayload.orgId,
@@ -39,8 +52,6 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
       actorType: 'user',
     })
     return next()
-  } catch {
-    // fall through to API key check
   }
 
   const apiKeyHash = await hashApiKey(token)
@@ -142,6 +153,39 @@ export const secretWriteRateLimit = createRateLimitMiddleware({
   limit: 60,
   windowMs: 60_000,
 })
+
+// Forgot-password / verification-resend: per IP. Per-email and global limits are applied in the
+// route (they must not change the response, so a visible 429 would leak existence).
+export const forgotPasswordRateLimit = createRateLimitMiddleware({
+  scope: 'auth-forgot',
+  limit: 5,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
+// Token submissions (verify / reset): the tokens have 256 bits, so this only caps abuse of the DB.
+export const tokenSubmitRateLimit = createRateLimitMiddleware({
+  scope: 'auth-token-submit',
+  limit: 10,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
+/**
+ * Optional gate for sensitive actions (create share links / API keys): when the deployment sets
+ * REQUIRE_VERIFIED_EMAIL=1, accounts with an unverified email get 403 EMAIL_NOT_VERIFIED.
+ * Off by default; never applied to login, forgot-password, reset or verify. Run after requireAuth.
+ */
+export const requireVerifiedEmailIfEnforced: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
+  const flag = (c.env.REQUIRE_VERIFIED_EMAIL ?? '').trim().toLowerCase()
+  if (flag !== '1' && flag !== 'true') return next()
+  const auth = c.get('auth')
+  const user = await c.env.DB.prepare('SELECT email_verified FROM users WHERE id = ? LIMIT 1').bind(auth.userId).first<{ email_verified: number }>()
+  if (!user || user.email_verified !== 1) {
+    return c.json({ error: 'EMAIL_NOT_VERIFIED', message: 'Verify your email address to do this' }, 403)
+  }
+  return next()
+}
 
 export function getAuth(c: Parameters<MiddlewareHandler<{ Bindings: Env }>>[0]): AuthContext {
   return c.get('auth')

@@ -1,4 +1,4 @@
-import { readSession } from './auth-storage'
+import { clearSession, readSession } from './auth-storage'
 
 // Base URL of the HushVault API. Defaults to the local wrangler dev server;
 // override with NEXT_PUBLIC_API_URL for staging/production builds.
@@ -32,9 +32,11 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json'
   }
+  let sentToken: string | null = null
   if (auth) {
     const session = readSession()
     if (session) {
+      sentToken = session.token
       headers['Authorization'] = `Bearer ${session.token}`
     }
   }
@@ -58,6 +60,12 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     } catch {
       payload = null
     }
+  }
+
+  if (res.status === 401 && auth && sentToken && typeof window !== 'undefined' && readSession()?.token === sentToken) {
+    // The session was invalidated server-side (password reset, account link, expiry).
+    clearSession()
+    window.location.assign('/sign-in?expired=1')
   }
 
   if (!res.ok) {

@@ -13,8 +13,22 @@ import {
   signState,
   verifyState,
 } from '../lib/oauth'
-import { loginRateLimit, oauthRateLimit, registerRateLimit, requireAuth } from '../middleware/auth'
+import {
+  forgotPasswordRateLimit,
+  loginRateLimit,
+  oauthRateLimit,
+  registerRateLimit,
+  requireAuth,
+  requireVerifiedEmailIfEnforced,
+  tokenSubmitRateLimit,
+} from '../middleware/auth'
+import { consumeIdentityLimit, identityKey } from '../middleware/rate-limit'
 import { getRequestIp, writeAuditLog } from '../lib/security'
+import { consumeToken, issueToken, purgeExpiredTokens } from '../lib/auth-tokens'
+import { revokeApiKeysStatement, spendEmailBudget } from '../lib/account-security'
+import { sendEmail } from '../lib/email'
+import { buildTokenLink, passwordChangedMessage, resetPasswordMessage, verifyEmailMessage } from '../lib/email-templates'
+import { runBackground } from '../lib/background'
 
 type MemberRole = 'owner' | 'admin' | 'member' | 'viewer'
 
@@ -30,6 +44,10 @@ const loginSchema = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(128),
 })
+
+const emailSchema = z.object({ email: z.string().email().max(254) })
+const tokenSchema = z.object({ token: z.string().min(16).max(256) })
+const resetSchema = z.object({ token: z.string().min(16).max(256), password: z.string().min(12).max(128) })
 
 const apiKeySchema = z.object({
   name: z.string().min(2).max(80),
@@ -78,18 +96,38 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
   ])
 
   const token = await signJwt({ sub: userId, orgId, role: 'owner' }, c.env.JWT_SECRET)
+  // Verification mail: in the background, so a failed or slow send never fails registration.
+  await runBackground(c, sendVerificationEmail(c.env, { userId, email: email.toLowerCase(), orgId }))
   return c.json({ data: { userId, orgId, token } }, 201)
 })
+
+/** Issue a verify_email token and mail it. Respects the global daily budget; never throws to the caller. */
+async function sendVerificationEmail(env: Env, user: { userId: string; email: string; orgId: string }): Promise<void> {
+  if (!(await spendEmailBudget(env, 'verify'))) return
+  const { token } = await issueToken(env, { userId: user.userId, purpose: 'verify_email', email: user.email })
+  const link = buildTokenLink(env, '/verify-email', token)
+  if (!link) return
+  await sendEmail(env, verifyEmailMessage(user.email, link))
+  await writeAuditLog(env, {
+    orgId: user.orgId,
+    actorId: user.userId,
+    actorType: 'system',
+    action: 'auth.email_verification.sent',
+    resourceType: 'user',
+    resourceId: user.userId,
+  })
+}
 
 // POST /api/auth/login
 authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async (c) => {
   const { email, password } = c.req.valid('json')
   const db = c.env.DB
 
-  const user = await db.prepare('SELECT id, password_hash, salt FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<{
+  const user = await db.prepare('SELECT id, password_hash, salt, email_verified FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<{
     id: string
     password_hash: string
     salt: string
+    email_verified: number
   }>()
 
   // Burn the same PBKDF2 cost for unknown users and OAuth-only users (empty
@@ -124,11 +162,11 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),
   })
-  return c.json({ data: { token, userId: user.id, orgId: member.org_id, role: member.role } })
+  return c.json({ data: { token, userId: user.id, orgId: member.org_id, role: member.role, emailVerified: user.email_verified === 1 } })
 })
 
 // POST /api/auth/api-keys
-authRoutes.post('/api-keys', requireAuth, zValidator('json', apiKeySchema), async (c) => {
+authRoutes.post('/api-keys', requireAuth, requireVerifiedEmailIfEnforced, zValidator('json', apiKeySchema), async (c) => {
   const { name, expiresAt } = c.req.valid('json')
   const auth = c.get('auth')
   const db = c.env.DB
@@ -220,6 +258,133 @@ authRoutes.delete('/api-keys/:id', requireAuth, async (c) => {
   return c.json({ data: { revoked: true } })
 })
 
+// POST /api/auth/verify-email/send - (re)send the verification mail to the caller's own address.
+// Always 202, even if already verified (no state leak beyond the account owner).
+authRoutes.post('/verify-email/send', requireAuth, async (c) => {
+  const auth = c.get('auth')
+  const user = await c.env.DB.prepare('SELECT email, email_verified FROM users WHERE id = ? LIMIT 1').bind(auth.userId)
+    .first<{ email: string; email_verified: number }>()
+  if (user && user.email_verified !== 1) {
+    const identity = await identityKey(auth.userId)
+    const perMinute = await consumeIdentityLimit(c.env, { scope: 'verify-send-min', identity, limit: 1, windowMs: 60_000 })
+    if ('unavailable' in perMinute) {
+      return c.json({ error: 'SERVICE_UNAVAILABLE', message: 'Service temporarily unavailable. Please try again shortly.' }, 503)
+    }
+    const perHour = await consumeIdentityLimit(c.env, { scope: 'verify-send-hour', identity, limit: 5, windowMs: 3_600_000 })
+    if (!perMinute.allowed || !('allowed' in perHour) || !perHour.allowed) {
+      return c.json({ error: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests. Please wait a moment and try again.' }, 429)
+    }
+    await runBackground(c, sendVerificationEmail(c.env, { userId: auth.userId, email: user.email, orgId: auth.orgId }))
+  }
+  return c.json({ data: { ok: true } }, 202)
+})
+
+// POST /api/auth/verify-email { token } - consume a verification token. POST only, so mail scanners
+// that prefetch links cannot burn it. Invalid, expired, used and wrong-purpose tokens all look the same.
+authRoutes.post('/verify-email', tokenSubmitRateLimit, zValidator('json', tokenSchema), async (c) => {
+  const { token } = c.req.valid('json')
+  const consumed = await consumeToken(c.env, { token, purpose: 'verify_email' })
+  if (!consumed) {
+    return c.json({ error: 'INVALID_TOKEN', message: 'This link is invalid or has expired' }, 400)
+  }
+  await c.env.DB.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').bind(consumed.userId).run()
+  const member = await c.env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(consumed.userId).first<{ org_id: string }>()
+  if (member) {
+    await writeAuditLog(c.env, {
+      orgId: member.org_id,
+      actorId: consumed.userId,
+      actorType: 'user',
+      action: 'auth.email.verified',
+      resourceType: 'user',
+      resourceId: consumed.userId,
+      ip: getRequestIp(c),
+      userAgent: c.req.header('user-agent'),
+    })
+  }
+  return c.json({ data: { verified: true } })
+})
+
+/** Work done for forgot-password after the (identical) response is decided; every outcome is silent. */
+async function processPasswordResetRequest(env: Env, email: string): Promise<void> {
+  const user = await env.DB.prepare('SELECT id, email, password_hash FROM users WHERE email = ? LIMIT 1').bind(email)
+    .first<{ id: string; email: string; password_hash: string }>()
+  if (!user) return
+
+  const hashedEmail = await identityKey(email)
+  const limit = await consumeIdentityLimit(env, { scope: 'forgot-email', identity: hashedEmail, limit: 3, windowMs: 3_600_000 })
+  if (!('allowed' in limit) || !limit.allowed) return // throttled: stay silent, never a distinguishable 429
+  if (!(await spendEmailBudget(env, 'verify'))) return
+
+  const member = await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(user.id).first<{ org_id: string }>()
+  const { token } = await issueToken(env, { userId: user.id, purpose: 'reset_password', email: user.email })
+  const link = buildTokenLink(env, '/reset-password', token)
+  if (!link) return
+  const message = resetPasswordMessage(user.email, link, user.password_hash === '')
+  await sendEmail(env, message)
+  if (member) {
+    await writeAuditLog(env, {
+      orgId: member.org_id,
+      actorId: user.id,
+      actorType: 'system',
+      action: 'auth.password_reset.requested',
+      resourceType: 'user',
+      resourceId: user.id,
+    })
+  }
+  if ((crypto.getRandomValues(new Uint8Array(1))[0] ?? 255) < 3) await purgeExpiredTokens(env) // opportunistic cleanup; no cron for this
+}
+
+// POST /api/auth/forgot-password { email } - always the same 202, whether or not the address has an
+// account, is OAuth-only, was throttled, or the mail could not be sent. Work runs after the response.
+authRoutes.post('/forgot-password', forgotPasswordRateLimit, zValidator('json', emailSchema), async (c) => {
+  const { email } = c.req.valid('json')
+  await runBackground(c, processPasswordResetRequest(c.env, email.toLowerCase()))
+  return c.json({ data: { ok: true } }, 202)
+})
+
+// POST /api/auth/reset-password { token, password } - consume a reset token and set a new password.
+// Revokes every session; revokes API keys only for accounts whose email was still unverified (owner
+// decision 4). Proving control of the mailbox also verifies the address. Does not sign the user in.
+authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', resetSchema), async (c) => {
+  const { token, password } = c.req.valid('json')
+  const consumed = await consumeToken(c.env, { token, purpose: 'reset_password' })
+  if (!consumed) {
+    return c.json({ error: 'INVALID_TOKEN', message: 'This link is invalid or has expired' }, 400)
+  }
+
+  const { salt, passwordHash } = await hashPassword(password)
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const cutoff = nowSeconds + 1 // JWT iat is whole seconds: tokens minted this second must die too
+  await c.env.DB.batch([
+    // Must run before the user update below flips email_verified.
+    c.env.DB.prepare(
+      'UPDATE api_keys SET revoked_at = ?, revoked_reason = ? WHERE user_id = ? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM users WHERE id = ? AND email_verified = 0)',
+    ).bind(nowSeconds, 'password_reset', consumed.userId, consumed.userId),
+    c.env.DB.prepare('UPDATE users SET password_hash = ?, salt = ?, email_verified = 1, sessions_valid_after = ? WHERE id = ?')
+      .bind(passwordHash, salt, cutoff, consumed.userId),
+    c.env.DB.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = 'reset_password'").bind(consumed.userId),
+  ])
+
+  const member = await c.env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(consumed.userId).first<{ org_id: string }>()
+  if (member) {
+    await writeAuditLog(c.env, {
+      orgId: member.org_id,
+      actorId: consumed.userId,
+      actorType: 'user',
+      action: 'auth.password_reset.completed',
+      resourceType: 'user',
+      resourceId: consumed.userId,
+      ip: getRequestIp(c),
+      userAgent: c.req.header('user-agent'),
+    })
+  }
+  // Heads-up mail to the owner of the address (best effort, within the daily budget).
+  await runBackground(c, (async () => {
+    if (await spendEmailBudget(c.env, 'reset')) await sendEmail(c.env, passwordChangedMessage(consumed.email))
+  })())
+  return c.json({ data: { reset: true } })
+})
+
 // Shared OAuth provisioning: find the user by provider identity, fall back to
 // linking by email, otherwise create a fresh user + workspace. Issues a JWT and
 // hands the session back to the dashboard via a URL fragment (no cookies).
@@ -234,6 +399,8 @@ async function completeOAuthLogin(
   const now = new Date().toISOString()
 
   let userId: string | null = null
+  let linkedExistingUnverified = false
+  let cutoff: number | null = null
 
   const byProvider = await db.prepare('SELECT id FROM users WHERE provider = ? AND provider_id = ? LIMIT 1')
     .bind(provider, identity.id).first<{ id: string }>()
@@ -243,24 +410,35 @@ async function completeOAuthLogin(
     const byEmail = await db.prepare('SELECT id, email_verified FROM users WHERE email = ? LIMIT 1').bind(email)
       .first<{ id: string; email_verified: number }>()
     if (byEmail && byEmail.email_verified !== 1) {
-      // Pre-account-takeover guard: an unverified (password) account may have been
-      // registered by someone who does not own this address. Never link or log in.
+      // Owner decision 2: the provider proved control of this address, so the person signing in is
+      // its owner. Link the provider to the existing account and sign them in, but kill whatever
+      // credentials may belong to someone who registered the address without owning it: password,
+      // API keys, outstanding tokens and sessions (JWTs issued before now stop working).
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      cutoff = nowSeconds + 1 // same-second attacker tokens must die too
+      await db.batch([
+        db.prepare("UPDATE users SET provider = ?, provider_id = ?, password_hash = '', salt = '', email_verified = 1, sessions_valid_after = ? WHERE id = ?")
+          .bind(provider, identity.id, cutoff, byEmail.id),
+        revokeApiKeysStatement(c.env, byEmail.id, nowSeconds, 'oauth_account_link'),
+        db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').bind(byEmail.id),
+      ])
       const member = await db.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
         .bind(byEmail.id).first<{ org_id: string }>()
       if (member) {
         await writeAuditLog(c.env, {
           orgId: member.org_id,
-          actorId: null,
-          actorType: 'system',
-          action: 'auth.oauth.link_refused',
+          actorId: byEmail.id,
+          actorType: 'user',
+          action: 'auth.oauth.account_takeover',
           resourceType: 'user',
           resourceId: byEmail.id,
           ip: getRequestIp(c),
           userAgent: c.req.header('user-agent'),
         })
       }
-      return c.redirect(`${webBase}/auth/callback#error=${encodeURIComponent('account_exists_unverified')}`, 302)
-    }
+      linkedExistingUnverified = true
+      userId = byEmail.id
+    } else
     if (byEmail) {
       await db.prepare('UPDATE users SET provider = ?, provider_id = ? WHERE id = ?').bind(provider, identity.id, byEmail.id).run()
       userId = byEmail.id
@@ -296,7 +474,8 @@ async function completeOAuthLogin(
     userId = newUserId
   }
 
-  const token = await signJwt({ sub: userId, orgId, role }, c.env.JWT_SECRET)
+  // A claimed account's session is minted at the cutoff so it survives the invalidation it caused.
+  const token = await signJwt({ sub: userId, orgId, role }, c.env.JWT_SECRET, undefined, cutoff ?? undefined)
   await writeAuditLog(c.env, {
     orgId,
     actorId: userId,
@@ -309,6 +488,8 @@ async function completeOAuthLogin(
   })
 
   const params = new URLSearchParams({ token, userId, orgId, role })
+  // Tell the dashboard that an existing, never-verified account was claimed (it shows a notice).
+  if (linkedExistingUnverified) params.set('notice', 'account_linked')
   return c.redirect(`${webBase}/auth/callback#${params.toString()}`, 302)
 }
 
