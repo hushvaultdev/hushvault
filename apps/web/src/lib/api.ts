@@ -1,4 +1,4 @@
-import { clearSession, readSession, writeSession } from './auth-storage'
+import { clearSession, markSessionHint, readSession, writeSession } from './auth-storage'
 import type { Session } from './types'
 
 // Base URL of the HushVault API. Defaults to the local wrangler dev server;
@@ -40,7 +40,7 @@ export function refreshSession(): Promise<Session | null> {
 }
 
 async function doRefresh(): Promise<Session | null> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     let res: Response
     try {
       res = await fetch(`${API_BASE}/api/auth/refresh`, { method: 'POST', headers: CLIENT_HEADER, credentials: 'include' })
@@ -51,15 +51,19 @@ async function doRefresh(): Promise<Session | null> {
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
       continue
     }
-    if (!res.ok) {
+    if (res.status === 401) {
+      // The refresh token is genuinely gone (expired, revoked, reused): this is a sign-out.
       clearSession()
+      markSessionHint(false)
       return null
     }
+    if (!res.ok) return null // 429/5xx: transient, keep the cookie and the hint so a retry can work
     const payload = (await res.json().catch(() => null)) as { data?: Session & { expiresIn?: number } } | null
     const data = payload?.data
     if (!data?.token) return null
     const next: Session = { token: data.token, userId: data.userId, orgId: data.orgId, role: data.role, emailVerified: data.emailVerified }
     writeSession(next)
+    markSessionHint(true)
     return next
   }
   return null
@@ -73,6 +77,7 @@ export async function endSession(): Promise<void> {
     // offline: the local session is still cleared below
   }
   clearSession()
+  markSessionHint(false)
 }
 
 async function send(path: string, method: string, body: unknown, token: string | null): Promise<Response> {

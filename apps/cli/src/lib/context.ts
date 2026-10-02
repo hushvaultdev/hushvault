@@ -25,9 +25,10 @@ export async function resolveApiUrl(explicit?: string, projectApiUrl?: string): 
   const trusted = explicit ?? process.env['HUSHVAULT_API_URL'] ?? (await getGlobalConfig())['apiUrl'] ?? DEFAULT_API_URL
   if (projectApiUrl && originOf(projectApiUrl) !== originOf(trusted)) {
     throw new Error(
-      `This project's .hushvault.json points at ${projectApiUrl}, but you are signed in to ${trusted}. ` +
+      `This project's .hushvault.json points at ${projectApiUrl}, but your credentials are for ${trusted}. ` +
         'Credentials are never sent to a server chosen by a repository file. ' +
-        `If you trust it, run: hushvault login --api-url ${projectApiUrl} (or set HUSHVAULT_API_URL).`,
+        `If you trust that server, set HUSHVAULT_API_URL=${projectApiUrl} (CI, or to work with several servers), ` +
+        `or run: hushvault login --api-url ${projectApiUrl}.`,
     )
   }
   return trusted

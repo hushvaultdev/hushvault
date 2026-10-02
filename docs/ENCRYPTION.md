@@ -44,13 +44,6 @@ decryptSecret(
   masterKeyBase64: string
 ): Promise<string>
 
-// Derive a 256-bit key from a password with PBKDF2-SHA256 (100,000 iterations).
-// Returns the derived key as a base64 string (raw key bytes), not a CryptoKey.
-// Not used by any route today; password hashing lives in apps/api/src/lib/auth.ts.
-deriveKeyFromPassword(password: string, saltBase64: string): Promise<string>
-
-// Generate a random salt
-generateSalt(): string  // base64
 ```
 
 ## Ciphertext Format

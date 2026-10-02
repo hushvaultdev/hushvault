@@ -11,6 +11,7 @@ import {
   issueSession,
   readRefreshCookie,
   revokeRefreshFamily,
+  rotateSession,
   rotateRefreshToken,
   setRefreshCookie,
   wantsBodyRefresh,
@@ -536,7 +537,11 @@ function presentedRefreshToken(c: Context<{ Bindings: Env }>, bodyToken: string 
 
 // POST /api/auth/refresh - exchange a refresh token for a new access token (rotates the refresh token)
 authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.default({})), async (c) => {
-  const presented = presentedRefreshToken(c, c.req.valid('json').refreshToken)
+  const bodyToken = c.req.valid('json').refreshToken
+  const presented = presentedRefreshToken(c, bodyToken)
+  // The token is only ever echoed in a body to a caller that already holds it there. A cookie-authenticated
+  // request (browser, possibly script-driven by XSS) must never be able to read a refresh token back out.
+  const viaCookie = !bodyToken
   const invalid = () => {
     clearRefreshCookie(c)
     return c.json({ error: 'INVALID_REFRESH', message: 'Session expired. Please sign in again.' }, 401)
@@ -556,8 +561,9 @@ authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.d
   const user = await c.env.DB.prepare('SELECT email_verified FROM users WHERE id = ? LIMIT 1').bind(rotated.userId).first<{ email_verified: number }>()
   if (!member || !user) return invalid()
 
-  const session = await issueSession(c.env, { userId: rotated.userId, orgId: member.org_id, role: member.role, family: rotated.family })
-  setRefreshCookie(c, session.refreshToken)
+  const session = await rotateSession(c.env, { userId: rotated.userId, orgId: member.org_id, role: member.role, family: rotated.family, consume: rotated.tokenId })
+  if (!session) return c.json({ error: 'REFRESH_RACE', message: 'Please retry' }, 409)
+  if (viaCookie) setRefreshCookie(c, session.refreshToken)
   return c.json({
     data: {
       token: session.accessToken,
@@ -566,7 +572,7 @@ authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.d
       orgId: member.org_id,
       role: member.role,
       emailVerified: user.email_verified === 1,
-      ...(wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}),
+      ...(!viaCookie && wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}),
     },
   })
 })
@@ -625,10 +631,12 @@ async function beginOAuthBinding(c: Context<{ Bindings: Env }>): Promise<{ chall
 async function consumeOAuthBinding(c: Context<{ Bindings: Env }>, state: string): Promise<string | null> {
   const name = oauthCookieName(c)
   const verifier = getCookie(c, name)
-  deleteCookie(c, name, { path: '/', secure: new URL(c.req.url).protocol === 'https:' })
   const verified = await verifyState(c.env.JWT_SECRET, state)
   if (!verified || !verifier) return null
-  return timingSafeEqual(await challengeFor(verifier), verified.challenge) ? verifier : null
+  if (!timingSafeEqual(await challengeFor(verifier), verified.challenge)) return null
+  // Cleared only after a match, so a stray callback hit cannot cancel someone else's in-flight login.
+  deleteCookie(c, name, { path: '/', secure: new URL(c.req.url).protocol === 'https:' })
+  return verifier
 }
 
 // GET /api/auth/github — begin the GitHub OAuth sign-in flow

@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
 import { apiFetch, endSession, refreshSession } from './api'
-import { clearSession, purgeLegacyStorage, readSession, writeSession } from './auth-storage'
+import { clearSession, hasSessionHint, markSessionHint, purgeLegacyStorage, readSession, writeSession } from './auth-storage'
 import type { Session } from './types'
 
 interface AuthContextValue {
@@ -30,7 +30,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // A page load has no access token in memory: trade the HttpOnly refresh cookie for one.
     // The OAuth callback adopts its own session, so skip the exchange there.
     purgeLegacyStorage()
-    if (window.location.pathname.startsWith('/auth/callback')) {
+    if (window.location.pathname.startsWith('/auth/callback') || !hasSessionHint()) {
       setReady(true)
       return
     }
@@ -53,6 +53,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
     const clean: Session = { token: next.token, userId: next.userId, orgId: next.orgId, role: next.role, emailVerified: next.emailVerified }
     writeSession(clean)
+    markSessionHint(true)
     setSession(clean)
   }, [])
 
@@ -64,11 +65,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
     const next: Session = { token: result.token, userId: result.userId, orgId: result.orgId, role: 'owner', emailVerified: result.emailVerified }
     writeSession(next)
+    markSessionHint(true)
     setSession(next)
   }, [])
 
   const applySession = useCallback((next: Session) => {
     writeSession(next)
+    markSessionHint(true)
     setSession(next)
   }, [])
 

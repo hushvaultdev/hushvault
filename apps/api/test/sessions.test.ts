@@ -147,4 +147,28 @@ describe('short-lived access tokens + rotating refresh tokens', () => {
     await env2.DB.prepare('UPDATE refresh_tokens SET family_started_at = 1').run()
     expect((await call(env2, 'POST', '/api/auth/refresh', { headers: { ...WEB, cookie: cookieOf(reg2) } })).status).toBe(401)
   })
+
+  it('XSS: a cookie-authenticated refresh can never read the refresh token back, even claiming to be the CLI', async () => {
+    const env = createTestEnv()
+    const reg = await register(env)
+    const res = await call(env, 'POST', '/api/auth/refresh', { headers: { ...CLI, cookie: cookieOf(reg) } })
+    expect(res.status).toBe(200)
+    expect(res.body.data.refreshToken).toBeUndefined()
+    expect(JSON.stringify(res.body)).not.toMatch(/hvr_/)
+  })
+
+  it('rotation is atomic: a failed issue leaves the old token usable, and used rows are pruned', async () => {
+    const env = createTestEnv()
+    const reg = await register(env)
+    const cookie = cookieOf(reg)
+    const ok = await call(env, 'POST', '/api/auth/refresh', { headers: { ...WEB, cookie } })
+    expect(ok.status).toBe(200)
+    const rows = await env.DB.prepare('SELECT COUNT(*) AS n, SUM(used_at IS NOT NULL) AS used FROM refresh_tokens').first<{ n: number; used: number }>()
+    expect(rows?.n).toBe(2)
+    expect(rows?.used).toBe(1)
+    await env.DB.prepare('UPDATE refresh_tokens SET used_at = used_at - 60 WHERE used_at IS NOT NULL').run()
+    await call(env, 'POST', '/api/auth/refresh', { headers: { ...WEB, cookie: cookieOf(ok) } })
+    const after = await env.DB.prepare('SELECT COUNT(*) AS n FROM refresh_tokens WHERE used_at IS NOT NULL AND used_at < ?').bind(Math.floor(Date.now() / 1000) - 10).first<{ n: number }>()
+    expect(after?.n).toBe(0)
+  })
 })

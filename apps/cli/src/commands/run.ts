@@ -17,9 +17,9 @@ export async function fetchSecretEnv(ctx: ProjectContext, envInput: string): Pro
 
 export function buildChildEnv(secrets: Record<string, string>, inherit: boolean): NodeJS.ProcessEnv {
   if (inherit) {
-    // The child must not receive HushVault's own credentials just because it is spawned by the CLI.
+    // The child must not receive HushVault's own credentials (HUSHVAULT_TOKEN etc.; HUSHVAULT_API_URL is not secret) just because it is spawned by the CLI.
     const parent = { ...process.env }
-    for (const k of Object.keys(parent)) if (k.startsWith('HUSHVAULT_')) delete parent[k]
+    for (const k of Object.keys(parent)) if (/^HUSHVAULT_.*(TOKEN|SECRET|KEY|PASSWORD)/.test(k)) delete parent[k]
     return { ...parent, ...secrets }
   }
   const base: NodeJS.ProcessEnv = {}
