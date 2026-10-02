@@ -215,6 +215,11 @@ const nameFilterSchema = z.object({
   deny: z.array(z.string().max(128).regex(NAME, 'Invalid name in deny list')).max(200).optional(),
 }).strict()
 
+const autoSyncSchema = z.object({
+  onChange: z.boolean().optional(),
+  scheduleMinutes: z.union([z.literal(15), z.literal(60), z.literal(360), z.literal(1440), z.null()]).optional(),
+}).strict()
+
 const createTargetSchema = z.object({
   projectId: z.string().min(1).max(64),
   envId: z.string().min(1).max(64),
@@ -222,12 +227,14 @@ const createTargetSchema = z.object({
   resource: z.record(z.unknown()),
   nameFilter: nameFilterSchema.optional(),
   deleteRemoved: z.boolean().optional(),
+  autoSync: autoSyncSchema.optional(),
 }).strict()
 
 const patchTargetSchema = z.object({
   resource: z.record(z.unknown()).optional(),
   nameFilter: nameFilterSchema.optional(),
   deleteRemoved: z.boolean().optional(),
+  autoSync: autoSyncSchema.optional(),
 }).strict()
 
 function canonicalFilter(f: { prefix?: string; deny?: string[] }): string {
@@ -324,8 +331,8 @@ integrationsRouter.post('/targets', ...adminOnly, integrationWriteRateLimit, zVa
   // The free-plan cap is enforced inside the INSERT, so concurrent requests cannot exceed it.
   try {
     await c.env.DB.prepare(
-      "INSERT INTO sync_targets (id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, fingerprint_salt, status, created_by, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ? WHERE (SELECT plan FROM organisations WHERE id = ?) <> 'free' OR (SELECT COUNT(*) FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL) < ?",
-    ).bind(id, auth.orgId, body.projectId, body.envId, conn.id, conn.provider, JSON.stringify(checked.resource), JSON.stringify(cleanFilter(body.nameFilter)), body.deleteRemoved ? 1 : 0, newFingerprintSalt(), auth.userId, now, now, auth.orgId, auth.orgId, FREE_PLAN_MAX_SYNC_TARGETS).run()
+      "INSERT INTO sync_targets (id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, sync_on_change, schedule_minutes, fingerprint_salt, status, created_by, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ? WHERE (SELECT plan FROM organisations WHERE id = ?) <> 'free' OR (SELECT COUNT(*) FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL) < ?",
+    ).bind(id, auth.orgId, body.projectId, body.envId, conn.id, conn.provider, JSON.stringify(checked.resource), JSON.stringify(cleanFilter(body.nameFilter)), body.deleteRemoved ? 1 : 0, body.autoSync?.onChange ? 1 : 0, body.autoSync?.scheduleMinutes ?? null, newFingerprintSalt(), auth.userId, now, now, auth.orgId, auth.orgId, FREE_PLAN_MAX_SYNC_TARGETS).run()
   } catch {
     return c.json({ error: 'INTERNAL_ERROR', message: 'Could not create the sync target' }, 500)
   }
@@ -369,6 +376,10 @@ integrationsRouter.patch('/targets/:id', ...adminOnly, integrationWriteRateLimit
   }
   const nameFilter = body.nameFilter !== undefined ? cleanFilter(body.nameFilter) : target.nameFilter
   const deleteRemoved = body.deleteRemoved ?? target.deleteRemoved
+  const autoSync = {
+    onChange: body.autoSync?.onChange ?? target.autoSync.onChange,
+    scheduleMinutes: body.autoSync?.scheduleMinutes !== undefined ? body.autoSync.scheduleMinutes : target.autoSync.scheduleMinutes,
+  }
   const filterChanged = canonicalFilter(nameFilter) !== canonicalFilter(target.nameFilter)
   // Changing what is synced (resource or filter) while a run is queued or running would let that run act on the
   // old settings: refuse. The UPDATE below repeats the check atomically for the race between check and write.
@@ -377,8 +388,8 @@ integrationsRouter.patch('/targets/:id', ...adminOnly, integrationWriteRateLimit
   if (structural && await hasActiveRun(c.env, id, now)) return c.json(busyBody, 409)
   const noActiveRun = "(? = 0 OR NOT EXISTS (SELECT 1 FROM sync_runs WHERE target_id = ? AND status IN ('queued', 'running') AND (lease_until IS NULL OR lease_until >= ?)))"
   const statements = [
-    c.env.DB.prepare(`UPDATE sync_targets SET resource_json = ?, name_filter_json = ?, delete_removed = ?, status = CASE WHEN ? = 1 THEN 'active' ELSE status END, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL AND ${noActiveRun}`)
-      .bind(JSON.stringify(resource), JSON.stringify(nameFilter), deleteRemoved ? 1 : 0, resourceChanged ? 1 : 0, now, id, auth.orgId, structural ? 1 : 0, id, now),
+    c.env.DB.prepare(`UPDATE sync_targets SET resource_json = ?, name_filter_json = ?, delete_removed = ?, sync_on_change = ?, schedule_minutes = ?, status = CASE WHEN ? = 1 THEN 'active' ELSE status END, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL AND ${noActiveRun}`)
+      .bind(JSON.stringify(resource), JSON.stringify(nameFilter), deleteRemoved ? 1 : 0, autoSync.onChange ? 1 : 0, autoSync.scheduleMinutes, resourceChanged ? 1 : 0, now, id, auth.orgId, structural ? 1 : 0, id, now),
   ]
   // The ledger describes names HushVault wrote to the OLD resource. On a new resource it must not authorise deletes.
   if (resourceChanged) {

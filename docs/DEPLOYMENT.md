@@ -193,6 +193,8 @@ database with a D1-capable token, like `0006`.
 
 ## Migrations
 
+**Migrations `0011_sync.sql` and `0012_sync_triggers.sql`** (sync engine tables; automatic-trigger columns and outbox) are applied the same way. Without `0012` the sync routes and the minute cron's sync sweep fail (logged as `sync.tick_step_failed`) but secrets, sign-in and key rotation are unaffected.
+
 **Migration `0010_integration_connections.sql`** (integration credential vault; also rebuilds the two small key-rotation tables with a wider CHECK, copying their rows) should be applied before the code that uses it: until then the key-rotation cron logs `key_rotation.tick_failed` each minute (its first query reads the new table) and `/api/integrations/*` returns 500; secrets and auth are unaffected. Apply with `pnpm --filter @hushvault/api db:migrate:dev` (then `:production`).
 
 **Migrations `0008_aad_enc_version.sql` (AAD ciphertext format) and `0009_refresh_tokens.sql` (refresh tokens, issue #77)** must be applied to a database *before* the code that uses them is deployed: without `0008` every secret read/write fails, without `0009` login and register fail. Apply with `pnpm --filter @hushvault/api db:migrate:dev` (then `:production`). Optional var `ENFORCE_AAD=true` refuses pre-AAD rows once none remain (see `docs/ENCRYPTION.md`). The web dashboard now keeps the access token in memory and relies on the API's `__Host-hv_refresh` cookie, so the web and API origins must share a registrable domain (`hushvault.dev`); local dev should use `localhost` for both.

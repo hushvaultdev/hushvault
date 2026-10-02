@@ -16,6 +16,7 @@ import { globalApiRateLimit } from './middleware/auth'
 import { RateLimiter } from './lib/rate-limiter-do'
 import { SecretTooLargeError, redactPath } from './lib/security'
 import { rotationTick } from './lib/key-rotation'
+import { syncTick } from './integrations/sync-scheduler'
 import type { EmailBinding } from './lib/email'
 import { registerProviders } from './integrations/providers'
 
@@ -167,5 +168,7 @@ export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(rotationTick(env).then(() => undefined))
+    // Automatic sync triggers (M4): outbox, schedules, retries. Independent of rotation; never throws.
+    ctx.waitUntil(syncTick(env).then(() => undefined, () => undefined))
   },
 }
