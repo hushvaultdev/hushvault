@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Field } from '@/components/ui/field'
+import { CliInstallSteps } from '@/components/cli/cli-install'
 import { ApiError, apiFetch } from '@/lib/api'
 
 import styles from './onboarding.module.css'
@@ -13,12 +14,6 @@ import styles from './onboarding.module.css'
 const s = (name: string) => styles[name]
 
 const STEPS = ['Create project', 'First secret', 'Install CLI'] as const
-
-const CLI_COMMANDS: ReadonlyArray<{ label: string; command: string }> = [
-  { label: 'Install the HushVault CLI globally', command: 'npm install -g hushvault' },
-  { label: 'Authenticate with your account', command: 'hushvault login' },
-  { label: 'Link this directory to a project', command: 'hushvault init' },
-]
 
 export default function OnboardingPage() {
   const [step, setStep] = useState(1)
@@ -94,10 +89,20 @@ export default function OnboardingPage() {
             isDone ? s('stepBadgeDone') : isActive ? s('stepBadgeActive') : ''
           }`.trim()
           const labelClass = `${s('stepLabel')} ${isActive || isDone ? s('stepLabelActive') : ''}`.trim()
+          // Steps are navigable: step 1 and the CLI step (3) are always reachable, so the
+          // install instructions stay available after a project exists. Step 2 needs a project.
+          const reachable = number !== 2 || projectId !== null
           return (
             <div className={s('step')} role="listitem" aria-current={isActive ? 'step' : undefined} key={label}>
-              <span className={badgeClass} aria-hidden="true">{isDone ? '✓' : number}</span>
-              <span className={labelClass}>{label}</span>
+              <button
+                type="button"
+                className={s('stepButton')}
+                disabled={!reachable}
+                onClick={() => { setError(null); setStep(number) }}
+              >
+                <span className={badgeClass} aria-hidden="true">{isDone ? '✓' : number}</span>
+                <span className={labelClass}>{label}</span>
+              </button>
               {number < STEPS.length ? <span className={s('stepConnector')} aria-hidden="true" /> : null}
             </div>
           )
@@ -189,14 +194,7 @@ export default function OnboardingPage() {
             <h2 className={s('panelTitle')}>Install the CLI</h2>
             <p className={s('panelSubtitle')}>Pull secrets into any environment straight from your terminal.</p>
           </div>
-          <ul className={s('cliList')}>
-            {CLI_COMMANDS.map(({ label, command }) => (
-              <li className={s('cliStep')} key={command}>
-                <span className={s('cliStepLabel')}>{label}</span>
-                <code className={s('cliCommand')}>{command}</code>
-              </li>
-            ))}
-          </ul>
+          <CliInstallSteps />
           <div className={s('doneActions')}>
             <Button variant="primary" href="/dashboard">Go to dashboard</Button>
             {projectId ? (
