@@ -14,6 +14,14 @@ import type { Env } from '../index'
 export const DEFAULT_GITHUB_ISSUER = 'https://token.actions.githubusercontent.com'
 export const DEFAULT_GITHUB_JWKS_URL = 'https://token.actions.githubusercontent.com/.well-known/jwks'
 
+/**
+ * Events that must never mint a token. A `pull_request_target` job runs in the BASE repository's privileged context
+ * — so its `ref` is the base branch and its `environment` is a real environment — while executing code influenced by
+ * an untrusted fork pull request. Without this, a branch or environment rule would match such a run. A plain
+ * `pull_request` run is excluded for the same reason (and GitHub's docs recommend allow-listing expected events).
+ */
+export const DENIED_EVENT_NAMES: readonly string[] = ['pull_request', 'pull_request_target']
+
 /** Claims this code reads. GitHub sends many more; anything not listed here is ignored. */
 export type GitHubOidcClaims = {
   iss?: string
@@ -25,7 +33,8 @@ export type GitHubOidcClaims = {
   /** "owner/name". Mutable: a transfer moves it, which is why repository_id can be pinned. */
   repository?: string
   /** Immutable numeric id of the repository. */
-  repository_id?: string
+  /** Documented as a string; a number is tolerated when comparing. */
+  repository_id?: string | number
   repository_owner?: string
   repository_owner_id?: string
   /** "refs/heads/main" etc. Absent for an environment-scoped token. */
@@ -37,6 +46,13 @@ export type GitHubOidcClaims = {
   job_workflow_ref?: string
   run_id?: string
   actor?: string
+}
+
+/** Only a string or a number is an identifier; anything else (array, object, null) matches nothing. */
+function toClaimString(value: unknown): string | null {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return null
 }
 
 export type OidcRule = {
@@ -55,8 +71,11 @@ export type OidcRule = {
  * environment, and the matching claim must be present: a token with neither matches nothing.
  */
 export function ruleMatches(rule: OidcRule, claims: GitHubOidcClaims): boolean {
+  // An untrusted-pull-request context can carry a trusted-looking ref or environment: never honour it.
+  if (typeof claims.event_name === 'string' && DENIED_EVENT_NAMES.includes(claims.event_name)) return false
   if (typeof claims.repository !== 'string' || claims.repository.toLowerCase() !== rule.repository) return false
-  if (rule.repositoryId !== null && claims.repository_id !== rule.repositoryId) return false
+  // GitHub documents repository_id as a string, but accept a number defensively rather than failing open.
+  if (rule.repositoryId !== null && toClaimString(claims.repository_id) !== rule.repositoryId) return false
   if (rule.ref !== null) return typeof claims.ref === 'string' && claims.ref === rule.ref
   if (rule.environment !== null) return typeof claims.environment === 'string' && claims.environment === rule.environment
   return false

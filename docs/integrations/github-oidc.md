@@ -1,6 +1,9 @@
 # GitHub Actions: read secrets with OIDC (no stored HushVault token)
 
-**Status: beta. Not yet verified against a live GitHub Actions run** — see "Unverified" at the end.
+**Status: beta. Not yet verified against a live GitHub Actions run** — see "Unverified" at the end. The claim
+formats and the token-request protocol below were checked against the GitHub documentation source
+(`github/docs`, `content/actions/reference/security/oidc.md`) and `actions/toolkit`; the live discovery and key-set
+endpoints could not be reached from the environment this was written in.
 
 A workflow proves who it is with a short-lived token GitHub signs for it. HushVault verifies that signature and, if an
 admin has granted that exact repository and branch (or GitHub environment) access, returns a token that can do exactly
@@ -22,8 +25,16 @@ curl -X POST "$HUSHVAULT_API_URL/api/ci-access/github/rules" \
 - Exactly one of `ref` (e.g. `refs/heads/main`) or `environment` (a GitHub environment name). Both are matched exactly,
   so a rule for `refs/heads/main` does not cover `refs/heads/main-hotfix`, a tag, or a pull request.
 
-Matching uses GitHub's **individual claims**, never the `sub` string, because a repository can customise how `sub` is
-built but cannot change `repository`, `repository_id`, `ref` or `environment`.
+**Pull-request runs never match any rule.** A `pull_request_target` job runs in the *base* repository's privileged
+context, so its `ref` is the trusted branch and its `environment` is a real environment, while it executes code
+influenced by an untrusted fork pull request. HushVault refuses `pull_request` and `pull_request_target` outright
+rather than relying on the ref to look untrustworthy.
+
+Matching uses GitHub's **individual claims**, never the `sub` string. A repository or organisation admin can
+reconfigure the `sub` template (`include_claim_keys`) so that `sub` does not even begin with `repo:` — for example
+`repository_owner:monalisa` — and GitHub moved repositories created after 2026-07-15 to an immutable
+`repo:owner@123/repo@456:...` form that a renamed repository also adopts. The individual claims are stable under all of
+that, so matching them is both simpler and safer than any `sub` prefix rule.
 
 ## 2. Use it in a workflow
 
@@ -67,14 +78,21 @@ middleware as an allowlist, so any other route is refused by default.
 |---|---|---|
 | `GITHUB_OIDC_ISSUER` | `https://token.actions.githubusercontent.com` | Override for GitHub Enterprise Server. |
 | `GITHUB_OIDC_JWKS_URL` | `https://token.actions.githubusercontent.com/.well-known/jwks` | Key set. |
-| `GITHUB_OIDC_AUDIENCE` | `API_PUBLIC_URL`, else `https://api.hushvault.dev` | The audience a token must carry. A HushVault-specific audience stops a token minted for another service being replayed here, so the workflow must request the same value. |
+| `GITHUB_OIDC_AUDIENCE` | `API_PUBLIC_URL`, else `https://api.hushvault.dev` | The audience a token must carry, compared with exact equality. **This matters:** GitHub's default audience is the repository owner's URL (e.g. `https://github.com/acme`), which is minted for *every* workflow in that organisation that asks for a token. Requiring a HushVault-specific audience means a token minted for something else cannot be replayed here. The action requests this value. |
 
 ## Limits and caveats
 
 - Read-only, one environment per token, ten minutes.
 - A rule grants a *branch or GitHub environment*, not a repository as a whole. There is no wildcard, by design.
-- Fork pull requests: GitHub does not give a fork's workflow `id-token: write` for the base repository, and a
-  `refs/pull/N/merge` ref does not match a branch rule anyway. **Not verified in a live run.**
+- Pull requests are refused by event name (above), so neither a fork PR nor `pull_request_target` can mint a token.
+  **Not verified in a live run.**
+- GitHub Enterprise Server uses a different issuer (`https://HOSTNAME/_services/token`), and GitHub Enterprise Cloud
+  can set a unique issuer per enterprise (`https://token.actions.githubusercontent.com/<slug>`). Both need
+  `GITHUB_OIDC_ISSUER` and `GITHUB_OIDC_JWKS_URL` set; read `jwks_uri` from that issuer's
+  `/.well-known/openid-configuration` rather than assuming the path. A unique enterprise issuer is a real security
+  gain: only that enterprise's repositories can mint tokens with it.
+- GitHub's tokens are short-lived (the documented example is 300 s) and carry a backdated `nbf`; HushVault allows 60 s
+  of clock skew either way.
 - The JWKS cache lives in the secrets KV namespace under `jwks:` keys. It holds public keys only.
 
 ## Unverified
@@ -82,9 +100,10 @@ middleware as an allowlist, so any other route is refused by default.
 Egress to GitHub is blocked from the environment this was written in, so the following come from the code's defaults and
 must be confirmed on the first live run (they are configuration, not code changes):
 
-- The issuer and `jwks_uri` values above, and the key-set shape.
-- The exact token-request protocol the action uses (`ACTIONS_ID_TOKEN_REQUEST_URL` + `&audience=`, `Bearer` on
-  `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, `api-version=2.0`, response `{ "value": "<jwt>" }`).
-- The default audience when a workflow requests no audience.
-- Token lifetime, and whether `environment` appears only for jobs declaring `environment:`.
-- Whether `repository_id` is sent as a string or a number (the rule compares strings).
+- The live `jwks_uri` value and the key-set shape (`kty`/`alg`/`use`/`kid`), and any key-rotation cadence — GitHub
+  publishes none, which is why the verifier refetches on an unknown `kid` instead of pinning anything.
+- The `api-version` literal already present in `ACTIONS_ID_TOKEN_REQUEST_URL`. The action appends `&audience=`, which
+  matches `actions/toolkit`, so it does not need to know this.
+- That `environment` appears only for jobs declaring `environment:`, and the exact token lifetime in practice.
+- `repository_id` is documented as a string; the rule accepts a number too rather than failing open.
+- The GitHub Enterprise Server `jwks_uri` path.

@@ -71,11 +71,22 @@ describe('ruleMatches', () => {
     expect(ruleMatches({ ...base, ref: null, environment: null }, claims)).toBe(false) // a rule with no constraint matches nothing
   })
 
+  it('never matches a pull request context, whose ref or environment looks trusted but is not', () => {
+    for (const event_name of ['pull_request', 'pull_request_target']) {
+      expect(ruleMatches(base, { ...claims, event_name })).toBe(false)
+      expect(ruleMatches({ ...base, ref: null, environment: 'production' }, { ...claims, environment: 'production', event_name })).toBe(false)
+    }
+    expect(ruleMatches(base, { ...claims, event_name: 'push' })).toBe(true)
+    expect(ruleMatches(base, { ...claims, event_name: 'workflow_dispatch' })).toBe(true)
+  })
+
   it('honours a pinned repository id, so a rename or transfer cannot inherit the grant', () => {
     const pinned = { ...base, repositoryId: '12345' }
     expect(ruleMatches(pinned, claims)).toBe(true)
     expect(ruleMatches(pinned, { ...claims, repository_id: '999' })).toBe(false)
     expect(ruleMatches(pinned, { ...claims, repository_id: undefined })).toBe(false)
+    expect(ruleMatches(pinned, { ...claims, repository_id: 12345 })).toBe(true) // numeric form tolerated
+    expect(ruleMatches(pinned, { ...claims, repository_id: ['12345'] as never })).toBe(false)
   })
 
   it('an environment rule needs the environment claim and ignores the ref', () => {
@@ -119,6 +130,8 @@ describe('POST /api/auth/github-oidc', () => {
     expect((await exchange({ token: await githubToken({ repository: 'acme/other' }), envId: w.envId })).status).toBe(403)
     // A pull_request ref is a different ref, so it does not inherit a branch rule.
     expect((await exchange({ token: await githubToken({ ref: 'refs/pull/7/merge', event_name: 'pull_request' }), envId: w.envId })).status).toBe(403)
+    // ATTACK: pull_request_target runs in the BASE repo context, so its ref IS the trusted branch. Still refused.
+    expect((await exchange({ token: await githubToken({ event_name: 'pull_request_target' }), envId: w.envId })).status).toBe(403)
   })
 
   it('ATTACK: a rule in one organisation cannot be used to read another organisation; cross-org env ids are refused', async () => {
