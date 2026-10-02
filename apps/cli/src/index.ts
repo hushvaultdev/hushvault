@@ -7,6 +7,7 @@ import { runCommand } from './commands/run.js'
 import { getCommand } from './commands/get.js'
 import { setCommand } from './commands/set.js'
 import { shareCommand } from './commands/share.js'
+import { syncCommand } from './commands/sync.js'
 
 const program = new Command()
 
@@ -23,5 +24,6 @@ program.addCommand(runCommand)
 program.addCommand(getCommand)
 program.addCommand(setCommand)
 program.addCommand(shareCommand)
+program.addCommand(syncCommand)
 
 program.parse(process.argv)
