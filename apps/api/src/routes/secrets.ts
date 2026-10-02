@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { loadKeyRing, encryptSecretWithRing, decryptSecretWithRing } from '../crypto/envelope'
+import { loadWriteRing } from '../lib/key-rotation'
 import { createPrefixedId } from '../lib/auth'
 import { requireAuth, requireRole, secretReadRateLimit, secretWriteRateLimit } from '../middleware/auth'
 import { MAX_SECRET_VALUE_BYTES, getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
@@ -145,7 +146,7 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
 
   const secretId = createPrefixedId('sec')
   const secretValue = value ?? template ?? ''
-  const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(secretValue, loadKeyRing(c.env))
+  const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(secretValue, await loadWriteRing(c.env))
   await c.env.SECRETS_KV.put(`secret:${secretId}`, encryptedValue)
 
   const now = new Date().toISOString()
@@ -234,7 +235,7 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
       const oldBlob = await c.env.SECRETS_KV.get(kvKey)
       const historyId = createPrefixedId('sech')
       const historyKey = `secrethist:${historyId}`
-      const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(newPlaintext, loadKeyRing(c.env))
+      const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(newPlaintext, await loadWriteRing(c.env))
 
       if (oldBlob !== null) {
         await c.env.SECRETS_KV.put(historyKey, oldBlob)

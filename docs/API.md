@@ -415,12 +415,12 @@ Read-only encryption key status for the caller's organisation. Roles: `admin`, `
   "activeVersion": "v2",
   "rows": { "secrets": { "v1": 0, "v2": 42 }, "history": { "v1": 3, "v2": 17 } },
   "oldVersionsInUse": ["v1"],
-  "job": { "status": "running", "phase": "history", "rewrapped": 40, "skipped": 0, "failed": 0,
-           "startedAt": "2026-10-02T03:00:00.000Z", "completedAt": null, "errorCode": null }
+  "job": { "status": "running", "phase": "history",
+           "startedAt": "2026-10-02T03:00:00.000Z", "completedAt": null }
 } }
 ```
 
-`activeVersion` is `null` until the first scheduled tick registers the key (and until migration 0006 is applied the route returns `500 INTERNAL_ERROR`). `job` is `null` if no rotation has ever run.
+`activeVersion` is `null` until the first scheduled tick registers the key (and until migration 0006 is applied the route returns `500 INTERNAL_ERROR`). `job` is the most recent rotation and is deployment-wide, so it carries only status, phase and timestamps (the row counts above are scoped to your organisation); it is `null` if no rotation has ever run.
 
 ---
 

@@ -157,8 +157,8 @@ async function importKek(base64Key: string, usages: Array<'encrypt' | 'decrypt'>
  * Build the key ring from the Worker environment. Keys are imported lazily and
  * memoised per ring instance (one per request or scheduled tick), never globally.
  */
-export function loadKeyRing(env: KeyRingEnv): KeyRing {
-  const activeVersion = env.ENCRYPTION_ACTIVE_KEY_VERSION?.trim() || 'v1'
+export function loadKeyRing(env: KeyRingEnv, override?: { activeVersion?: string }): KeyRing {
+  const activeVersion = override?.activeVersion ?? (env.ENCRYPTION_ACTIVE_KEY_VERSION?.trim() || 'v1')
   if (!isValidKeyVersion(activeVersion)) throw new KeyRingError('KEY_VERSION_INVALID')
   const cache = new Map<string, Promise<CryptoKey>>()
   const ring: KeyRing = {
@@ -175,6 +175,15 @@ export function loadKeyRing(env: KeyRingEnv): KeyRing {
     },
   }
   return ring
+}
+
+/** True if `wrappedDek` unwraps under `key` to a 32-byte DEK. Used to sanity-check a key against real data. */
+export async function canUnwrapDek(wrappedDek: string, key: CryptoKey): Promise<boolean> {
+  try {
+    return base64ToBuffer(await decrypt(wrappedDek, key)).byteLength === KEK_BYTES
+  } catch {
+    return false
+  }
 }
 
 /** Envelope-encrypt under the ring's active key. Returns the version used. */

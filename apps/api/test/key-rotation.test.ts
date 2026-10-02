@@ -241,19 +241,59 @@ describe('key rotation engine', () => {
     expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 2, 'secret_history:v1': 2 })
   })
 
-  it('fails the job without writing when a key disappears mid-rotation', async () => {
+  it('holds the job (does not fail it) when a key disappears mid-rotation, and resumes when it returns', async () => {
     const ctx = await setup()
-    await seedMany(ctx, 30)
+    const expected = await seedMany(ctx, 30)
     await rotationTick(ctx.env as never)
     activate(ctx.env, 'v2')
     await rotationTick(ctx.env as never, { batchSize: 10 }) // activation
     await rotationTick(ctx.env as never, { batchSize: 10 }) // one batch
     const before = await versionCounts(ctx)
+    const v2Key = ctx.env['ENCRYPTION_KEY_V2'] as string
     delete ctx.env['ENCRYPTION_KEY_V2']
-    expect(await rotationTick(ctx.env as never)).toEqual({ state: 'failed', code: 'KEY_VERSION_UNAVAILABLE' })
-    expect(await versionCounts(ctx)).toEqual(before) // nothing written after the key vanished
-    const job = await ctx.env.DB.prepare('SELECT status, last_error_code FROM key_rotations').first<{ status: string; last_error_code: string }>()
-    expect(job).toEqual({ status: 'failed', last_error_code: 'KEY_VERSION_UNAVAILABLE' })
+    expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_VERSION_UNAVAILABLE' })
+    expect(await versionCounts(ctx)).toEqual(before) // nothing written while the key is missing
+    const held = await ctx.env.DB.prepare('SELECT status, last_error_code FROM key_rotations').first<{ status: string; last_error_code: string }>()
+    expect(held).toEqual({ status: 'running', last_error_code: 'KEY_VERSION_UNAVAILABLE' })
+
+    ctx.env['ENCRYPTION_KEY_V2'] = v2Key // operator fixes the deployment
+    const results = await runToEnd(ctx.env, { batchSize: 10 })
+    expect(results.at(-1)).toEqual({ state: 'completed', failed: 0 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 30, 'secret_history:v2': 30 })
+    await assertAllDecryptable(ctx, expected)
+  })
+
+  it('quarantines a row labelled with an unknown key version instead of stopping', async () => {
+    const ctx = await setup()
+    await seedMany(ctx, 4)
+    await ctx.env.DB.prepare("UPDATE secrets SET key_version = 'v7' WHERE name = 'S_1'").run()
+    await rotationTick(ctx.env as never)
+    activate(ctx.env, 'v2')
+    const results = await runToEnd(ctx.env)
+    expect(results.at(-1)).toEqual({ state: 'completed', failed: 1 })
+    const f = await ctx.env.DB.prepare('SELECT error_code FROM key_rotation_failures').all()
+    expect(f.results).toEqual([{ error_code: 'KEY_VERSION_UNAVAILABLE' }])
+  })
+
+  it('first tick on a populated database with ACTIVE=v2 registers v1 and still rotates', async () => {
+    const ctx = await setup()
+    const expected = await seedMany(ctx, 12)
+    activate(ctx.env, 'v2') // migration 0006 and the cron deploy go out together with ACTIVE=v2
+    const results = await runToEnd(ctx.env, { batchSize: 5 })
+    expect(results[0]).toEqual({ state: 'bootstrapped', version: 'v1' })
+    expect(results[1]).toMatchObject({ state: 'activated', from: 'v1', to: 'v2' })
+    expect(results.at(-1)).toEqual({ state: 'completed', failed: 0 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 12, 'secret_history:v2': 12 })
+    await assertAllDecryptable(ctx, expected)
+  })
+
+  it('refuses to bootstrap when the deployed key cannot unwrap existing data', async () => {
+    const ctx = await setup()
+    await seedMany(ctx, 3)
+    ctx.env.ENCRYPTION_MASTER_KEY = b64() // wrong key on the very first tick
+    expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+    const n = await ctx.env.DB.prepare('SELECT count(*) AS n FROM encryption_keys').first<{ n: number }>()
+    expect(n!.n).toBe(0)
   })
 
   it('quarantines a corrupt row, finishes the rest, and reports completed_with_errors', async () => {

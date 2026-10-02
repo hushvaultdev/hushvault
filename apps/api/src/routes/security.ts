@@ -5,7 +5,8 @@ import { requireAuth, requireRole } from '../middleware/auth'
 const router = new Hono<{ Bindings: Env }>()
 
 // GET /api/security/key-rotation - read-only encryption key status for the caller's organisation.
-// Counts only: no secret ids, keys, wrapped DEKs or ciphertext. Starting or retiring a
+// The job block is deployment-wide, so it carries no counters or error codes (only status and
+// timestamps); row counts are scoped to the caller's organisation. No secret ids, keys, wrapped DEKs or ciphertext. Starting or retiring a
 // rotation is an operator action (deploy), never available through this API.
 router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
   const auth = c.get('auth')
@@ -25,8 +26,8 @@ router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
   for (const r of historyRows.results ?? []) history[r.version] = r.n
 
   const job = await c.env.DB.prepare(
-    'SELECT status, phase, rewrapped, skipped, failed, started_at, completed_at, last_error_code FROM key_rotations ORDER BY started_at DESC LIMIT 1',
-  ).first<{ status: string; phase: string; rewrapped: number; skipped: number; failed: number; started_at: string; completed_at: string | null; last_error_code: string | null }>()
+    'SELECT status, phase, started_at, completed_at FROM key_rotations ORDER BY started_at DESC LIMIT 1',
+  ).first<{ status: string; phase: string; started_at: string; completed_at: string | null }>()
 
   const versionsInUse = new Set([...Object.keys(secrets), ...Object.keys(history)])
   const oldVersionsInUse = [...versionsInUse].filter((v) => v !== active?.version).sort()
@@ -40,12 +41,8 @@ router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
         ? {
             status: job.status,
             phase: job.phase,
-            rewrapped: job.rewrapped,
-            skipped: job.skipped,
-            failed: job.failed,
             startedAt: job.started_at,
             completedAt: job.completed_at,
-            errorCode: job.last_error_code,
           }
         : null,
     },
