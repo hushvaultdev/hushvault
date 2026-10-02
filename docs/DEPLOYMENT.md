@@ -61,8 +61,9 @@ root directory, API token, build variables and secrets):
 | `hushvault-web-dev` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:dev` |
 | `hushvault-web` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:production` |
 
-- `verify` (API) runs type-check and the unit tests for the API and the packages it
-  depends on; (web) type-check and lint. Defined in each app's `package.json`.
+- `verify` (API) runs type-check and the unit tests for the API, the packages it
+  depends on, and the GitHub Action in `apps/secrets-action`; (web) type-check, lint
+  and the web + shared tests. Defined in each app's `package.json`.
 - API deploy scripts run **D1 migrations first, then deploy**
   (`wrangler d1 migrations apply DB --remote --env <env>` then `wrangler deploy --env <env>`).
   Use `deploy:dev:code-only` / `deploy:production:code-only` to skip migrations.
@@ -70,6 +71,9 @@ root directory, API token, build variables and secrets):
   so an API change does not rebuild the web Worker and vice versa
   (<https://developers.cloudflare.com/workers/ci-cd/builds/build-watch-paths/>;
   include `apps/<app>/**`, `packages/shared/**`, `pnpm-lock.yaml`).
+  For the **API** Workers also include `apps/secrets-action/**`: the GitHub Action has
+  no Worker of its own, so its tests ride the API `verify` and only run when the API
+  build does. Without that watch path, an action-only change ships untested.
 - Web only: set the **build variable** `NEXT_PUBLIC_API_URL` (inlined at build time).
 - Node: Workers Builds defaults to Node 24.18.0 and preinstalls 22.23.2 and 24.18.0;
   `.nvmrc` in this repo pins major `22`. The API tests use `node:sqlite`

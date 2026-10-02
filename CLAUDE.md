@@ -79,7 +79,7 @@ pnpm dev              # Start all apps in dev mode (Turborepo)
 pnpm build            # Build all packages
 pnpm test             # Run all tests (Vitest)
 pnpm type-check       # TypeScript check across monorepo
-pnpm lint             # ESLint across monorepo
+pnpm lint             # ESLint — apps/web only (api, cli and shared have no lint task yet)
 
 # API (apps/api)
 wrangler dev          # Local Workers dev server

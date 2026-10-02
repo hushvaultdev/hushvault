@@ -3,7 +3,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
-import { requireAuth, requireRole, shareAccessRateLimit } from '../middleware/auth'
+import { requireAuth, requireRole, requireVerifiedEmailIfEnforced, shareAccessRateLimit } from '../middleware/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 
 export const shareRoutes = new Hono<{ Bindings: Env }>()
@@ -24,7 +24,10 @@ function webBaseUrl(env: Env): string {
 }
 
 // POST /api/share — create a one-time share link
-shareRoutes.post('/', requireAuth, requireRole('member'), zValidator('json', shareSchema), async (c) => {
+// requireVerifiedEmailIfEnforced is here for the same reason it is on api-keys: a share link
+// is an exfiltration path, and someone who signed up with an address they do not own should
+// not be able to use one. Without it the flag blocked API keys and left this route open.
+shareRoutes.post('/', requireAuth, requireVerifiedEmailIfEnforced, requireRole('member'), zValidator('json', shareSchema), async (c) => {
   const auth = c.get('auth')
   const { encryptedPayload, expiresAt, maxViews } = c.req.valid('json')
   const now = Date.now()

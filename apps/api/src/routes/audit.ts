@@ -2,7 +2,15 @@ import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
-import { requireAuth } from '../middleware/auth'
+import {
+  auditExportRateLimit,
+  auditReadRateLimit,
+  requireAuth,
+  requireCurrentAdmin,
+  requireHuman,
+  requireRole,
+} from '../middleware/auth'
+import { getRequestIp, writeAuditLog } from '../lib/security'
 import {
   AUDIT_RETENTION_DAYS,
   DEFAULT_RETENTION_DAYS,
@@ -124,12 +132,20 @@ const retentionUpdateSchema = z.object({
 })
 
 // PUT /api/audit/retention — set or clear the org's retention override.
-// Owners/admins only; members and viewers cannot change compliance settings.
-auditRoutes.put('/retention', zValidator('json', retentionUpdateSchema), async (c) => {
+//
+// This is the one setting that can hide existing audit rows from every read path, so it
+// is held to the same bar as the other admin mutations (a person, currently an admin —
+// not an API key) and it writes its own audit row. Without that row, shortening the
+// window and restoring it afterwards left no trace at all, which made the audit log
+// erasable by whoever it was supposed to be watching.
+auditRoutes.put(
+  '/retention',
+  requireHuman,
+  requireRole('admin'),
+  requireCurrentAdmin,
+  zValidator('json', retentionUpdateSchema),
+  async (c) => {
   const auth = c.get('auth')
-  if (auth.role !== 'owner' && auth.role !== 'admin') {
-    return c.json({ error: 'FORBIDDEN', message: 'Insufficient permissions' }, 403)
-  }
 
   const { overrideDays } = c.req.valid('json')
 
@@ -148,12 +164,28 @@ auditRoutes.put('/retention', zValidator('json', retentionUpdateSchema), async (
     )
   }
 
+  const previousOverride = current.auditRetentionDays
+
   const result = await c.env.DB.prepare('UPDATE organisations SET audit_retention_days = ? WHERE id = ?')
     .bind(overrideDays, auth.orgId)
     .run()
   if (!result.success) {
     return c.json({ error: 'INTERNAL_ERROR', message: 'Could not update retention' }, 500)
   }
+
+  // Written after the UPDATE and before the response, and deliberately not swallowed:
+  // if the trail cannot record the change, the change does not get reported as applied.
+  // The old and new values go in the action suffix because audit_log has no detail column.
+  await writeAuditLog(c.env, {
+    orgId: auth.orgId,
+    actorId: auth.userId,
+    actorType: auth.actorType,
+    action: 'audit.retention.update',
+    resourceType: 'organisation',
+    resourceId: `${previousOverride ?? 'plan-default'}->${overrideDays ?? 'plan-default'}`,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
 
   const retention = await loadOrgRetention(c.env, auth.orgId)
   if (!retention) {
@@ -171,7 +203,7 @@ auditRoutes.put('/retention', zValidator('json', retentionUpdateSchema), async (
 
 // GET /api/audit/export — compliance export of the org's audit log as CSV/JSON.
 // Team/Enterprise plans only. Org-scoped, retention-filtered, capped row count.
-auditRoutes.get('/export', zValidator('query', exportQuerySchema), async (c) => {
+auditRoutes.get('/export', auditExportRateLimit, zValidator('query', exportQuerySchema), async (c) => {
   const auth = c.get('auth')
   const { format, from, to, action, actorId } = c.req.valid('query')
 
@@ -221,7 +253,7 @@ auditRoutes.get('/export', zValidator('query', exportQuerySchema), async (c) => 
 
 // GET /api/audit — list the org's audit log (retention-filtered, paginated).
 // Supports from/to/action/actorId filters and keyset pagination via `cursor`.
-auditRoutes.get('/', zValidator('query', listQuerySchema), async (c) => {
+auditRoutes.get('/', auditReadRateLimit, zValidator('query', listQuerySchema), async (c) => {
   const auth = c.get('auth')
   const { from, to, action, actorId, cursor } = c.req.valid('query')
 

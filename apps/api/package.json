@@ -8,7 +8,7 @@
     "build": "tsc --noEmit",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
-    "verify": "pnpm --workspace-root exec turbo run type-check test --filter=@hushvault/api...",
+    "verify": "pnpm --workspace-root exec turbo run type-check test --filter=@hushvault/api... --filter=@hushvault/secrets-action",
     "deploy:dry-run": "wrangler deploy --dry-run --env dev --outdir .wrangler/dry-run",
     "deploy:dev": "pnpm run db:migrate:dev && wrangler deploy --env dev",
     "deploy:dev:code-only": "wrangler deploy --env dev",

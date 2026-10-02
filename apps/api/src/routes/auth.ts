@@ -598,29 +598,51 @@ authRoutes.post('/logout', refreshRateLimit, zValidator('json', refreshSchema.de
   return c.json({ data: { loggedOut: true } })
 })
 
+const logoutAllSchema = z
+  .object({
+    /**
+     * API keys are machine credentials, not sessions, so "sign out everywhere" leaves them
+     * alone by default — silently revoking them would break the caller's CI with no warning.
+     * Someone recovering from a stolen laptop or a suspected takeover wants them gone too,
+     * so it is an explicit opt-in and the response always reports how many keys are live.
+     */
+    revokeApiKeys: z.boolean().optional(),
+  })
+  .default({})
+
 // POST /api/auth/logout-all - end every session of the signed-in user (access tokens too)
-authRoutes.post('/logout-all', requireAuth, async (c) => {
+authRoutes.post('/logout-all', requireAuth, zValidator('json', logoutAllSchema), async (c) => {
   const auth = c.get('auth')
   if (auth.actorType !== 'user') {
     return c.json({ error: 'FORBIDDEN', message: 'Sign in as a user to end all sessions' }, 403)
   }
-  const cutoff = Math.floor(Date.now() / 1000) + 1
-  await c.env.DB.batch([
+  const { revokeApiKeys } = c.req.valid('json')
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const cutoff = nowSeconds + 1
+  const statements = [
     c.env.DB.prepare('UPDATE users SET sessions_valid_after = ? WHERE id = ?').bind(cutoff, auth.userId),
     c.env.DB.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(auth.userId),
-  ])
+  ]
+  if (revokeApiKeys) {
+    statements.push(revokeApiKeysStatement(c.env, auth.userId, nowSeconds, 'logout_all'))
+  }
+  await c.env.DB.batch(statements)
   clearRefreshCookie(c)
   await writeAuditLog(c.env, {
     orgId: auth.orgId,
     actorId: auth.userId,
     actorType: 'user',
-    action: 'auth.logout_all',
+    action: revokeApiKeys ? 'auth.logout_all_with_keys' : 'auth.logout_all',
     resourceType: 'user',
     resourceId: auth.userId,
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),
   })
-  return c.json({ data: { loggedOut: true } })
+  // Reported so a client can tell the user what is still able to reach their secrets.
+  const live = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE user_id = ? AND revoked_at IS NULL')
+    .bind(auth.userId)
+    .first<{ n: number }>()
+  return c.json({ data: { loggedOut: true, apiKeysRevoked: Boolean(revokeApiKeys), apiKeysStillActive: live?.n ?? 0 } })
 })
 
 const OAUTH_COOKIE_TTL_SECONDS = 600

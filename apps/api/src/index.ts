@@ -173,7 +173,9 @@ export { app }
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(rotationTick(env).then(() => undefined))
+    // Both ticks swallow their own failures: an unhandled rejection in one waitUntil
+    // promise must never abort the other.
+    ctx.waitUntil(rotationTick(env).then(() => undefined, () => undefined))
     // Automatic sync triggers (M4): outbox, schedules, retries. Independent of rotation; never throws.
     ctx.waitUntil(syncTick(env).then(() => undefined, () => undefined))
   },

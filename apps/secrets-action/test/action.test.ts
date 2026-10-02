@@ -246,3 +246,18 @@ describe('names allowlist', () => {
     expect(action.parseNames(' A_B, C_D\n E_F ')).toEqual(['A_B', 'C_D', 'E_F'])
   })
 })
+
+// The workflow runs dist/index.js (action.yml `main`), but every test above imports
+// src/index.js. If the two ever diverge, the shipped action is untested code.
+describe('shipped bundle', () => {
+  it('dist/index.js is byte-identical to src/index.js', () => {
+    const src = readFileSync(join(__dirname, '..', 'src', 'index.js'))
+    const dist = readFileSync(join(__dirname, '..', 'dist', 'index.js'))
+    expect(dist.equals(src)).toBe(true)
+  })
+
+  it('action.yml points at the file the build produces', () => {
+    const yml = readFileSync(join(__dirname, '..', 'action.yml'), 'utf8')
+    expect(yml).toContain('dist/index.js')
+  })
+})

@@ -53,8 +53,14 @@ export async function writeAuditLog(env: Env, entry: {
   ).run()
 }
 
+/**
+ * The client IP recorded in the audit log. Only cf-connecting-ip is trusted: it is set by
+ * Cloudflare's edge and cannot be forged by the caller, while x-forwarded-for is
+ * client-controlled and would let anyone write a chosen IP into another org's audit trail.
+ * Same rule as the rate limiter (middleware/rate-limit.ts) and the OIDC refetch budget.
+ */
 export function getRequestIp(c: { req: { header(name: string): string | undefined } }): string | null {
-  return c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? null
+  return c.req.header('cf-connecting-ip') ?? null
 }
 /** Log a key-ring configuration problem: error code and key version label only, never key material. */
 export function logKeyRingError(err: unknown): void {
