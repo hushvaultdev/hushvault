@@ -4,6 +4,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { encryptCredentialWithRing } from '../crypto/envelope'
+import { enqueueSyncForTarget } from '../integrations/sync-scheduler'
 import { getProvider, connectableProviderIds } from '../integrations/provider'
 import { isDeniedAccount, isTargetDenied } from '../integrations/target-denylist'
 import { SyncEngineError, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
@@ -401,6 +402,8 @@ integrationsRouter.patch('/targets/:id', ...adminOnly, integrationWriteRateLimit
   await audit(c, auth, 'sync.target.update', id, 'sync_target')
   const updated = await loadSyncTarget(c.env, id, auth.orgId)
   if (!updated) return c.json(notFound('Sync target'), 404)
+  // A re-activated on-change target missed any changes made while it needed attention: catch up.
+  if (resourceChanged && updated.autoSync.onChange && updated.status === 'active') await enqueueSyncForTarget(c.env, id)
   return c.json({ data: await toSyncTargetDto(c.env, updated) })
 })
 

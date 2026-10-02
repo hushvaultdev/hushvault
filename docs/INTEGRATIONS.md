@@ -55,5 +55,5 @@ Off by default, per target (`autoSync`). Manual runs always work.
   per target at a time.
 - **Audit:** automatic runs are written as `sync.run.*` by the `system` actor.
 - **Runtime:** everything runs inside the existing minute cron (`apps/api/src/integrations/sync-scheduler.ts`), with no Queues.
-  A very large backlog is processed 25 targets per sweep per step. Cloudflare's per-invocation subrequest limit on the Workers
+  Each sweep starts at most 5 runs (a run makes many subrequests), so a backlog drains over the following minutes. Cloudflare's per-invocation subrequest limit on the Workers
   Free plan has not been checked against a busy sweep; that is part of the combined beta test.

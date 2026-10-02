@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
   target_id TEXT NOT NULL REFERENCES sync_targets(id) ON DELETE CASCADE,
   org_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  -- Last time a secret changed while this row was pending. A run only completes the row if no change landed after
+  -- it claimed it (otherwise the change would be lost: the run may have planned before the write).
+  changed_at TEXT NOT NULL,
   due_at TEXT NOT NULL,
   claimed_at TEXT,
   done_at TEXT

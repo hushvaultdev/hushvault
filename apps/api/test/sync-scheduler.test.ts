@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  DEFER_MS, MAX_AUTO_RUNS_PER_ORG_PER_HOUR, OUTBOX_CLAIM_MS, SYNC_DEBOUNCE_MS, enqueueSyncForEnvironment, syncTick,
+  DEFER_MS, MAX_AUTO_RUNS_PER_ORG_PER_HOUR, MAX_RUNS_PER_TICK, OUTBOX_CLAIM_MS, SYNC_DEBOUNCE_MS, enqueueSyncForEnvironment, syncTick,
 } from '../src/integrations/sync-scheduler'
 import { MAX_SYNC_ATTEMPTS } from '../src/integrations/sync-engine'
 import { call, createTestEnv, seedEnvironment, type TestEnv } from './helpers/env'
@@ -31,7 +31,7 @@ describe('on-change outbox', () => {
     expect(await enqueueSyncForEnvironment(env as never, w.envId)).toBe(0) // flag off
     await setAuto(w.targetId, 1)
     expect(await enqueueSyncForEnvironment(env as never, w.envId)).toBe(1)
-    expect(await enqueueSyncForEnvironment(env as never, w.envId)).toBe(0) // coalesced
+    await enqueueSyncForEnvironment(env as never, w.envId) // coalesces into the same row
     const rows = await outbox()
     expect(rows).toHaveLength(1)
     expect(JSON.stringify(rows)).not.toMatch(/postgres|k-1/) // ids only
@@ -111,6 +111,96 @@ describe('on-change outbox', () => {
     expect(tick.changeRuns).toBe(0)
     expect((await outbox())[0]?.['done_at']).toBeNull()
     expect((await outbox())[0]?.['claimed_at']).toBeNull()
+  })
+})
+
+describe('review fixes', () => {
+  it('a change that lands while its row is being run is not lost: the row stays pending and runs again', async () => {
+    const w = await setupSyncWorld(env, { secrets: { K: 'v1' } })
+    await setAuto(w.targetId, 1)
+    const t0 = new Date()
+    await enqueueSyncForEnvironment(env as never, w.envId, t0)
+    // A secret write happens while the claimed run is in flight (during the provider push).
+    provider.script.push(async () => {
+      await env.DB.prepare("UPDATE secrets SET updated_at = updated_at WHERE name = 'K'").run()
+      await enqueueSyncForEnvironment(env as never, w.envId, new Date(Date.now() + 5 * 60_000))
+      return undefined
+    })
+    const tick = await syncTick(env as never, new Date(t0.getTime() + SYNC_DEBOUNCE_MS + 1000))
+    expect(tick.changeRuns).toBe(1)
+    const row = (await outbox())[0]!
+    expect(row['done_at']).toBeNull() // not completed: it is dirty
+    expect(row['claimed_at']).toBeNull() // released for another pass
+    // The next sweep after the debounce runs it again and completes it.
+    const second = await syncTick(env as never, new Date(t0.getTime() + 10 * 60_000))
+    expect(second.changeRuns).toBe(1)
+    expect((await outbox())[0]?.['done_at']).not.toBeNull()
+  })
+
+  it('a schedule-only target with a crashed (expired-lease) run recovers on the next tick', async () => {
+    const w = await setupSyncWorld(env)
+    await setAuto(w.targetId, 0, 15)
+    const old = new Date(Date.now() - 3_600_000).toISOString()
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, counts_json, started_at, lease_until) VALUES ('isr_dead', ?, 'schedule', 'running', 1, '{}', ?, ?)")
+      .bind(w.targetId, old, old).run()
+    const tick = await syncTick(env as never, new Date())
+    expect(tick.scheduleRuns).toBe(1)
+    expect((await env.DB.prepare("SELECT status FROM sync_runs WHERE id = 'isr_dead'").first<{ status: string }>())?.status).not.toBe('running')
+  })
+
+  it('the retry marker survives a run that never starts (provider module missing)', async () => {
+    const w = await setupSyncWorld(env)
+    const now = new Date()
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, counts_json, error_code, started_at, finished_at, next_retry_at) VALUES ('isr_f', ?, 'manual', 'failed', 1, '{}', 'PROVIDER_ERROR', ?, ?, ?)")
+      .bind(w.targetId, new Date(now.getTime() - 60_000).toISOString(), new Date(now.getTime() - 59_000).toISOString(), new Date(now.getTime() - 1000).toISOString()).run()
+    await env.DB.prepare("UPDATE sync_targets SET provider = 'nonexistent-provider' WHERE id = ?").bind(w.targetId).run()
+    const tick = await syncTick(env as never, now)
+    expect(tick.retryRuns).toBe(0)
+    expect((await env.DB.prepare("SELECT next_retry_at FROM sync_runs WHERE id = 'isr_f'").first<{ next_retry_at: string | null }>())?.next_retry_at).not.toBeNull()
+  })
+
+  it('a row whose run cannot start is pushed back, so it does not hog the window', async () => {
+    const w = await setupSyncWorld(env)
+    await setAuto(w.targetId, 1)
+    await enqueueSyncForEnvironment(env as never, w.envId)
+    await env.DB.prepare("UPDATE sync_targets SET provider = 'nonexistent-provider' WHERE id = ?").bind(w.targetId).run()
+    const at = new Date(Date.now() + SYNC_DEBOUNCE_MS + 1000)
+    await syncTick(env as never, at)
+    const row = (await outbox())[0]!
+    expect(row['claimed_at']).toBeNull()
+    expect(Date.parse(row['due_at'] as string)).toBeGreaterThan(at.getTime())
+  })
+
+  it('a tick starts at most MAX_RUNS_PER_TICK runs; the rest wait for the next minute', async () => {
+    const w = await setupSyncWorld(env, { secrets: { A: 'a' } })
+    for (let i = 0; i < 7; i += 1) {
+      const e = await seedEnvironment(env, w.projectId, `e${i}`)
+      const tg = await seedTarget(env, { orgId: w.orgId, projectId: w.projectId, envId: e, connectionId: w.connectionId, userId: w.userId, resource: { scriptName: `w${i}` } })
+      await setAuto(tg, 0, 15)
+    }
+    const tick = await syncTick(env as never, new Date())
+    expect(tick.scheduleRuns).toBe(MAX_RUNS_PER_TICK)
+    expect((await syncTick(env as never, new Date())).scheduleRuns).toBe(2)
+  })
+
+  it('re-activating a needs_attention on-change target by editing it catches up on missed changes', async () => {
+    const w = await setupSyncWorld(env)
+    await setAuto(w.targetId, 1)
+    await env.DB.prepare("UPDATE sync_targets SET status = 'needs_attention' WHERE id = ?").bind(w.targetId).run()
+    expect(await enqueueSyncForEnvironment(env as never, w.envId)).toBe(0)
+    const patched = await call(env, 'PATCH', `/api/integrations/targets/${w.targetId}`, { token: w.token, json: { resource: { scriptName: 'worker-b' } } })
+    expect(patched.status).toBe(200)
+    expect(patched.body.data.status).toBe('active')
+    expect(await outbox()).toHaveLength(1)
+  })
+
+  it('old done outbox rows are purged', async () => {
+    const w = await setupSyncWorld(env)
+    const ancient = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    await env.DB.prepare('INSERT INTO sync_outbox (id, target_id, org_id, created_at, changed_at, due_at, done_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind('iso_old', w.targetId, w.orgId, ancient, ancient, ancient, ancient).run()
+    await syncTick(env as never, new Date())
+    expect(await outbox()).toHaveLength(0)
   })
 })
 
