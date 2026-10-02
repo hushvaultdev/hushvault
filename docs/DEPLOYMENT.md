@@ -193,6 +193,8 @@ database with a D1-capable token, like `0006`.
 
 ## Migrations
 
+**Migrations `0008_aad_enc_version.sql` (AAD ciphertext format) and `0009_refresh_tokens.sql` (refresh tokens, issue #77)** must be applied to a database *before* the code that uses them is deployed: without `0008` every secret read/write fails, without `0009` login and register fail. Apply with `pnpm --filter @hushvault/api db:migrate:dev` (then `:production`). Optional var `ENFORCE_AAD=true` refuses pre-AAD rows once none remain (see `docs/ENCRYPTION.md`). The web dashboard now keeps the access token in memory and relies on the API's `__Host-hv_refresh` cookie, so the web and API origins must share a registrable domain (`hushvault.dev`); local dev should use `localhost` for both.
+
 **Migration `0006_key_rotation.sql`** (key rotation tables, issue #27) must be applied to each database. The `*:code-only` deploy commands do not run migrations, so apply it by hand with a token that has D1 edit (`pnpm --filter @hushvault/api db:migrate:dev` / `db:migrate:production`). Until it is applied the new cron handler logs `key_rotation.tick_failed` and does nothing, and `GET /api/security/key-rotation` returns 500; everything else works.
 
 Migrations run *before* the new code is deployed: keep each one backward compatible

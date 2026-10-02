@@ -1,4 +1,5 @@
-import { clearSession, readSession } from './auth-storage'
+import { clearSession, readSession, writeSession } from './auth-storage'
+import type { Session } from './types'
 
 // Base URL of the HushVault API. Defaults to the local wrangler dev server;
 // override with NEXT_PUBLIC_API_URL for staging/production builds.
@@ -23,33 +24,92 @@ interface RequestOptions {
   auth?: boolean
 }
 
-// Typed fetch wrapper. Unwraps the `{ data }` envelope on success and throws
-// an ApiError carrying the API's `{ error, message }` on failure.
-export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, auth = true } = options
-  const headers: Record<string, string> = {}
+const CLIENT_HEADER = { 'X-HushVault-Client': 'web' }
 
-  if (body !== undefined) {
-    headers['Content-Type'] = 'application/json'
+// Exchange the HttpOnly refresh cookie for a new access token. Concurrent callers share one request;
+// a 409 means another tab won the rotation, so retry with the cookie it just set.
+let inflightRefresh: Promise<Session | null> | null = null
+
+export function refreshSession(): Promise<Session | null> {
+  if (!inflightRefresh) {
+    inflightRefresh = doRefresh().finally(() => {
+      inflightRefresh = null
+    })
   }
-  let sentToken: string | null = null
-  if (auth) {
-    const session = readSession()
-    if (session) {
-      sentToken = session.token
-      headers['Authorization'] = `Bearer ${session.token}`
+  return inflightRefresh
+}
+
+async function doRefresh(): Promise<Session | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let res: Response
+    try {
+      res = await fetch(`${API_BASE}/api/auth/refresh`, { method: 'POST', headers: CLIENT_HEADER, credentials: 'include' })
+    } catch {
+      return null
     }
+    if (res.status === 409) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
+      continue
+    }
+    if (!res.ok) {
+      clearSession()
+      return null
+    }
+    const payload = (await res.json().catch(() => null)) as { data?: Session & { expiresIn?: number } } | null
+    const data = payload?.data
+    if (!data?.token) return null
+    const next: Session = { token: data.token, userId: data.userId, orgId: data.orgId, role: data.role, emailVerified: data.emailVerified }
+    writeSession(next)
+    return next
   }
+  return null
+}
 
-  let res: Response
+/** End the session server-side (revokes the refresh token family), then forget it locally. */
+export async function endSession(): Promise<void> {
   try {
-    res = await fetch(`${API_BASE}${path}`, {
+    await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', headers: CLIENT_HEADER, credentials: 'include', keepalive: true })
+  } catch {
+    // offline: the local session is still cleared below
+  }
+  clearSession()
+}
+
+async function send(path: string, method: string, body: unknown, token: string | null): Promise<Response> {
+  const headers: Record<string, string> = { ...CLIENT_HEADER }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  try {
+    return await fetch(`${API_BASE}${path}`, {
       method,
       headers,
+      credentials: 'include', // the refresh cookie is set/rotated by login and refresh responses
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
   } catch {
     throw new ApiError(0, 'NETWORK_ERROR', `Could not reach the API at ${API_BASE}.`)
+  }
+}
+
+// Typed fetch wrapper. Unwraps the `{ data }` envelope on success and throws
+// an ApiError carrying the API's `{ error, message }` on failure. An expired access
+// token is refreshed once transparently; if that fails the user is sent to sign in.
+export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { method = 'GET', body, auth = true } = options
+  let sentToken = auth ? (readSession()?.token ?? null) : null
+  let res = await send(path, method, body, sentToken)
+
+  if (res.status === 401 && auth && sentToken && typeof window !== 'undefined') {
+    // Another request may already have refreshed; only refresh if the token we used is still current.
+    const current = readSession()
+    const refreshed = current && current.token !== sentToken ? current : await refreshSession()
+    if (refreshed) {
+      sentToken = refreshed.token
+      res = await send(path, method, body, sentToken)
+    } else {
+      clearSession()
+      window.location.assign('/sign-in?expired=1')
+    }
   }
 
   let payload: unknown = null
@@ -60,12 +120,6 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     } catch {
       payload = null
     }
-  }
-
-  if (res.status === 401 && auth && sentToken && typeof window !== 'undefined' && readSession()?.token === sentToken) {
-    // The session was invalidated server-side (password reset, account link, expiry).
-    clearSession()
-    window.location.assign('/sign-in?expired=1')
   }
 
   if (!res.ok) {

@@ -57,9 +57,11 @@ CORS (`/api/*`): allowed origins are `https://hushvault.dev`, `https://www.hushv
 
 Send `Authorization: Bearer <token>` where the token is either:
 
-1. **A JWT** from `POST /api/auth/login`, `POST /api/auth/register` or the OAuth callback. HS256, issuer
-   `hushvault`, audience `hushvault-api`, valid for 7 days. The `role` and `orgId` are baked into the token at
-   issue time and are not re-read from the database per request.
+1. **A JWT** from `POST /api/auth/login`, `POST /api/auth/register`, `POST /api/auth/refresh` or the OAuth
+   callback. HS256, issuer `hushvault`, audience `hushvault-api`, valid for **15 minutes** (`expiresIn: 900`).
+   The `role` and `orgId` are baked in at issue time and re-read at each refresh, so a membership change reaches
+   the session within one access lifetime. Renew it with a refresh token (see
+   [Sessions and refresh tokens](#sessions-and-refresh-tokens)).
 2. **An API key** (`hv_live_...`) from `POST /api/auth/api-keys`. Only a SHA-256 hash is stored. The key acts as
    its owner, with the org and role of the owner's earliest membership, looked up on each request. Revoked or
    expired keys get `401`.
@@ -141,7 +143,7 @@ curl -X POST "$HUSHVAULT_API_URL/api/auth/register" -H 'Content-Type: applicatio
 
 No auth. Scope `auth-login`. Body: `email`, `password` (1-128).
 
-`200` `{ "data": { "token", "userId", "orgId", "role", "emailVerified" } }`. Uses the user's earliest membership. Errors:
+`200` `{ "data": { "token", "expiresIn", "userId", "orgId", "role", "emailVerified" } }` (plus `refreshToken` for `X-HushVault-Client: cli`). Uses the user's earliest membership. Errors:
 `401 UNAUTHORIZED` (`Invalid credentials`; also returned for unknown emails and OAuth-only accounts, with the
 same PBKDF2 cost to avoid timing leaks; `Membership not found` if the user has no membership).
 
@@ -188,7 +190,9 @@ These are browser redirect flows for the web dashboard; they do not return JSON 
   `503` above when unconfigured. The session is handed over in the URL **fragment**, never in cookies or query
   strings.
 
-Success fragment: `#token=<jwt>&userId=...&orgId=...&role=...`.
+Success fragment: `#token=<jwt>&userId=...&orgId=...&role=...` (the refresh cookie is set on the redirect). The flow start sets an
+`HttpOnly` cookie holding a PKCE verifier and sends a `code_challenge` (S256); the callback only proceeds if the
+state matches that cookie, so a callback URL replayed in another browser (login CSRF) is `invalid_state`.
 
 Failure fragment: `#error=<code>`, where code is one of:
 
@@ -207,6 +211,24 @@ If the matching account was **unverified** (password sign-up never confirmed), t
 it: the password hash is wiped, `email_verified = 1`, all earlier sessions and API keys are invalidated, pending
 tokens are deleted, `auth.oauth.account_takeover` is audited, and the success fragment carries
 `&notice=account_linked`. This defeats pre-registration account takeover.
+
+### Sessions and refresh tokens
+
+Login, register and the OAuth callback also issue a **refresh token** (256-bit, `hvr_...`, only its SHA-256 is
+stored). Browsers get it as an `HttpOnly; Secure; SameSite=Strict` cookie (`__Host-hv_refresh`); the CLI sends
+the header `X-HushVault-Client: cli` and receives it as `refreshToken` in the response body. Refresh tokens are
+single use and rotate: each refresh returns a new one in the same family. Idle lifetime 30 days, absolute 90 days.
+Presenting an already-used token (older than a 10 s race window) is treated as theft and revokes the whole family.
+
+| Endpoint | Auth | Notes |
+|----------|------|-------|
+| `POST /api/auth/refresh` | cookie + `X-HushVault-Client` header, or body `{ refreshToken }` | `200` same shape as login. `401 INVALID_REFRESH` (cookie cleared), `409 REFRESH_RACE` (another tab rotated first; retry with the new cookie). Limited to 60/min per IP. |
+| `POST /api/auth/logout` | cookie or body | Revokes the token's family and clears the cookie. Always `200`. |
+| `POST /api/auth/logout-all` | Bearer (user JWT) | Ends every session of the user, including live access tokens. |
+
+The cookie is only honoured with the `X-HushVault-Client` header, which a cross-site form cannot set and a
+cross-origin fetch cannot send without a CORS preflight. A password reset, an OAuth account claim and
+`logout-all` invalidate every earlier refresh token. API keys are unchanged (long-lived, for CI).
 
 ### Email verification and password reset
 

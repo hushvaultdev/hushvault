@@ -1,5 +1,5 @@
 import { ApiClient, type EnvironmentRow } from '../api.js'
-import { getAuthToken } from '../config/auth.js'
+import { getAuthToken, getRefreshToken, storeRefreshToken, storeToken } from '../config/auth.js'
 import { findProjectConfig, getGlobalConfig, DEFAULT_API_URL, type HushVaultConfig } from '../config/project.js'
 
 export interface ProjectContext {
@@ -33,13 +33,34 @@ export async function resolveApiUrl(explicit?: string, projectApiUrl?: string): 
   return trusted
 }
 
+/**
+ * Client for the signed-in user. A keychain session carries a refresh hook, so the CLI keeps working
+ * past the 15-minute access token without another login. HUSHVAULT_TOKEN (an API key for CI) does not expire this way.
+ */
+export async function createAuthedClient(apiUrl: string): Promise<ApiClient> {
+  const token = await getAuthToken()
+  if (process.env['HUSHVAULT_TOKEN']) return new ApiClient({ apiUrl, token })
+  const refresh = async (): Promise<string | null> => {
+    const stored = await getRefreshToken()
+    if (!stored) return null
+    try {
+      const next = await new ApiClient({ apiUrl }).refreshSession(stored.refreshToken)
+      await storeToken(stored.email, next.token)
+      if (next.refreshToken) await storeRefreshToken(stored.email, next.refreshToken)
+      return next.token
+    } catch {
+      return null
+    }
+  }
+  return new ApiClient({ apiUrl, token, refresh })
+}
+
 /** Load .hushvault.json (walking up from cwd) and an authenticated client. */
 export async function loadProjectContext(cwd = process.cwd()): Promise<ProjectContext> {
   const found = await findProjectConfig(cwd)
   if (!found) throw new Error('No .hushvault.json found. Run: hushvault init')
-  const token = await getAuthToken()
   const apiUrl = await resolveApiUrl(undefined, found.config.apiUrl)
-  return { config: found.config, client: new ApiClient({ apiUrl, token }) }
+  return { config: found.config, client: await createAuthedClient(apiUrl) }
 }
 
 /** Resolve an env id, slug or name (case-insensitive) to an environment row. */

@@ -1,31 +1,31 @@
 import type { Session } from './types'
 
-// The web client is a Bearer-token consumer of the HushVault API, which runs
-// on a separate origin and does not set cookies. The session (JWT + identifiers)
-// is kept in localStorage and attached as `Authorization: Bearer <token>`.
+// The access token (15 minutes) lives in memory only: nothing in localStorage or sessionStorage for
+// an XSS payload, extension or injected script to read and replay later. Persistence across reloads
+// comes from the API's HttpOnly refresh cookie, which page scripts cannot see; the auth provider
+// exchanges it for a fresh access token on load (see refreshSession in api.ts).
 // Isolated here so the storage strategy can be swapped without touching callers.
 
-const STORAGE_KEY = 'hv_session'
+let current: Session | null = null
 
 export function readSession(): Session | null {
-  if (typeof window === 'undefined') return null
-  const raw = window.localStorage.getItem(STORAGE_KEY)
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(raw) as Session
-    if (!parsed?.token) return null
-    return parsed
-  } catch {
-    return null
-  }
+  return current
 }
 
 export function writeSession(session: Session): void {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
+  current = session
 }
 
 export function clearSession(): void {
+  current = null
+}
+
+// One-time cleanup of the pre-refresh-token storage so old 7-day tokens do not linger in browsers.
+export function purgeLegacyStorage(): void {
   if (typeof window === 'undefined') return
-  window.localStorage.removeItem(STORAGE_KEY)
+  try {
+    window.localStorage.removeItem('hv_session')
+  } catch {
+    // storage unavailable: nothing to purge
+  }
 }
