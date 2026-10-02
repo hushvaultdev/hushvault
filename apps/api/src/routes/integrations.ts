@@ -12,8 +12,7 @@ import { isSyncProvider } from '../integrations/sync-types'
 import { createPrefixedId } from '../lib/auth'
 import { loadWriteRing } from '../lib/key-rotation'
 import { getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
-import { integrationPreviewRateLimit, integrationRunRateLimit, integrationWriteRateLimit, requireAuth, requireHuman, requireRole } from '../middleware/auth'
-import type { MiddlewareHandler } from 'hono'
+import { integrationPreviewRateLimit, integrationRunRateLimit, integrationWriteRateLimit, requireAuth, requireCurrentAdmin, requireHuman, requireRole } from '../middleware/auth'
 
 // Outbound credential management (issue #39). Everything that creates, reads or changes a connection is
 // human-only (API keys are refused), admin+, rate limited and audited. The credential goes in once and
@@ -25,18 +24,6 @@ integrationsRouter.use('*', requireAuth)
 const MAX_CONNECTIONS_PER_ORG = 20
 const VERIFY_TIMEOUT_MS = 5000
 
-/**
- * The JWT's role claim can be up to 7 days stale. These routes guard outbound credentials, so the
- * caller's current membership is re-read: a demoted or removed admin loses access immediately.
- */
-const requireCurrentAdmin: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
-  const auth = c.get('auth')
-  const member = await c.env.DB.prepare('SELECT role FROM members WHERE user_id = ? AND org_id = ? LIMIT 1').bind(auth.userId, auth.orgId).first<{ role: string }>()
-  if (!member || (member.role !== 'admin' && member.role !== 'owner')) {
-    return c.json({ error: 'FORBIDDEN', message: 'You do not have permission to perform this action' }, 403)
-  }
-  return next()
-}
 const adminOnly = [requireHuman, requireRole('admin'), requireCurrentAdmin] as const
 
 const createSchema = z.object({
@@ -504,7 +491,7 @@ integrationsRouter.get('/runs/:runId', ...adminOnly, async (c) => {
   return c.json({ data: run })
 })
 
-type Auth = { orgId: string; userId: string; actorType: 'user' | 'api_key' }
+type Auth = { orgId: string; userId: string; actorType: 'user' | 'api_key' | 'system' }
 
 async function audit(c: { env: Env; req: { header: (n: string) => string | undefined } } & Parameters<typeof getRequestIp>[0], auth: Auth, action: string, resourceId: string, resourceType = 'integration_connection') {
   // The change is already committed: a failed audit write must not turn it into a 500 the client retries.

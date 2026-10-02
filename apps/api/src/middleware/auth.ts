@@ -1,13 +1,25 @@
 import type { MiddlewareHandler } from 'hono'
 import type { Env } from '../index'
 import { hashApiKey, verifyJwt, type JwtPayload } from '../lib/auth'
+import { verifyCiToken } from '../lib/ci-tokens'
 import { createRateLimitMiddleware } from './rate-limit'
 
 export type AuthContext = {
+  /** Empty for a CI token: it represents a workflow, not a person (audit rows then carry no actor id). */
   userId: string
   orgId: string
   role: 'owner' | 'admin' | 'member' | 'viewer'
-  actorType: 'user' | 'api_key'
+  actorType: 'user' | 'api_key' | 'system'
+  /** Present only for a CI token (issue #43): the single environment it may read. */
+  scope?: { envId: string; ruleId: string }
+}
+
+/**
+ * A CI token reaches exactly one endpoint, for exactly the environment it was issued for. This is an allowlist in
+ * the middleware rather than a check per route, so a new route is unreachable by CI tokens until it is added here.
+ */
+export function ciTokenMayReach(method: string, pathname: string, envId: string): boolean {
+  return method === 'GET' && pathname === `/api/environments/${envId}/resolved`
 }
 
 declare module 'hono' {
@@ -28,6 +40,23 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
 
   if (!token) {
     return c.json({ error: 'UNAUTHORIZED', message: 'Authentication required' }, 401)
+  }
+
+  // A CI token is unambiguous (it carries `kind`), so it is checked first and never falls through.
+  const ci = await verifyCiToken(token, c.env.JWT_SECRET)
+  if (ci) {
+    if (!ciTokenMayReach(c.req.method, new URL(c.req.url).pathname, ci.envId)) {
+      return c.json({ error: 'FORBIDDEN', message: 'This token may only read the environment it was issued for' }, 403)
+    }
+    // Deleting the rule is an admin's only lever after a compromise, so it must revoke tokens already issued
+    // rather than leaving them live until they expire. One indexed primary-key read.
+    const rule = await c.env.DB.prepare('SELECT env_id, org_id FROM oidc_repo_rules WHERE id = ? LIMIT 1')
+      .bind(ci.sub).first<{ env_id: string; org_id: string }>()
+    if (!rule || rule.env_id !== ci.envId || rule.org_id !== ci.orgId) {
+      return c.json({ error: 'UNAUTHORIZED', message: 'This token is no longer valid' }, 401)
+    }
+    c.set('auth', { userId: '', orgId: ci.orgId, role: 'viewer', actorType: 'system', scope: { envId: ci.envId, ruleId: ci.sub } })
+    return next()
   }
 
   let jwtPayload: JwtPayload | null = null
@@ -144,6 +173,28 @@ export const integrationPreviewRateLimit = createRateLimitMiddleware({
   windowMs: 60_000,
   failClosed: true,
   keyFn: byOrganisation,
+})
+
+/**
+ * Humans only, with the caller's CURRENT membership re-read: the JWT role claim can be up to its lifetime stale, so
+ * a demoted or removed admin must lose access to credential- and CI-access management immediately.
+ */
+export const requireCurrentAdmin: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
+  const auth = c.get('auth')
+  const member = await c.env.DB.prepare('SELECT role FROM members WHERE user_id = ? AND org_id = ? LIMIT 1').bind(auth.userId, auth.orgId).first<{ role: string }>()
+  if (!member || (member.role !== 'admin' && member.role !== 'owner')) {
+    return c.json({ error: 'FORBIDDEN', message: 'You do not have permission to perform this action' }, 403)
+  }
+  return next()
+}
+
+// The OIDC exchange is unauthenticated by design (the signed GitHub token is the credential): cap it per IP and
+// fail closed, because each call can cost a JWKS fetch and a signature verification.
+export const oidcExchangeRateLimit = createRateLimitMiddleware({
+  scope: 'auth-oidc',
+  limit: 30,
+  windowMs: 60_000,
+  failClosed: true,
 })
 
 export const loginRateLimit = createRateLimitMiddleware({
