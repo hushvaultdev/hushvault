@@ -47,6 +47,11 @@ async function doRefresh(): Promise<Session | null> {
     } catch {
       return null
     }
+    if (!res.ok && res.status !== 409) {
+      // Non-secret diagnostics: the API names why a refresh failed (no_cookie, expired, unknown, ...).
+      const info = (await res.clone().json().catch(() => null)) as { reason?: string } | null
+      console.warn('[hushvault] session refresh failed', res.status, info?.reason ?? '')
+    }
     if (res.status === 409) {
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
       continue

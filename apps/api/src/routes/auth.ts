@@ -529,10 +529,19 @@ const refreshSchema = z.object({ refreshToken: z.string().min(16).max(256).optio
  * carry the custom client header: a cross-site form post cannot set it and a cross-origin fetch with it
  * needs a CORS preflight, so cookie-borne requests cannot be forged by other sites.
  */
-function presentedRefreshToken(c: Context<{ Bindings: Env }>, bodyToken: string | undefined): string | null {
-  if (bodyToken) return bodyToken
-  if (!c.req.header('x-hushvault-client')) return null
-  return readRefreshCookie(c) ?? null
+type Presented = { token: string } | { missing: 'no_client_header' | 'no_cookie' }
+
+function presentedRefreshToken(c: Context<{ Bindings: Env }>, bodyToken: string | undefined): Presented {
+  if (bodyToken) return { token: bodyToken }
+  if (!c.req.header('x-hushvault-client')) return { missing: 'no_client_header' }
+  const cookie = readRefreshCookie(c)
+  return cookie ? { token: cookie } : { missing: 'no_cookie' }
+}
+
+/** Why a refresh failed. A fixed vocabulary, safe to return: it describes the caller's own request, never other users. */
+function refreshFailure(c: Context<{ Bindings: Env }>, reason: string, status: 401 | 409 = 401) {
+  console.error(JSON.stringify({ level: 'warn', event: 'auth.refresh_failed', reason }))
+  return c.json({ error: status === 409 ? 'REFRESH_RACE' : 'INVALID_REFRESH', message: status === 409 ? 'Please retry' : 'Session expired. Please sign in again.', reason }, status)
 }
 
 // POST /api/auth/refresh - exchange a refresh token for a new access token (rotates the refresh token)
@@ -542,27 +551,27 @@ authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.d
   // The token is only ever echoed in a body to a caller that already holds it there. A cookie-authenticated
   // request (browser, possibly script-driven by XSS) must never be able to read a refresh token back out.
   const viaCookie = !bodyToken
-  const invalid = () => {
+  const invalid = (reason: string) => {
     clearRefreshCookie(c)
-    return c.json({ error: 'INVALID_REFRESH', message: 'Session expired. Please sign in again.' }, 401)
+    return refreshFailure(c, reason)
   }
-  if (!presented) return invalid()
+  if (!('token' in presented)) return invalid(presented.missing)
 
-  const rotated = await rotateRefreshToken(c.env, presented)
+  const rotated = await rotateRefreshToken(c.env, presented.token)
   if (!rotated.ok) {
     // Two tabs refreshing together: the loser retries with the cookie the winner just set.
-    if (rotated.reason === 'race') return c.json({ error: 'REFRESH_RACE', message: 'Please retry' }, 409)
-    return invalid()
+    if (rotated.reason === 'race') return refreshFailure(c, 'race', 409)
+    return invalid(rotated.reason)
   }
 
   // Role and org are re-read here, so a membership change reaches the session within one access TTL.
   const member = await c.env.DB.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
     .bind(rotated.userId).first<{ org_id: string; role: 'owner' | 'admin' | 'member' | 'viewer' }>()
   const user = await c.env.DB.prepare('SELECT email_verified FROM users WHERE id = ? LIMIT 1').bind(rotated.userId).first<{ email_verified: number }>()
-  if (!member || !user) return invalid()
+  if (!member || !user) return invalid('no_membership')
 
   const session = await rotateSession(c.env, { userId: rotated.userId, orgId: member.org_id, role: member.role, family: rotated.family, consume: rotated.tokenId })
-  if (!session) return c.json({ error: 'REFRESH_RACE', message: 'Please retry' }, 409)
+  if (!session) return refreshFailure(c, 'rotation_conflict', 409)
   if (viaCookie) setRefreshCookie(c, session.refreshToken)
   return c.json({
     data: {
@@ -580,7 +589,7 @@ authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.d
 // POST /api/auth/logout - end this session (revokes its refresh token family). Always succeeds.
 authRoutes.post('/logout', refreshRateLimit, zValidator('json', refreshSchema.default({})), async (c) => {
   const presented = presentedRefreshToken(c, c.req.valid('json').refreshToken)
-  if (presented) await revokeRefreshFamily(c.env, presented)
+  if ('token' in presented) await revokeRefreshFamily(c.env, presented.token)
   clearRefreshCookie(c)
   return c.json({ data: { loggedOut: true } })
 })

@@ -47,12 +47,15 @@ async function mint(
   if (input.consume) {
     // Rotation in one transaction: the successor is inserted only while the old token is still unused, then the
     // old token is marked used. A failure leaves the old token intact (retryable); two racers cannot both succeed.
-    const results = await env.DB.batch([
+    await env.DB.batch([
       env.DB.prepare(`${insert} SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM refresh_tokens WHERE id = ? AND used_at IS NULL)`).bind(...values, input.consume),
       env.DB.prepare('UPDATE refresh_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL').bind(wall, input.consume),
       prune,
     ])
-    if (Number(results[0]?.meta.changes ?? 0) !== 1) return null
+    // Verify by reading the row back rather than trusting a change counter (D1 documents `changes` only as a
+    // rough indication): the successor exists exactly when this call won the rotation.
+    const won = await env.DB.prepare('SELECT 1 AS ok FROM refresh_tokens WHERE token_hash = ? LIMIT 1').bind(values[3]).first<{ ok: number }>()
+    if (!won) return null
   } else {
     await env.DB.batch([prune, env.DB.prepare(`${insert} VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(...values)])
   }
@@ -70,17 +73,17 @@ export function rotateSession(env: Env, input: Omit<Parameters<typeof mint>[1], 
 
 export type RotateResult =
   | { ok: true; userId: string; tokenId: string; family: { id: string; startedAt: number } }
-  | { ok: false; reason: 'invalid' | 'race' | 'reuse' }
+  | { ok: false; reason: 'unknown' | 'expired' | 'invalidated' | 'race' | 'reuse' }
 
 type RefreshRow = { id: string; user_id: string; family_id: string; created_at: number; expires_at: number; family_started_at: number; used_at: number | null }
 
 /** Validate a refresh token. The caller then issues the next session with `consume: tokenId`, which marks it used atomically. */
 export async function rotateRefreshToken(env: Pick<Env, 'DB'>, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<RotateResult> {
-  if (typeof token !== 'string' || token.length < 16 || token.length > 256) return { ok: false, reason: 'invalid' }
+  if (typeof token !== 'string' || token.length < 16 || token.length > 256) return { ok: false, reason: 'unknown' }
   const hash = await hashToken(token)
   const row = await env.DB.prepare('SELECT id, user_id, family_id, created_at, expires_at, family_started_at, used_at FROM refresh_tokens WHERE token_hash = ? LIMIT 1')
     .bind(hash).first<RefreshRow>()
-  if (!row) return { ok: false, reason: 'invalid' }
+  if (!row) return { ok: false, reason: 'unknown' }
 
   const revokeFamily = () => env.DB.prepare('DELETE FROM refresh_tokens WHERE family_id = ?').bind(row.family_id).run()
 
@@ -91,13 +94,13 @@ export async function rotateRefreshToken(env: Pick<Env, 'DB'>, token: string, no
   }
   if (row.expires_at <= nowSeconds || nowSeconds >= row.family_started_at + REFRESH_ABSOLUTE_SECONDS) {
     await revokeFamily()
-    return { ok: false, reason: 'invalid' }
+    return { ok: false, reason: 'expired' }
   }
 
   const user = await env.DB.prepare('SELECT sessions_valid_after FROM users WHERE id = ? LIMIT 1').bind(row.user_id).first<{ sessions_valid_after: number }>()
   if (!user || row.created_at < user.sessions_valid_after) {
     await revokeFamily()
-    return { ok: false, reason: 'invalid' }
+    return { ok: false, reason: 'invalidated' }
   }
 
   // Validated only. The caller consumes it atomically while issuing the successor (issueSession `consume`).
