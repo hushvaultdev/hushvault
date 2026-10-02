@@ -230,6 +230,27 @@ The cookie is only honoured with the `X-HushVault-Client` header, which a cross-
 cross-origin fetch cannot send without a CORS preflight. A password reset, an OAuth account claim and
 `logout-all` invalidate every earlier refresh token. API keys are unchanged (long-lived, for CI).
 
+### GitHub Actions OIDC (CI reads, no stored token)
+
+`POST /api/auth/github-oidc` — no auth; the signed GitHub token is the credential. Body `{ token, envId }`. Limited to
+30/min per IP, fail closed. `200 { data: { token, expiresIn: 600, expiresAt, envId, orgId } }`. Errors: one opaque
+`401 OIDC_REJECTED` for every verification failure, `403 NOT_ALLOWED` when no rule matches, `503` when GitHub's key set
+cannot be fetched, `400 VALIDATION_ERROR`.
+
+The returned token is **read-only and scoped to one environment**: the auth middleware allows it to reach only
+`GET /api/environments/<that env>/resolved`, and refuses every other route with `403`.
+
+Rules are managed at `/api/ci-access/github/rules` (JWT only, admin+, membership re-read, audited as `ci.rule.create` /
+`ci.rule.delete`):
+
+| Endpoint | Body | Notes |
+|---|---|---|
+| `GET /api/ci-access/github/rules` | — | Rules for the caller's organisation. |
+| `POST /api/ci-access/github/rules` | `{ envId, repository, repositoryId?, ref? \| environment? }` | Exactly one of `ref`/`environment`. `409 CONFLICT` for a duplicate, `404` for another organisation's environment, max 100 per organisation. |
+| `DELETE /api/ci-access/github/rules/:id` | — | |
+
+See `docs/integrations/github-oidc.md` for the workflow setup and the unverified items.
+
 ### Automatic sync triggers
 
 Targets carry `autoSync: { onChange: boolean, scheduleMinutes: 15 | 60 | 360 | 1440 | null }` (default off) on create and

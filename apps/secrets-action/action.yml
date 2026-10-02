@@ -1,0 +1,32 @@
+name: HushVault Secrets
+description: Load secrets from a HushVault environment into a workflow using GitHub OIDC (no stored HushVault token).
+author: HushVault
+branding:
+  icon: lock
+  color: purple
+inputs:
+  api-url:
+    description: HushVault API base URL.
+    required: false
+    default: https://api.hushvault.dev
+  environment-id:
+    description: The HushVault environment id to read (env_...). An admin must have granted this repository access to it.
+    required: true
+  audience:
+    description: OIDC audience to request. Must match the audience the HushVault deployment requires.
+    required: false
+    default: https://api.hushvault.dev
+  export-env:
+    description: Export each secret as an environment variable for later steps.
+    required: false
+    default: 'true'
+  prefix:
+    description: Optional prefix applied to exported variable names.
+    required: false
+    default: ''
+outputs:
+  names:
+    description: JSON array of the secret names that were loaded. Never the values.
+runs:
+  using: node20
+  main: dist/index.js

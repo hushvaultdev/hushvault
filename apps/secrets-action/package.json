@@ -1,0 +1,10 @@
+{
+  "name": "@hushvault/secrets-action",
+  "version": "0.0.1",
+  "private": true,
+  "description": "GitHub Action that loads HushVault secrets using OIDC (no stored token).",
+  "scripts": {
+    "build": "mkdir -p dist && cp src/index.js dist/index.js",
+    "test": "vitest run"
+  }
+}
