@@ -22,6 +22,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS integration_connections_label_idx ON integrati
 
 -- The rotation engine gets a third phase for connections. SQLite cannot alter a CHECK constraint, so the two
 -- small rotation tables are rebuilt with the wider constraints (their rows are copied unchanged).
+-- Re-runnable if an earlier attempt stopped part-way. Apply with no rotation running.
+DROP TABLE IF EXISTS key_rotations_new;
+DROP TABLE IF EXISTS key_rotation_failures_new;
+
 CREATE TABLE key_rotations_new (
   id TEXT PRIMARY KEY,
   from_version TEXT NOT NULL,

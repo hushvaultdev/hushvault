@@ -9,8 +9,11 @@ export interface IntegrationProvider {
   /** Registry id from @hushvault/shared (e.g. `cloudflare-workers`). */
   readonly id: string
   /** Read-only check that the credential works. Must not echo the credential or provider error bodies. */
-  verify(credential: string, config: Record<string, unknown>): Promise<VerifyResult>
-  /** Returns the sanitized non-secret config, or null when invalid. */
+  verify(credential: string, config: Record<string, unknown>, signal: AbortSignal): Promise<VerifyResult>
+  /**
+   * Returns the sanitized non-secret config, or null when invalid. Accept identifiers only (account id, worker name),
+   * never URLs or hosts: providers call fixed API hosts, so user input cannot steer a request (SSRF).
+   */
   parseConfig(config: unknown): Record<string, unknown> | null
 }
 

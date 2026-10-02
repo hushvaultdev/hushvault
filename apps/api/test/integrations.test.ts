@@ -10,7 +10,7 @@ const verifyCalls: string[] = []
 
 const mock: IntegrationProvider = {
   id: 'cloudflare-workers',
-  async verify(credential) {
+  async verify(credential, _config, _signal) {
     verifyCalls.push(credential)
     return verifyResult
   },
@@ -160,6 +160,53 @@ describe('access control', () => {
     const res = await call(env, 'POST', '/api/integrations/secret-scanner/github', { json: [] })
     // It answers with its own signature check, not the dashboard auth middleware.
     expect(res.body.message).toBe('Missing signature headers')
+  })
+})
+
+describe('review fixes', () => {
+  it('a demoted admin loses vault access immediately, despite a still-valid JWT', async () => {
+    await setupAdmin()
+    expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'a', credential: CANARY })).status).toBe(201)
+    await env.DB.prepare("UPDATE members SET role = 'viewer' WHERE user_id = ?").bind(admin.userId).run()
+    expect((await call(env, 'GET', '/api/integrations/connections', { token: admin.token })).status).toBe(403)
+    expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'b', credential: CANARY })).status).toBe(403)
+    await env.DB.prepare('DELETE FROM members WHERE user_id = ?').bind(admin.userId).run()
+    expect((await call(env, 'GET', '/api/integrations/connections', { token: admin.token })).status).toBe(403)
+  })
+
+  it('enforces the per-organisation cap atomically ', async () => {
+    await setupAdmin()
+    // Seed 19 directly (the write rate limit is 20/min per IP), then fill and overflow through the API.
+    const now = new Date().toISOString()
+    for (let i = 0; i < 19; i += 1) {
+      await env.DB.prepare("INSERT INTO integration_connections (id, org_id, provider, label, encrypted_credential, wrapped_dek, key_version, created_at, updated_at) VALUES (?, ?, 'cloudflare-workers', ?, 'c2:x:y', 'c2:x:y', 'v1', ?, ?)")
+        .bind(`icn_seed${i}`, admin.orgId, `s${i}`, now, now).run()
+    }
+    expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'last', credential: CANARY })).status).toBe(201)
+    const over = await post(admin.token, { provider: 'cloudflare-workers', label: 'overflow', credential: CANARY })
+    expect(over.status).toBe(409)
+    expect(over.body.error).toBe('LIMIT_REACHED')
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM integration_connections').first<{ n: number }>())?.n).toBe(20)
+  })
+
+  it('updating a connection deleted concurrently is a 404 without an audit row', async () => {
+    await setupAdmin()
+    const created = await post(admin.token, { provider: 'cloudflare-workers', label: 'a', credential: CANARY })
+    const id = created.body.data.id as string
+    // Delete between the handler's SELECT and UPDATE: make verify() delete the row.
+    const real = mock.verify
+    mock.verify = async (...args) => {
+      await env.DB.prepare('DELETE FROM integration_connections WHERE id = ?').bind(id).run()
+      return real(...args)
+    }
+    try {
+      const res = await call(env, 'PUT', `/api/integrations/connections/${id}/credential`, { token: admin.token, json: { credential: `${CANARY}-v2` } })
+      expect(res.status).toBe(404)
+      const audits = await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'integration.update'").first<{ n: number }>()
+      expect(audits?.n).toBe(0)
+    } finally {
+      mock.verify = real
+    }
   })
 })
 
