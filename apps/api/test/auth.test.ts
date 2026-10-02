@@ -27,7 +27,8 @@ describe('register / login', () => {
       json: { email: 'Ann@x.com', password: PASSWORD, organisationName: 'Ann Org' },
     })
     expect(reg.status).toBe(201)
-    expect(Object.keys(reg.body.data).sort()).toEqual(['orgId', 'token', 'userId'])
+    expect(Object.keys(reg.body.data).sort()).toEqual(['emailVerified', 'expiresIn', 'orgId', 'token', 'userId'])
+    expect(reg.body.data.expiresIn).toBe(900)
     expect((await userRow(env, 'ann@x.com'))?.['email_verified']).toBe(0)
 
     const login = await call(env, 'POST', '/api/auth/login', { json: { email: 'ann@x.com', password: PASSWORD } })

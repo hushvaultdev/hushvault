@@ -95,7 +95,7 @@ app.use('/api/*', cors({
     return allowed.includes(origin) || origin === originOf(c.env.WEB_APP_URL) ? origin : null
   },
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-HushVault-Client'],
   maxAge: 86400,
   credentials: true,
 }))
