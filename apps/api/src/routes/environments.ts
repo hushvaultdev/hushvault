@@ -3,9 +3,8 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
-import { loadKeyRing, decryptSecretWithRing } from '../crypto/envelope'
-import { describeComputedError, evaluateSecrets } from '../lib/resolve'
-import { getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
+import { resolveEnvironment } from '../lib/resolve-environment'
+import { getRequestIp, writeAuditLog } from '../lib/security'
 import { requireAuth, requireRole, secretReadRateLimit } from '../middleware/auth'
 
 export const environmentRoutes = new Hono<{ Bindings: Env }>()
@@ -79,93 +78,35 @@ environmentRoutes.post('/', requireRole('admin'), zValidator('json', environment
   return c.json({ data: { id: environmentId, projectId, name, slug: computedSlug, parentEnvId: parentEnvId ?? null, color: color ?? '#6366f1' } }, 201)
 })
 
-const MAX_INHERITANCE_DEPTH = 10
-
-type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string; key_version: string; enc_version: number }
-
-// GET /api/environments/:id/resolved — secrets with branch inheritance applied (child overrides parent by name)
+// GET /api/environments/:id/resolved — secrets with branch inheritance applied (child overrides parent by name).
+// The resolution itself lives in lib/resolve-environment.ts (shared with the sync engine).
 environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
   const auth = c.get('auth')
   const { id } = c.req.param()
-  const environment = await c.env.DB.prepare(
-    'SELECT e.id, e.project_id, e.parent_env_id FROM environments e INNER JOIN projects p ON p.id = e.project_id WHERE e.id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(id, auth.orgId).first<{ id: string; project_id: string; parent_env_id: string | null }>()
-
-  if (!environment) {
-    return c.json({ error: 'NOT_FOUND', message: 'Environment not found' }, 404)
-  }
-
   const wantValues = c.req.query('values') === 'true'
 
-  // Chain ordered root ... self. Every ancestor must be in the same project (hence same org).
-  const chain: string[] = [environment.id]
-  const seen = new Set<string>(chain)
-  let parentId = environment.parent_env_id
-  while (parentId) {
-    if (seen.has(parentId) || chain.length > MAX_INHERITANCE_DEPTH) {
-      return c.json({ error: 'INVALID_ENVIRONMENT_CHAIN', message: 'Environment inheritance chain is circular or too deep' }, 422)
+  const result = await resolveEnvironment(c.env, auth.orgId, id, { values: wantValues })
+  if (!result.ok) {
+    switch (result.code) {
+      case 'NOT_FOUND':
+        return c.json({ error: 'NOT_FOUND', message: 'Environment not found' }, 404)
+      case 'INVALID_ENVIRONMENT_CHAIN':
+        return c.json({ error: 'INVALID_ENVIRONMENT_CHAIN', message: result.message }, 422)
+      case 'DECRYPTION_FAILED':
+        return c.json({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' }, 500)
+      case 'COMPUTED_ERROR':
+        return c.json({ error: 'COMPUTED_SECRET_ERROR', message: result.message }, 422)
     }
-    const parent = await c.env.DB.prepare('SELECT id, parent_env_id FROM environments WHERE id = ? AND project_id = ? LIMIT 1')
-      .bind(parentId, environment.project_id).first<{ id: string; parent_env_id: string | null }>()
-    if (!parent) {
-      return c.json({ error: 'INVALID_ENVIRONMENT_CHAIN', message: 'Parent environment is invalid' }, 422)
-    }
-    seen.add(parent.id)
-    chain.unshift(parent.id)
-    parentId = parent.parent_env_id
   }
 
-  const rank = new Map(chain.map((envId, index) => [envId, index]))
-  const rows = await c.env.DB.prepare(
-    `SELECT id, env_id, name, is_computed, template, wrapped_dek, key_version, enc_version FROM secrets WHERE project_id = ? AND env_id IN (${chain.map(() => '?').join(',')})`,
-  ).bind(environment.project_id, ...chain).all<SecretRow>()
-
-  // Later (closer to the requested env) rank wins.
-  const merged = new Map<string, SecretRow>()
-  for (const row of [...(rows.results ?? [])].sort((a, b) => (rank.get(a.env_id) ?? 0) - (rank.get(b.env_id) ?? 0))) {
-    merged.set(row.name, row)
-  }
-  const selected = [...merged.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-
-  const plain = new Map<string, string>()
   if (wantValues) {
-    try {
-      const ring = loadKeyRing(c.env)
-      for (const row of selected) {
-        if (row.is_computed) continue
-        const blob = await c.env.SECRETS_KV.get(`secret:${row.id}`)
-        if (blob === null) throw new Error('missing blob')
-        plain.set(row.name, await decryptSecretWithRing(
-          blob, row.wrapped_dek, row.key_version, ring,
-          { projectId: environment.project_id, envId: row.env_id, secretId: row.id }, row.enc_version,
-        ))
-      }
-    } catch (err) {
-      logKeyRingError(err)
-      return c.json({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' }, 500)
-    }
-  }
-
-  let evaluated: Map<string, string> | null = null
-  if (wantValues) {
-    const result = evaluateSecrets(selected.map((row) => ({
-      name: row.name,
-      isComputed: Boolean(row.is_computed),
-      template: row.template,
-      ...(row.is_computed ? {} : { value: plain.get(row.name) ?? '' }),
-    })))
-    if (!result.ok) {
-      return c.json({ error: 'COMPUTED_SECRET_ERROR', message: describeComputedError(result.error) }, 422)
-    }
-    evaluated = result.values
-
     await writeAuditLog(c.env, {
       orgId: auth.orgId,
       actorId: auth.userId,
       actorType: auth.actorType,
       action: 'secret.read_bulk',
       resourceType: 'environment',
-      resourceId: environment.id,
+      resourceId: result.environmentId,
       ip: getRequestIp(c),
       userAgent: c.req.header('user-agent') ?? null,
     })
@@ -173,16 +114,10 @@ environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
 
   return c.json({
     data: {
-      environmentId: environment.id,
+      environmentId: result.environmentId,
       values: wantValues,
-      secrets: selected.map((row) => ({
-        id: row.id,
-        name: row.name,
-        isComputed: Boolean(row.is_computed),
-        template: row.template,
-        inheritedFrom: row.env_id === environment.id ? null : row.env_id,
-        ...(evaluated ? { value: evaluated.get(row.name) ?? '' } : {}),
-      })),
+      secrets: result.secrets,
     },
   })
 })
+
