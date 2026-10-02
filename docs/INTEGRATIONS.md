@@ -38,3 +38,22 @@ is not built.
 - No automatic sync on secret change.
 - Surfaces: the dashboard (Integrations) creates, edits, previews and runs targets; `hushvault sync` lists, previews and runs them; the API does all of it.
   Connections and targets are created in the dashboard or the API, not the CLI.
+
+## Automatic triggers (M4)
+
+Off by default, per target (`autoSync`). Manual runs always work.
+
+- **On change:** creating, editing or deleting a secret queues the targets of that environment and of every environment that
+  inherits from it (one coalesced outbox row per target, ids only). The minute cron sweeps the outbox, so the target is
+  updated about 30-90 seconds after the change. A run already in flight keeps the row so the change is not lost.
+- **Scheduled reconcile:** every 15 minutes, hourly, every 6 hours or daily, per target.
+- **Retries:** a failed run with a retryable error (rate limit, provider error, timeout) is retried with exponential backoff and
+  jitter, up to 5 attempts, only while it is the target's newest run. Auth, validation, missing target, computed-secret and
+  credential errors mark the target `needs_attention` and stop all automatic triggers until it is edited or the credential
+  rotated.
+- **Limits:** at most 60 automatic runs per organisation per hour (extra work is deferred ten minutes, not dropped); one run
+  per target at a time.
+- **Audit:** automatic runs are written as `sync.run.*` by the `system` actor.
+- **Runtime:** everything runs inside the existing minute cron (`apps/api/src/integrations/sync-scheduler.ts`), with no Queues.
+  Each sweep starts at most 5 runs (a run makes many subrequests), so a backlog drains over the following minutes. Cloudflare's per-invocation subrequest limit on the Workers
+  Free plan has not been checked against a busy sweep; that is part of the combined beta test.

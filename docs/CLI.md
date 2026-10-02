@@ -125,23 +125,29 @@ whole link. Requires role `member` or higher. `share` does not need a `.hushvaul
 from one if found. The API builds the `<url>` host itself, and whether a web page for opening links is
 available depends on your deployment.
 
-### `hushvault sync <list|status|preview|run>`
+### `hushvault sync <list|status|preview|run|auto>`
 
 Inspect and trigger one-way HushVault to target syncs (for example Cloudflare Workers secrets). Connections and
-targets are created and edited in the dashboard (Integrations); the CLI only reads, previews and runs them. These commands do not need
+targets are created and edited in the dashboard (Integrations); the CLI reads, previews and runs them and can change their auto-sync setting. These commands do not need
 `.hushvault.json`.
 
 | Command | What it does |
 |---------|--------------|
-| `sync list` | Lists targets (`provider:scriptName`, id, status, last run) |
-| `sync status <target>` | Target state plus the latest run (status, counts, error code) |
+| `sync list` | Lists targets (`provider:scriptName`, id, status, last run, auto-sync setting) |
+| `sync status <target>` | Target state, auto-sync setting and the latest run (status, counts, error code, next retry time) |
 | `sync preview <target>` | Shows what a run would create, update and delete; changes nothing |
 | `sync run <target>` | Prints the plan, then runs it |
+| `sync auto <target> [--on-change\|--no-on-change] [--schedule <15\|60\|360\|1440\|off>]` | Changes automatic syncing (`PATCH /api/integrations/targets/:id`) |
+
+`sync auto` needs at least one flag; an omitted flag keeps its current value. `--on-change` syncs within about
+1-2 minutes of a secret change in the environment or a parent it inherits from. `--schedule` also reconciles every
+15 minutes, hourly (60), every 6 hours (360) or daily (1440); `off` clears it. Both default to off, a manual run
+always works, and a target in `needs_attention` is not run automatically until a run succeeds.
 
 `<target>` is a target id or a unique `provider:scriptName` label (case-insensitive). An unknown or ambiguous
 label fails and lists the known targets or ids.
 
-Options: `--json` on all four (machine-readable; only known fields are emitted). `run` also takes `-y, --yes`.
+Options: `--json` on all five (machine-readable; only known fields are emitted). `run` also takes `-y, --yes`.
 When the plan contains deletes, `run` asks for confirmation on a terminal and otherwise (non-interactive, or with
 `--json`) refuses unless `--yes` is given. Deletes only ever apply to names HushVault itself created, and only when
 the target's delete toggle is on (default off).

@@ -230,6 +230,12 @@ The cookie is only honoured with the `X-HushVault-Client` header, which a cross-
 cross-origin fetch cannot send without a CORS preflight. A password reset, an OAuth account claim and
 `logout-all` invalidate every earlier refresh token. API keys are unchanged (long-lived, for CI).
 
+### Automatic sync triggers
+
+Targets carry `autoSync: { onChange: boolean, scheduleMinutes: 15 | 60 | 360 | 1440 | null }` (default off) on create and
+PATCH (`autoSync` may be partial). Runs started by the cron have `trigger` `change` or `schedule` and carry `nextRetryAt` when a
+retry is pending. See `docs/INTEGRATIONS.md` ("Automatic triggers").
+
 ### Email verification and password reset
 
 Tokens are 256-bit, stored only as SHA-256 hashes, single use, bound to purpose and email. Links use a URL

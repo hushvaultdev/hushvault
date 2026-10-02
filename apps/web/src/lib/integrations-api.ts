@@ -1,4 +1,4 @@
-import type { SyncNameFilter, SyncPlanDto, SyncRunDto, SyncTargetDto } from '@hushvault/shared/integrations'
+import type { SyncAutoSync, SyncNameFilter, SyncPlanDto, SyncRunDto, SyncTargetDto } from '@hushvault/shared/integrations'
 
 import { apiFetch } from './api'
 
@@ -67,13 +67,14 @@ export function createTarget(input: {
   resource: Record<string, string>
   nameFilter?: SyncNameFilter
   deleteRemoved?: boolean
+  autoSync?: SyncAutoSync
 }): Promise<SyncTargetDto> {
   return apiFetch<SyncTargetDto>(`${BASE}/targets`, { method: 'POST', body: input })
 }
 
 export function updateTarget(
   id: string,
-  input: { resource?: Record<string, string>; nameFilter?: SyncNameFilter; deleteRemoved?: boolean },
+  input: { resource?: Record<string, string>; nameFilter?: SyncNameFilter; deleteRemoved?: boolean; autoSync?: SyncAutoSync },
 ): Promise<SyncTargetDto> {
   return apiFetch<SyncTargetDto>(`${BASE}/targets/${encodeURIComponent(id)}`, { method: 'PATCH', body: input })
 }

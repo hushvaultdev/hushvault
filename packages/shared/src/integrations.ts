@@ -114,6 +114,15 @@ export interface SyncNameFilter {
   deny?: string[]
 }
 
+export const SYNC_SCHEDULE_OPTIONS = [15, 60, 360, 1440] as const
+
+export interface SyncAutoSync {
+  /** Sync shortly after a secret changes in this environment or one it inherits from (debounced; a sweep runs every minute). */
+  onChange: boolean
+  /** Reconcile every N minutes (one of SYNC_SCHEDULE_OPTIONS), or null for no schedule. */
+  scheduleMinutes: number | null
+}
+
 export interface SyncTargetDto {
   id: string
   projectId: string
@@ -123,6 +132,8 @@ export interface SyncTargetDto {
   /** Provider-specific identifiers only, e.g. { accountId, scriptName } for Cloudflare Workers. */
   resource: Record<string, string>
   nameFilter: SyncNameFilter
+  /** Automatic triggers (M4). Both default to off; a manual run always works. */
+  autoSync: SyncAutoSync
   /** When true, names HushVault created that no longer exist in the environment are deleted on the target. */
   deleteRemoved: boolean
   status: 'active' | 'needs_attention'
@@ -159,9 +170,9 @@ export interface SyncRunDto {
 
 /**
  * Endpoints (all under /api/integrations, JWT-only, admin+, membership re-read; run and preview are rate limited):
- *   POST   /targets                 body { projectId, envId, connectionId, resource, nameFilter?, deleteRemoved? } -> 201 { data: SyncTargetDto }
+ *   POST   /targets                 body { projectId, envId, connectionId, resource, nameFilter?, deleteRemoved?, autoSync? } -> 201 { data: SyncTargetDto }
  *   GET    /targets                 -> { data: SyncTargetDto[] }
- *   PATCH  /targets/:id             body { resource?, nameFilter?, deleteRemoved? } (the connection cannot be changed) -> { data: SyncTargetDto }
+ *   PATCH  /targets/:id             body { resource?, nameFilter?, deleteRemoved?, autoSync? } (the connection cannot be changed) -> { data: SyncTargetDto }
  *   DELETE /targets/:id             -> { data: { deleted: true } }
  *   POST   /targets/:id/preview     -> { data: SyncPlanDto }
  *   POST   /targets/:id/run         -> { data: SyncRunDto }   (a plan with blockers is a 422 SYNC_BLOCKED carrying { plan })

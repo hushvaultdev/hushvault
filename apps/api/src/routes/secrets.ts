@@ -5,6 +5,7 @@ import type { Env } from '../index'
 import { loadKeyRing, encryptSecretWithRing, decryptSecretWithRing } from '../crypto/envelope'
 import { loadWriteRing } from '../lib/key-rotation'
 import { createPrefixedId } from '../lib/auth'
+import { enqueueSyncForEnvironment } from '../integrations/sync-scheduler'
 import { requireAuth, requireRole, secretReadRateLimit, secretWriteRateLimit } from '../middleware/auth'
 import { MAX_SECRET_VALUE_BYTES, getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
 
@@ -181,6 +182,7 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
     return c.json({ error: 'INTERNAL_ERROR', message: 'Could not create secret' }, 500)
   }
 
+  await enqueueSyncForEnvironment(c.env, envId)
   await writeAuditLog(c.env, {
     orgId: auth.orgId,
     actorId: auth.userId,
@@ -277,6 +279,7 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
     return c.json({ error: 'INTERNAL_ERROR', message: 'Could not update secret' }, 500)
   }
 
+  await enqueueSyncForEnvironment(c.env, current.env_id)
   await writeAuditLog(c.env, {
     orgId: auth.orgId,
     actorId: auth.userId,
@@ -296,8 +299,8 @@ secretRoutes.delete('/:id', requireRole('member'), secretWriteRateLimit, async (
   const auth = c.get('auth')
   const { id } = c.req.param()
   const secret = await c.env.DB.prepare(
-    'SELECT s.id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(id, auth.orgId).first<{ id: string }>()
+    'SELECT s.id, s.env_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
+  ).bind(id, auth.orgId).first<{ id: string; env_id: string }>()
 
   if (!secret) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
@@ -307,6 +310,7 @@ secretRoutes.delete('/:id', requireRole('member'), secretWriteRateLimit, async (
 
   // D1 first (history rows cascade); then remove blobs. Orphaned KV blobs are unreadable without their wrapped DEK.
   await c.env.DB.prepare('DELETE FROM secrets WHERE id = ?').bind(id).run()
+  await enqueueSyncForEnvironment(c.env, secret.env_id)
   await c.env.SECRETS_KV.delete(`secret:${id}`)
   for (const row of history.results ?? []) {
     await c.env.SECRETS_KV.delete(`secrethist:${row.id}`).catch(() => undefined)

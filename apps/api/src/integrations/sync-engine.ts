@@ -15,7 +15,7 @@
 //  - The sync denylist (scripts and Cloudflare account ids) is enforced here as well as in the routes.
 //  - Provider failures are mapped to a SyncErrorCode; provider error bodies are never stored.
 //  - Fail closed: any resolution failure (e.g. a computed-secret error) aborts before a single provider call.
-import type { SyncErrorCode, SyncNameFilter, SyncPlanDto, SyncRunDto, SyncRunStatus, SyncTargetDto, SyncTrigger } from '@hushvault/shared/integrations'
+import type { SyncAutoSync, SyncErrorCode, SyncNameFilter, SyncPlanDto, SyncRunDto, SyncRunStatus, SyncTargetDto, SyncTrigger } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { readCredential } from '../lib/integration-credentials'
@@ -156,6 +156,7 @@ export type SyncTargetRow = {
   resourceJson: string
   nameFilter: SyncNameFilter
   deleteRemoved: boolean
+  autoSync: SyncAutoSync
   fingerprintSalt: string
   status: 'active' | 'needs_attention'
   lastRunAt: string | null
@@ -165,7 +166,7 @@ export type SyncTargetRow = {
 
 type TargetDbRow = {
   id: string; org_id: string; project_id: string; env_id: string; connection_id: string; provider: string
-  resource_json: string; name_filter_json: string; delete_removed: number; fingerprint_salt: string
+  resource_json: string; name_filter_json: string; delete_removed: number; sync_on_change: number; schedule_minutes: number | null; fingerprint_salt: string
   status: 'active' | 'needs_attention'; last_run_at: string | null; created_at: string; updated_at: string
 }
 
@@ -174,7 +175,7 @@ type RunDbRow = {
   error_code: SyncErrorCode | null; started_at: string; finished_at: string | null; next_retry_at: string | null
 }
 
-const TARGET_COLUMNS = 'id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, fingerprint_salt, status, last_run_at, created_at, updated_at'
+const TARGET_COLUMNS = 'id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, sync_on_change, schedule_minutes, fingerprint_salt, status, last_run_at, created_at, updated_at'
 const RUN_COLUMNS = 'id, target_id, trigger, status, attempt, counts_json, error_code, started_at, finished_at, next_retry_at'
 
 function parseJson<T>(text: string, fallback: T): T {
@@ -198,6 +199,7 @@ function toTargetRow(row: TargetDbRow): SyncTargetRow {
     resourceJson: row.resource_json,
     nameFilter: parseJson<SyncNameFilter>(row.name_filter_json, {}),
     deleteRemoved: row.delete_removed === 1,
+    autoSync: { onChange: row.sync_on_change === 1, scheduleMinutes: row.schedule_minutes },
     fingerprintSalt: row.fingerprint_salt,
     status: row.status,
     lastRunAt: row.last_run_at,
@@ -227,6 +229,7 @@ export async function toSyncTargetDto(env: Env, target: SyncTargetRow): Promise<
     resource: target.resource,
     nameFilter: target.nameFilter,
     deleteRemoved: target.deleteRemoved,
+    autoSync: target.autoSync,
     status: target.status,
     lastRunAt: target.lastRunAt,
     lastRunStatus: last?.status ?? null,

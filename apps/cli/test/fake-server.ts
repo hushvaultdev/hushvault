@@ -23,7 +23,7 @@ export class FakeServer {
   targets: Record<string, unknown>[] = [
     {
       id: 'tgt_1', projectId: 'prj_1', envId: 'env_dev', connectionId: 'con_1', provider: 'cloudflare-workers',
-      resource: { accountId: 'acc_1', scriptName: 'api-worker' }, nameFilter: {}, deleteRemoved: false, status: 'active',
+      resource: { accountId: 'acc_1', scriptName: 'api-worker' }, nameFilter: {}, deleteRemoved: false, autoSync: { onChange: true, scheduleMinutes: 60 }, status: 'active',
       lastRunAt: '2026-01-01T00:00:00.000Z', lastRunStatus: 'succeeded', apiToken: 'cf-LEAK-token-123', value: 'LEAK-value',
     },
     {
@@ -64,6 +64,17 @@ export class FakeServer {
       if (headers['Authorization']!.startsWith('Bearer hv_')) return this.json(403, { error: 'FORBIDDEN', message: 'API keys cannot manage integrations' })
       if (this.role !== 'admin') return this.json(403, { error: 'FORBIDDEN', message: 'Insufficient role' })
       if (p === '/api/integrations/targets' && method === 'GET') return this.json(200, { data: this.targets })
+      const upd = /^\/api\/integrations\/targets\/([^/]+)$/.exec(p)
+      if (upd && method === 'PATCH') {
+        const t = this.targets.find((x) => x['id'] === decodeURIComponent(upd[1]!))
+        if (!t) return this.json(404, { error: 'NOT_FOUND', message: 'Target not found' })
+        const a = body?.autoSync as { onChange?: unknown; scheduleMinutes?: unknown } | undefined
+        if (!a || typeof a.onChange !== 'boolean' || (a.scheduleMinutes !== null && ![15, 60, 360, 1440].includes(a.scheduleMinutes as number))) {
+          return this.json(400, { error: 'VALIDATION_ERROR', message: 'Bad autoSync' })
+        }
+        t['autoSync'] = { onChange: a.onChange, scheduleMinutes: a.scheduleMinutes }
+        return this.json(200, { data: t })
+      }
       const m = /^\/api\/integrations\/targets\/([^/]+)\/(preview|run|runs)$/.exec(p)
       if (m) {
         if (!this.targets.some((t) => t['id'] === decodeURIComponent(m[1]!))) return this.json(404, { error: 'NOT_FOUND', message: 'Target not found' })

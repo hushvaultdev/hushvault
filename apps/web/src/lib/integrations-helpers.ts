@@ -1,4 +1,4 @@
-import { FREE_PLAN_MAX_SYNC_TARGETS, type SyncPlanDto, type SyncRunDto, type SyncTargetDto } from '@hushvault/shared/integrations'
+import { FREE_PLAN_MAX_SYNC_TARGETS, SYNC_SCHEDULE_OPTIONS, type SyncAutoSync, type SyncPlanDto, type SyncRunDto, type SyncTargetDto } from '@hushvault/shared/integrations'
 
 import { ApiError } from './api'
 
@@ -160,4 +160,61 @@ export function targetNeedsAttention(target: SyncTargetDto): boolean {
 /** One-line description of a target's destination, e.g. the Worker name. */
 export function resourceText(resource: Record<string, string>): string {
   return resource['scriptName'] ?? Object.values(resource).join(' / ')
+}
+
+const SCHEDULE_LABELS: Record<number, string> = {
+  15: 'Every 15 minutes',
+  60: 'Hourly',
+  360: 'Every 6 hours',
+  1440: 'Daily',
+}
+
+/** Select options for the schedule: value '' means off. */
+export function scheduleOptions(): { value: string; label: string }[] {
+  return [
+    { value: '', label: 'Off' },
+    ...SYNC_SCHEDULE_OPTIONS.map((m) => ({ value: String(m), label: SCHEDULE_LABELS[m] ?? `Every ${m} minutes` })),
+  ]
+}
+
+/** Select value ('' = off) to API value. Unknown values fall back to null (off). */
+export function parseScheduleValue(value: string): number | null {
+  const n = Number(value)
+  return (SYNC_SCHEDULE_OPTIONS as readonly number[]).includes(n) ? n : null
+}
+
+/** API value to select value; an unexpected number maps to off so the select stays controlled. */
+export function scheduleValue(minutes: number | null | undefined): string {
+  return minutes != null && (SYNC_SCHEDULE_OPTIONS as readonly number[]).includes(minutes) ? String(minutes) : ''
+}
+
+/** Short text for a target row, e.g. "on change, hourly" or "off". Tolerates a missing setting from an older API. */
+export function autoSyncText(autoSync: SyncAutoSync | undefined): string {
+  if (!autoSync) return 'off'
+  const parts: string[] = []
+  if (autoSync.onChange) parts.push('on change')
+  if (autoSync.scheduleMinutes != null) parts.push((SCHEDULE_LABELS[autoSync.scheduleMinutes] ?? `every ${autoSync.scheduleMinutes} minutes`).toLowerCase())
+  return parts.length > 0 ? parts.join(', ') : 'off'
+}
+
+const TRIGGER_LABELS: Record<string, string> = { manual: 'Manual', change: 'Secret change', schedule: 'Schedule' }
+
+export function triggerLabel(trigger: string): string {
+  return TRIGGER_LABELS[trigger] ?? trigger
+}
+
+/** "Will retry at <time>" for a run that is waiting to retry, else null. */
+export function retryText(nextRetryAt: string | null | undefined): string | null {
+  if (!nextRetryAt) return null
+  const d = new Date(nextRetryAt)
+  return Number.isNaN(d.getTime()) ? null : `Will retry at ${d.toLocaleString()}`
+}
+
+/** What to do about a target in the needs-attention state. */
+export function needsAttentionSteps(): string[] {
+  return [
+    'Rotate the connection credential (Connections, Rotate credential) if the provider rejected it or it expired.',
+    'Edit the target if the Worker was renamed or moved, or remove the target if it is no longer needed.',
+    'Then use Run now. A successful run clears this state; automatic runs are paused until then.',
+  ]
 }
