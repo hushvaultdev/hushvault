@@ -2,7 +2,7 @@ import type { SyncPlanDto } from '@hushvault/shared/integrations'
 import { describe, expect, it } from 'vitest'
 
 import { ApiError } from '../src/lib/api'
-import { describeApiError, groupPlan, runErrorGuidance } from '../src/lib/integrations-helpers'
+import { autoSyncText, describeApiError, groupPlan, needsAttentionSteps, parseScheduleValue, retryText, runErrorGuidance, scheduleOptions, scheduleValue, triggerLabel } from '../src/lib/integrations-helpers'
 
 describe('describeApiError', () => {
   it('shows the API message for CONFLICT instead of a label message', () => {
@@ -46,5 +46,44 @@ describe('groupPlan', () => {
   })
   it('returns nothing for an empty plan', () => {
     expect(groupPlan({ create: [], update: [], delete: [], skip: [], conflict: [], blockers: [] })).toEqual([])
+  })
+})
+
+describe('auto-sync helpers', () => {
+  it('lists Off plus every schedule option', () => {
+    expect(scheduleOptions().map((o) => o.value)).toEqual(['', '15', '60', '360', '1440'])
+  })
+
+  it('round-trips schedule values and rejects unknown ones', () => {
+    expect(parseScheduleValue('')).toBeNull()
+    expect(parseScheduleValue('60')).toBe(60)
+    expect(parseScheduleValue('7')).toBeNull()
+    expect(scheduleValue(360)).toBe('360')
+    expect(scheduleValue(null)).toBe('')
+    expect(scheduleValue(7)).toBe('')
+    expect(scheduleValue(undefined)).toBe('')
+  })
+
+  it('describes auto-sync settings', () => {
+    expect(autoSyncText({ onChange: false, scheduleMinutes: null })).toBe('off')
+    expect(autoSyncText(undefined)).toBe('off')
+    expect(autoSyncText({ onChange: true, scheduleMinutes: null })).toBe('on change')
+    expect(autoSyncText({ onChange: true, scheduleMinutes: 60 })).toBe('on change, hourly')
+    expect(autoSyncText({ onChange: false, scheduleMinutes: 1440 })).toBe('daily')
+  })
+
+  it('labels triggers and retry times', () => {
+    expect(triggerLabel('change')).toBe('Secret change')
+    expect(triggerLabel('other')).toBe('other')
+    expect(retryText(null)).toBeNull()
+    expect(retryText('garbage')).toBeNull()
+    expect(retryText('2026-01-01T00:00:00.000Z')).toMatch(/^Will retry at /)
+  })
+
+  it('gives needs-attention steps covering credential, edit and remove', () => {
+    const text = needsAttentionSteps().join(' ')
+    expect(text).toMatch(/Rotate the connection credential/)
+    expect(text).toMatch(/Edit the target/)
+    expect(text).toMatch(/remove the target/)
   })
 })
