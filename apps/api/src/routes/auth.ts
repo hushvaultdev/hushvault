@@ -1,15 +1,18 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import type { Context } from 'hono'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { z } from 'zod'
 import type { Env } from '../index'
-import { createApiKey, createPrefixedId, hashPassword, signJwt, verifyPassword } from '../lib/auth'
+import { createApiKey, createPrefixedId, hashPassword, signJwt, timingSafeEqual, verifyPassword } from '../lib/auth'
 import type { OAuthIdentity } from '../lib/oauth'
 import {
   exchangeGitHubCode,
   exchangeGoogleCode,
   fetchGitHubIdentity,
   fetchGoogleIdentity,
+  challengeFor,
+  newPkce,
   signState,
   verifyState,
 } from '../lib/oauth'
@@ -493,6 +496,33 @@ async function completeOAuthLogin(
   return c.redirect(`${webBase}/auth/callback#${params.toString()}`, 302)
 }
 
+const OAUTH_COOKIE_TTL_SECONDS = 600
+
+function oauthCookieName(c: Context<{ Bindings: Env }>): string {
+  // The __Host- prefix needs Secure; plain http (local dev) cannot set it.
+  return new URL(c.req.url).protocol === 'https:' ? '__Host-hv_oauth' : 'hv_oauth'
+}
+
+/** Start a flow: the PKCE verifier goes into an HttpOnly cookie, so only the browser that began it can finish it. */
+async function beginOAuthBinding(c: Context<{ Bindings: Env }>): Promise<{ challenge: string }> {
+  const pkce = await newPkce()
+  const secure = new URL(c.req.url).protocol === 'https:'
+  setCookie(c, oauthCookieName(c), pkce.verifier, {
+    httpOnly: true, secure, sameSite: 'Lax', path: '/', maxAge: OAUTH_COOKIE_TTL_SECONDS,
+  })
+  return { challenge: pkce.challenge }
+}
+
+/** Validate state and the browser binding; returns the PKCE verifier. The cookie is always cleared (single use). */
+async function consumeOAuthBinding(c: Context<{ Bindings: Env }>, state: string): Promise<string | null> {
+  const name = oauthCookieName(c)
+  const verifier = getCookie(c, name)
+  deleteCookie(c, name, { path: '/', secure: new URL(c.req.url).protocol === 'https:' })
+  const verified = await verifyState(c.env.JWT_SECRET, state)
+  if (!verified || !verifier) return null
+  return timingSafeEqual(await challengeFor(verifier), verified.challenge) ? verifier : null
+}
+
 // GET /api/auth/github — begin the GitHub OAuth sign-in flow
 authRoutes.get('/github', oauthRateLimit, async (c) => {
   const clientId = c.env.GITHUB_CLIENT_ID
@@ -505,7 +535,10 @@ authRoutes.get('/github', oauthRateLimit, async (c) => {
   authorizeUrl.searchParams.set('client_id', clientId)
   authorizeUrl.searchParams.set('redirect_uri', redirectUri)
   authorizeUrl.searchParams.set('scope', 'read:user user:email')
-  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET))
+  const pkce = await beginOAuthBinding(c)
+  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET, pkce.challenge))
+  authorizeUrl.searchParams.set('code_challenge', pkce.challenge)
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256')
   authorizeUrl.searchParams.set('allow_signup', 'true')
 
   return c.redirect(authorizeUrl.toString(), 302)
@@ -529,12 +562,13 @@ authRoutes.get('/github/callback', oauthRateLimit, async (c) => {
 
   const code = c.req.query('code')
   const state = c.req.query('state')
-  if (!code || !state || !(await verifyState(c.env.JWT_SECRET, state))) {
+  const verifier = code && state ? await consumeOAuthBinding(c, state) : null
+  if (!code || !verifier) {
     return fail('invalid_state')
   }
 
   const redirectUri = `${new URL(c.req.url).origin}/api/auth/github/callback`
-  const accessToken = await exchangeGitHubCode(clientId, clientSecret, code, redirectUri)
+  const accessToken = await exchangeGitHubCode(clientId, clientSecret, code, redirectUri, verifier)
   if (!accessToken) {
     return fail('exchange_failed')
   }
@@ -560,7 +594,10 @@ authRoutes.get('/google', oauthRateLimit, async (c) => {
   authorizeUrl.searchParams.set('redirect_uri', redirectUri)
   authorizeUrl.searchParams.set('response_type', 'code')
   authorizeUrl.searchParams.set('scope', 'openid email profile')
-  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET))
+  const pkce = await beginOAuthBinding(c)
+  authorizeUrl.searchParams.set('state', await signState(c.env.JWT_SECRET, pkce.challenge))
+  authorizeUrl.searchParams.set('code_challenge', pkce.challenge)
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256')
 
   return c.redirect(authorizeUrl.toString(), 302)
 })
@@ -586,12 +623,13 @@ authRoutes.get('/google/callback', oauthRateLimit, async (c) => {
 
   const code = c.req.query('code')
   const state = c.req.query('state')
-  if (!code || !state || !(await verifyState(c.env.JWT_SECRET, state))) {
+  const verifier = code && state ? await consumeOAuthBinding(c, state) : null
+  if (!code || !verifier) {
     return fail('invalid_state')
   }
 
   const redirectUri = `${new URL(c.req.url).origin}/api/auth/google/callback`
-  const accessToken = await exchangeGoogleCode(clientId, clientSecret, code, redirectUri)
+  const accessToken = await exchangeGoogleCode(clientId, clientSecret, code, redirectUri, verifier)
   if (!accessToken) {
     return fail('exchange_failed')
   }

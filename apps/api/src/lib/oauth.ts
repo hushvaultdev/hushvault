@@ -10,32 +10,49 @@ const textDecoder = new TextDecoder()
 
 const STATE_TTL_MS = 10 * 60 * 1000
 
+// Domain separation: the JWT secret also signs sessions; a state token must never verify as anything else.
+const STATE_DOMAIN = 'hushvault-oauth-state-v2|'
+
 async function hmacSign(secret: string, data: string): Promise<string> {
   const key = await crypto.subtle.importKey('raw', textEncoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(data))
+  const signature = await crypto.subtle.sign('HMAC', key, textEncoder.encode(STATE_DOMAIN + data))
   return createBase64Url(signature)
 }
 
-export async function signState(secret: string): Promise<string> {
+/** PKCE (RFC 7636, S256). The verifier stays in an HttpOnly cookie; only the challenge travels in URLs. */
+export async function challengeFor(verifier: string): Promise<string> {
+  return createBase64Url(await crypto.subtle.digest('SHA-256', textEncoder.encode(verifier)))
+}
+
+export async function newPkce(): Promise<{ verifier: string; challenge: string }> {
+  const verifier = createBase64Url(crypto.getRandomValues(new Uint8Array(32)))
+  return { verifier, challenge: await challengeFor(verifier) }
+}
+
+/** State = signed {nonce, exp, cb}. `cb` is the PKCE challenge, which binds the state to the browser holding the verifier. */
+export async function signState(secret: string, challenge: string): Promise<string> {
   const payload = {
     nonce: createBase64Url(crypto.getRandomValues(new Uint8Array(16))),
     exp: Date.now() + STATE_TTL_MS,
+    cb: challenge,
   }
   const body = createBase64Url(textEncoder.encode(JSON.stringify(payload)))
   return `${body}.${await hmacSign(secret, body)}`
 }
 
-export async function verifyState(secret: string, state: string): Promise<boolean> {
+/** Returns the bound challenge when the state is authentic and unexpired, otherwise null. */
+export async function verifyState(secret: string, state: string): Promise<{ challenge: string } | null> {
   const parts = state.split('.')
-  if (parts.length !== 2) return false
+  if (parts.length !== 2) return null
   const [body, signature] = parts as [string, string]
   const expected = await hmacSign(secret, body)
-  if (!timingSafeEqual(signature, expected)) return false
+  if (!timingSafeEqual(signature, expected)) return null
   try {
-    const payload = JSON.parse(textDecoder.decode(decodeBase64Url(body))) as { exp?: number }
-    return typeof payload.exp === 'number' && payload.exp > Date.now()
+    const payload = JSON.parse(textDecoder.decode(decodeBase64Url(body))) as { exp?: number; cb?: string }
+    if (typeof payload.exp !== 'number' || payload.exp <= Date.now() || typeof payload.cb !== 'string') return null
+    return { challenge: payload.cb }
   } catch {
-    return false
+    return null
   }
 }
 
@@ -44,11 +61,12 @@ export async function exchangeGitHubCode(
   clientSecret: string,
   code: string,
   redirectUri: string,
+  codeVerifier?: string,
 ): Promise<string | null> {
   const res = await fetch('https://github.com/login/oauth/access_token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: redirectUri }),
+    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: redirectUri, ...(codeVerifier ? { code_verifier: codeVerifier } : {}) }),
   })
   if (!res.ok) return null
   const data = (await res.json()) as { access_token?: string }
@@ -94,6 +112,7 @@ export async function exchangeGoogleCode(
   clientSecret: string,
   code: string,
   redirectUri: string,
+  codeVerifier?: string,
 ): Promise<string | null> {
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -104,6 +123,7 @@ export async function exchangeGoogleCode(
       code,
       redirect_uri: redirectUri,
       grant_type: 'authorization_code',
+      ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
     }),
   })
   if (!res.ok) return null
