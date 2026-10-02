@@ -1,7 +1,7 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -17,6 +17,10 @@ const s = (name: string) => styles[name]
 export default function SignInPage() {
   const router = useRouter()
   const { login } = useAuth()
+  const [expired, setExpired] = useState(false)
+  useEffect(() => {
+    setExpired(new URLSearchParams(window.location.search).get('expired') === '1')
+  }, [])
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -73,8 +77,10 @@ export default function SignInPage() {
               autoComplete="current-password"
               required
             />
+            {expired && !error ? <p className={s('authText')}>Your session ended. Please sign in again.</p> : null}
             {error ? <p className={s('authError')} role="alert">{error}</p> : null}
             <Button type="submit" variant="primary" loading={submitting}>Sign In</Button>
+            <a href="/forgot-password">Forgot password?</a>
           </form>
           <p className={s('authFooter')}>
             New to HushVault? <a href="/sign-up">Create an account</a>.

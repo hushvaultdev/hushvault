@@ -55,27 +55,37 @@ describe('register / login', () => {
 })
 
 describe('OAuth account linking', () => {
-  it('ATTACK: does not log the victim into an attacker-registered unverified account', async () => {
+  it('ATTACK: a pre-registered unverified account is claimed by the real owner and the attacker is locked out', async () => {
     const env = createTestEnv()
     const attacker = await call(env, 'POST', '/api/auth/register', {
       json: { email: 'victim@x.com', password: PASSWORD, organisationName: 'Evil Org' },
     })
     expect(attacker.status).toBe(201)
+    const attackerToken = attacker.body.data.token as string
+    const attackerKey = await seedApiKey(env, attacker.body.data.userId)
+    expect((await call(env, 'GET', '/api/projects', { token: attackerToken })).status).toBe(200)
     vi.mocked(fetchGitHubIdentity).mockResolvedValue({ id: '777', login: 'victim', name: 'V', email: 'victim@x.com' })
 
+    // The victim signs in with GitHub (the provider verified the address): they get the account.
+    await new Promise((r) => setTimeout(r, 1100)) // JWT iat is in whole seconds
     const res = await githubCallback(env)
-    expect(res.status).toBe(302)
-    expect(res.fragment.get('error')).toBe('account_exists_unverified')
-    expect(res.fragment.get('token')).toBeNull()
-    expect(res.location).not.toMatch(/token=/)
-
+    expect(res.fragment.get('error')).toBeNull()
+    expect(res.fragment.get('token')).toBeTruthy()
+    expect(res.fragment.get('userId')).toBe(attacker.body.data.userId)
+    expect(res.fragment.get('notice')).toBe('account_linked')
     const row = await userRow(env, 'victim@x.com')
-    expect(row?.['provider']).toBeNull()
-    expect(row?.['provider_id']).toBeNull()
+    expect(row).toMatchObject({ provider: 'github', provider_id: '777', email_verified: 1, password_hash: '', salt: '' })
+
+    // Everything the attacker held is dead.
+    expect((await call(env, 'POST', '/api/auth/login', { json: { email: 'victim@x.com', password: PASSWORD } })).status).toBe(401)
+    expect((await call(env, 'GET', '/api/projects', { token: attackerToken })).status).toBe(401)
+    expect((await call(env, 'GET', '/api/projects', { token: attackerKey.rawKey })).status).toBe(401)
+    // The new session works.
+    expect((await call(env, 'GET', '/api/projects', { token: res.fragment.get('token') as string })).status).toBe(200)
+    const audit = await env.DB.prepare("SELECT org_id FROM audit_log WHERE action = 'auth.oauth.account_takeover'").first<{ org_id: string }>()
+    expect(audit?.org_id).toBe(attacker.body.data.orgId)
     const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first<{ n: number }>()
     expect(count?.n).toBe(1)
-    const audit = await env.DB.prepare("SELECT org_id FROM audit_log WHERE action = 'auth.oauth.link_refused'").first<{ org_id: string }>()
-    expect(audit?.org_id).toBe(attacker.body.data.orgId)
   })
 
   it('links by email when the existing account is verified', async () => {

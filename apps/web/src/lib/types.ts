@@ -11,6 +11,8 @@ export interface Session {
   userId: string
   orgId: string
   role: Role
+  // Absent on sessions stored before email verification existed; only `false` shows the banner.
+  emailVerified?: boolean
 }
 
 export interface ProjectRow {

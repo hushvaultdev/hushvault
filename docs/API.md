@@ -128,7 +128,8 @@ No auth. Scope `auth-register`.
 Body: `email` (email, max 254), `password` (12-128 chars), `organisationName` (2-120 chars).
 
 `201` `{ "data": { "userId", "orgId", "token" } }`. The user is created as `owner` of a new organisation on the
-`free` plan, with `email_verified = 0` (no verification flow exists yet). Errors: `409 CONFLICT`
+`free` plan, with `email_verified = 0`; a verification email is sent in the background (see
+[Email verification and password reset](#email-verification-and-password-reset)). Errors: `409 CONFLICT`
 (`Email is already registered`), `400` validation.
 
 ```bash
@@ -140,7 +141,7 @@ curl -X POST "$HUSHVAULT_API_URL/api/auth/register" -H 'Content-Type: applicatio
 
 No auth. Scope `auth-login`. Body: `email`, `password` (1-128).
 
-`200` `{ "data": { "token", "userId", "orgId", "role" } }`. Uses the user's earliest membership. Errors:
+`200` `{ "data": { "token", "userId", "orgId", "role", "emailVerified" } }`. Uses the user's earliest membership. Errors:
 `401 UNAUTHORIZED` (`Invalid credentials`; also returned for unknown emails and OAuth-only accounts, with the
 same PBKDF2 cost to avoid timing leaks; `Membership not found` if the user has no membership).
 
@@ -197,12 +198,33 @@ Failure fragment: `#error=<code>`, where code is one of:
 | `invalid_state` | Missing `code`/`state`, or `state` failed verification |
 | `exchange_failed` | Provider code exchange failed (also other provider error codes on Google) |
 | `no_verified_email` | Provider returned no verified email |
-| `account_exists_unverified` | An unverified password account already uses that email; HushVault refuses to link or log in (anti pre-account-takeover). An `auth.oauth.link_refused` audit event is written. |
 | `membership_missing` | The matched user has no organisation membership |
 
-Account matching: by provider identity first; otherwise by email if that account is verified (the provider is
-then linked); otherwise a new user and organisation (`<name>'s workspace`, `owner`) are created with
-`email_verified = 1`.
+Account matching: by provider identity first; otherwise by email (the provider is linked); otherwise a new user
+and organisation (`<name>'s workspace`, `owner`) are created with `email_verified = 1`.
+
+If the matching account was **unverified** (password sign-up never confirmed), the provider-verified owner claims
+it: the password hash is wiped, `email_verified = 1`, all earlier sessions and API keys are invalidated, pending
+tokens are deleted, `auth.oauth.account_takeover` is audited, and the success fragment carries
+`&notice=account_linked`. This defeats pre-registration account takeover.
+
+### Email verification and password reset
+
+Tokens are 256-bit, stored only as SHA-256 hashes, single use, bound to purpose and email. Links use a URL
+fragment (`/verify-email#token=...`, `/reset-password#token=...`), so the token never reaches a server log or
+Referer; the web pages POST it. Verification links last 24 h, reset links 60 min. Every token failure is the same
+`400 INVALID_TOKEN`.
+
+| Endpoint | Auth | Notes |
+|----------|------|-------|
+| `POST /api/auth/verify-email/send` | Bearer | Resend the verification mail. Always `202`. Limited per user (1/min, 5/h). |
+| `POST /api/auth/verify-email` | none | Body `{ token }`. Marks the email verified. |
+| `POST /api/auth/forgot-password` | none | Body `{ email }`. Always an identical `202`, whether or not the account exists; sending runs in the background. Limited per IP (5/min) and per email (3/h). |
+| `POST /api/auth/reset-password` | none | Body `{ token, password }` (12-128 chars). Sets the password, marks the email verified, invalidates earlier sessions (JWT `iat` before `users.sessions_valid_after` gets `401`), and sends a "password changed" mail. API keys are revoked only if the account was unverified. |
+
+Configuration: `MAIL_FROM`, the `EMAIL` send_email binding (Cloudflare Email Service; without it mail is not sent
+and the flows still return their normal responses), `EMAIL_DAILY_BUDGET` (global sends per day, default 200) and
+`REQUIRE_VERIFIED_EMAIL` (when set, API-key creation requires a verified email).
 
 ### POST /api/auth/github-oidc
 
@@ -504,7 +526,8 @@ Errors: `401 UNAUTHORIZED` (`Missing signature headers`, `Unknown signing key`, 
 ## Audit actions
 
 Written by the API today: `auth.login`, `auth.login.github`, `auth.login.google`, `auth.api_key.create`,
-`auth.api_key.revoke`, `auth.oauth.link_refused`, `notify.api_key_revoked`, `project.create`, `project.update`, `project.delete`,
+`auth.api_key.revoke`, `auth.oauth.account_takeover`, `auth.email_verification.sent`, `auth.email.verified`,
+`auth.password_reset.requested`, `auth.password_reset.completed`, `notify.api_key_revoked`, `project.create`, `project.update`, `project.delete`,
 `environment.create`, `secret.read`, `secret.read_bulk`, `secret.create`, `secret.update`, `secret.delete`,
 `share.create`. Not audited: registration, listing endpoints, share views.
 

@@ -12,7 +12,6 @@ const ERROR_MESSAGES: Record<string, string> = {
   invalid_state: 'The sign-in request expired or was invalid. Please try again.',
   exchange_failed: 'Could not complete sign-in. Please try again.',
   no_verified_email: 'No verified email was available from your account.',
-  account_exists_unverified: 'An account with this email already exists. Sign in with your password instead.',
   membership_missing: 'Your account has no workspace. Please contact support.',
 }
 
@@ -22,6 +21,7 @@ export default function AuthCallbackPage() {
   const router = useRouter()
   const { applySession } = useAuth()
   const [error, setError] = useState<string | null>(null)
+  const [linked, setLinked] = useState(false)
 
   useEffect(() => {
     // The API delivers the session in the URL fragment so it never hits a server
@@ -41,9 +41,14 @@ export default function AuthCallbackPage() {
     const role = params.get('role')
 
     if (token && userId && orgId && role && (VALID_ROLES as readonly string[]).includes(role)) {
-      applySession({ token, userId, orgId, role: role as Role })
+      applySession({ token, userId, orgId, role: role as Role, emailVerified: true })
       // Clear the fragment so the token isn't left in the address bar/history.
       window.history.replaceState(null, '', window.location.pathname)
+      if (params.get('notice') === 'account_linked') {
+        // An unverified password account with this email was claimed: say so explicitly.
+        setLinked(true)
+        return
+      }
       router.replace('/dashboard')
     } else {
       setError('Sign-in failed. Please try again.')
@@ -58,6 +63,15 @@ export default function AuthCallbackPage() {
             <h1 style={{ fontSize: '1.4rem', margin: '0 0 12px' }}>Sign-in failed</h1>
             <p style={{ color: 'var(--text-muted)', margin: '0 0 16px' }} role="alert">{error}</p>
             <a href="/sign-in" style={{ color: 'var(--accent-strong)', fontWeight: 600 }}>Back to sign in</a>
+          </>
+        ) : linked ? (
+          <>
+            <h1 style={{ fontSize: '1.4rem', margin: '0 0 12px' }}>Account linked</h1>
+            <p style={{ color: 'var(--text-muted)', margin: '0 0 16px', maxWidth: 440 }}>
+              An account with this email was created with a password and never verified. It is now tied to your
+              sign-in provider: the old password and any API keys were removed, and other sessions were signed out.
+            </p>
+            <a href="/dashboard" style={{ color: 'var(--accent-strong)', fontWeight: 600 }}>Continue to dashboard</a>
           </>
         ) : (
           <p style={{ color: 'var(--text-muted)' }}>Signing you in…</p>

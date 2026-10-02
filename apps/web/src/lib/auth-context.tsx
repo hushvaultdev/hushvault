@@ -15,6 +15,8 @@ interface AuthContextValue {
   register: (email: string, password: string, organisationName: string) => Promise<void>
   // Adopt a session obtained out-of-band (e.g. the OAuth callback redirect).
   applySession: (session: Session) => void
+  // Adopt the verified state after the user confirms their email in this browser.
+  markEmailVerified: () => void
   logout: () => void
 }
 
@@ -45,12 +47,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       auth: false,
       body: { email, password, organisationName },
     })
-    const next: Session = { ...result, role: 'owner' }
+    const next: Session = { ...result, role: 'owner', emailVerified: false }
     writeSession(next)
     setSession(next)
   }, [])
 
   const applySession = useCallback((next: Session) => {
+    writeSession(next)
+    setSession(next)
+  }, [])
+
+  const markEmailVerified = useCallback(() => {
+    const current = readSession()
+    if (!current) return
+    const next = { ...current, emailVerified: true }
     writeSession(next)
     setSession(next)
   }, [])
@@ -61,8 +71,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const value = useMemo<AuthContextValue>(
-    () => ({ session, isAuthenticated: Boolean(session), ready, login, register, applySession, logout }),
-    [session, ready, login, register, applySession, logout],
+    () => ({ session, isAuthenticated: Boolean(session), ready, login, register, applySession, markEmailVerified, logout }),
+    [session, ready, login, register, applySession, markEmailVerified, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
