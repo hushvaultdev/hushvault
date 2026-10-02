@@ -10,7 +10,8 @@
     "lint": "next lint",
     "build:cf": "opennextjs-cloudflare build",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "verify": "pnpm run type-check && pnpm run lint && pnpm --filter @hushvault/shared test",
+    "test": "vitest run",
+    "verify": "pnpm run type-check && pnpm run lint && pnpm run test && pnpm --filter @hushvault/shared test",
     "deploy:dev": "opennextjs-cloudflare deploy --env dev",
     "deploy:production": "opennextjs-cloudflare deploy --env production",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"

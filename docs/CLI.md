@@ -125,6 +125,42 @@ whole link. Requires role `member` or higher. `share` does not need a `.hushvaul
 from one if found. The API builds the `<url>` host itself, and whether a web page for opening links is
 available depends on your deployment.
 
+### `hushvault sync <list|status|preview|run>`
+
+Inspect and trigger one-way HushVault to target syncs (for example Cloudflare Workers secrets). Connections and
+targets are created and edited in the dashboard (Integrations); the CLI only reads, previews and runs them. These commands do not need
+`.hushvault.json`.
+
+| Command | What it does |
+|---------|--------------|
+| `sync list` | Lists targets (`provider:scriptName`, id, status, last run) |
+| `sync status <target>` | Target state plus the latest run (status, counts, error code) |
+| `sync preview <target>` | Shows what a run would create, update and delete; changes nothing |
+| `sync run <target>` | Prints the plan, then runs it |
+
+`<target>` is a target id or a unique `provider:scriptName` label (case-insensitive). An unknown or ambiguous
+label fails and lists the known targets or ids.
+
+Options: `--json` on all four (machine-readable; only known fields are emitted). `run` also takes `-y, --yes`.
+When the plan contains deletes, `run` asks for confirmation on a terminal and otherwise (non-interactive, or with
+`--json`) refuses unless `--yes` is given. Deletes only ever apply to names HushVault itself created, and only when
+the target's delete toggle is on (default off).
+
+`run` re-plans on the server when it executes, so the plan it actually runs can differ from the preview or the plan
+printed just before it (for example if secrets changed in between). `--yes` skips the delete confirmation, so use it
+only when you accept whatever the server plans at that moment.
+
+Output is names and counts only: never secret values, provider credentials or provider responses.
+
+Exit codes: `0` success; `1` failure (error, failed or partial run, declined confirmation); `2` blocked or needs
+attention (plan has blockers, `422 SYNC_BLOCKED`, a target in `needs_attention`, or a latest run that failed or was
+partial, for `list` and `status`).
+
+Sync management endpoints accept an interactive login (JWT) only. With an API key in `HUSHVAULT_TOKEN` the API
+answers 403 and the CLI prints `Sync management needs an interactive login, not an API key`. Run
+`hushvault login` and unset `HUSHVAULT_TOKEN`. Other mapped errors: `409 PLAN_LIMIT` (Free plan: at most 2 sync
+targets per organisation), `422 SYNC_BLOCKED`, `429` (rate limited).
+
 ## Project config: `.hushvault.json`
 
 Written by `init` in the current directory and found by walking up parent directories (like git). It contains
@@ -211,6 +247,7 @@ and `apiUrl`. It holds no token.
 |------|---------|
 | `0` | Success |
 | `1` | Any CLI error (not logged in, no `.hushvault.json`, API error, bad input, failure to start the command) |
+| `2` | `sync` only: blocked or needs attention (see `sync`) |
 | child's code | `run` exits with the command's own exit code; if the child is killed by a signal, `128 + signal number` |
 
 Errors are printed to stderr as `✗ <message>` and never include secret values. API errors are mapped to

@@ -108,3 +108,32 @@ Mounted prefixes: `/api/auth`, `/api/projects`, `/api/environments`, `/api/secre
 4. `GET /api/environments/{envId}/resolved?values=true` returns plaintext values over HTTPS (inheritance and computed secrets already applied; decrypted by the API, not the CLI)
 5. Merges with `process.env` (unless `--no-inherit`)
 6. Spawns child process with merged env
+
+## Secret Sync Engine (issue #40)
+
+One-way push of a resolved environment (HushVault -> target) through a provider that implements
+`SyncProvider` (`apps/api/src/integrations/sync-types.ts`). Code: `apps/api/src/integrations/sync-engine.ts`;
+environment resolution (inheritance, AAD-bound decrypt, computed secrets) is shared with
+`GET /api/environments/:id/resolved` in `apps/api/src/lib/resolve-environment.ts`. Tables (migration `0011`):
+`sync_targets`, `sync_items` (ledger), `sync_runs`.
+
+- **Plan** (`planSync`): resolve, apply the target's prefix/deny filter, drop the reserved bootstrap names
+  (`ENCRYPTION_MASTER_KEY`, `ENCRYPTION_KEY_V<n>`, `JWT_SECRET`; reported under `skip`), check the provider's limits
+  (`TOO_MANY_ITEMS`, `VALUE_TOO_LARGE`, `NAME_INVALID` blockers, before any write), list the target's names and classify:
+  create / update / skip / delete / conflict. A name on the target that is not in the ledger is a **conflict** and is never touched.
+  A ledger name missing from the target is re-created (drift healing).
+- **Ledger and deletes**: `sync_items` holds only names the provider confirmed. Deletion on the target happens only for ledger names,
+  only when the per-target `delete_removed` toggle is on (default off).
+- **Fingerprints**: `HMAC-SHA256(HKDF-SHA256(JWT_SECRET, salt = target.fingerprint_salt, info = "hushvault-sync-fp-v1"), name || 0x00 || value)`,
+  WebCrypto only. Values are never stored. Rotating `JWT_SECRET` changes every fingerprint, which only causes one extra idempotent re-push per item.
+- **Run** (`runSync`): single flight per target (partial unique index on `sync_runs` for queued/running plus a lease; an expired lease is
+  closed as `TIMEOUT`; a second concurrent call returns the active run). Ops are chunked by `limits.maxItems` (sets first, deletes last);
+  the ledger is updated per chunk for items the provider confirmed, so a retry resumes. Status is `succeeded`, `partial` or `failed`
+  with counts. Provider error bodies are never stored, only a `SyncErrorCode`.
+- **Fail closed**: any resolution failure (computed-secret error, decryption, chain) ends the run as `COMPUTED_ERROR` before a provider call.
+- **Failure handling**: `PROVIDER_AUTH`, `PROVIDER_VALIDATION`, `TARGET_NOT_FOUND` mark the target `needs_attention` and are not retried.
+  `PROVIDER_RATE_LIMIT`, `PROVIDER_ERROR`, `TIMEOUT` set `next_retry_at` (exponential backoff 30 s x 2^(n-1), capped at 15 min, jittered,
+  max 5 attempts). The engine only sets it; the scheduler that acts on it is M4.
+- **Audit**: `secret.read_bulk` (environment) for every read, `sync.run.started|succeeded|failed` (run id only). `actorType` is `user` for a
+  manual run with an actor, otherwise `system`.
+- Deleting an integration connection cascades to its targets, ledger and runs.

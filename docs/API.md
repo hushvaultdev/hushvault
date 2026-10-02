@@ -450,7 +450,7 @@ expired or `maxViews` has been reached.
 
 ## Integrations
 
-Outbound credential vault (issue #39). No integration can sync yet; the first provider (Cloudflare Workers) arrives with M3.
+Outbound credential vault (issue #39) and secret sync (issues #40, #41). The only provider is Cloudflare Workers secrets (beta); see `docs/INTEGRATIONS.md`.
 Everything that touches a connection is **JWT only (API keys get `403`), admin or owner, rate limited (20/min) and audited**.
 The credential is accepted once and never returned, logged or echoed in an error; responses carry metadata only. It is stored as
 ciphertext (format tag `c2:`) bound by AES-GCM AAD to `(organisation id, connection id)` and re-wrapped by key rotation like a secret.
@@ -465,6 +465,45 @@ ciphertext (format tag `c2:`) bound by AES-GCM AAD to `(organisation id, connect
 
 Audit actions: `integration.connect`, `integration.update`, `integration.revoke` (resource id only). `GET /api/security/key-rotation`
 now also reports `rows.connections` per key version.
+
+### Sync targets and runs
+
+A target pushes one environment's resolved secrets (inheritance and computed secrets applied) to one provider resource, one way.
+Same guards as connections: **JWT only (API keys `403`), admin or owner with a current membership re-read**. Responses are DTOs
+(`SyncTargetDto`, `SyncPlanDto`, `SyncRunDto` in `packages/shared/src/integrations.ts`): names, counts and ids, never values,
+credentials, the fingerprint salt or provider response bodies. Not-found and cross-organisation ids are both `404`.
+
+| Endpoint | Notes |
+|----------|-------|
+| `POST /api/integrations/targets` | Body `{ projectId, envId, connectionId, resource, nameFilter?: { prefix?, deny? }, deleteRemoved?: false }`, unknown fields rejected. `resource` is validated by the provider (Cloudflare Workers: `{ accountId, scriptName }`, identifiers only; the account must match the connection). `201 { data: SyncTargetDto }`. Errors: `400 VALIDATION_ERROR`, `404` (connection, project or environment not in your organisation), `409 CONFLICT` (same resource already a target of that connection) / `PLAN_LIMIT` (Free plan: 2 targets per organisation, enforced inside the INSERT), `422 TARGET_NOT_ALLOWED` (HushVault's own Workers incl. `hushvault-web-local`, `HUSHVAULT_SYNC_DENY_SCRIPTS`, and any resource or connection in a Cloudflare account listed in `HUSHVAULT_SYNC_DENY_ACCOUNT_IDS`; creating a *connection* for a denied account is refused the same way). Rate limited 20/min. |
+| `GET /api/integrations/targets` | `{ data: SyncTargetDto[] }`, newest first. |
+| `PATCH /api/integrations/targets/:id` | Body `{ resource?, nameFilter?, deleteRemoved? }`; `connectionId` is rejected (`400`). Changing `resource` clears the target's ledger, so names written to the old resource can never authorise deletes on the new one. Changing `resource` or `nameFilter` while a run is queued or running (unexpired lease) is `409 BUSY` and changes nothing; the UPDATE repeats that check atomically. `deleteRemoved` and unchanged values are always allowed. |
+| `DELETE /api/integrations/targets/:id` | Soft delete (`{ data: { deleted: true } }`); nothing is removed on the provider. Frees the plan slot and clears `next_retry_at` on the target's runs. |
+| `POST /api/integrations/targets/:id/preview` | `{ data: SyncPlanDto }` (`create/update/delete/skip/conflict` names and `blockers`). Audited as `secret.read_bulk` (with ip and user agent). Rate limited 12/min **per organisation** (not per IP). Planning errors are the mapped errors listed under run. |
+| `POST /api/integrations/targets/:id/run` | Rate limited 6/min **per organisation**. The engine checks for an active run first (`200` with that run, nothing planned), then makes **one** plan. `200 { data: SyncRunDto }`; a push failure is a recorded run (`failed`/`partial` with `errorCode`), not an HTTP error. `422 SYNC_BLOCKED { plan }` when the plan has blockers (no run recorded). A failure *before anything was sent* is both recorded as a failed run (visible under `/runs`, target marked `needs_attention` where applicable) and returned as a mapped HTTP error: `422 PROVIDER_AUTH / CREDENTIAL_UNAVAILABLE / COMPUTED_ERROR / DECRYPTION_FAILED / TARGET_NOT_FOUND / TARGET_NOT_ALLOWED`, `429 PROVIDER_RATE_LIMIT`, `502 PROVIDER_ERROR / TIMEOUT / PROVIDER_VALIDATION`, `409 BUSY`, `503 PROVIDER_UNAVAILABLE`. `COMPUTED_ERROR` = the environment could not be resolved; `DECRYPTION_FAILED` = a stored secret could not be decrypted. |
+| `GET /api/integrations/targets/:id/runs` | `{ data: SyncRunDto[] }` newest first, max 50. |
+| `GET /api/integrations/runs/:runId` | `{ data: SyncRunDto }`. |
+
+Deleting a connection **cascades** to its targets (migration 0011); each removed target is audited as `sync.target.delete`.
+Audit actions: `sync.target.create`, `sync.target.update`, `sync.target.delete` (resource type `sync_target`), `sync.run.started`,
+`sync.run.succeeded`, `sync.run.failed` (resource type `sync_run`; they and `secret.read_bulk` carry the caller's ip and user agent).
+
+Plan blockers (`SyncPlanDto.blockers[].code`): `NAME_INVALID` (bad charset/length, or `__proto__` / `constructor` / `prototype`),
+`VALUE_TOO_LARGE`, `EMPTY_VALUE` (empty values are not pushed: whether the provider accepts them is unverified),
+`TOO_MANY_ITEMS` (names already on the target plus names to create, minus deletes, exceed the provider cap; the listed names are the
+creates that do not fit). Reserved names (`ENCRYPTION_*`, `JWT_SECRET`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`,
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`) are never pushed and appear under `skip`.
+
+Run error codes (`SyncRunDto.errorCode`) now also include `DECRYPTION_FAILED` and `TARGET_NOT_ALLOWED`. Targets whose last failure
+was `PROVIDER_AUTH`, `PROVIDER_VALIDATION`, `TARGET_NOT_FOUND`, `COMPUTED_ERROR`, `CREDENTIAL_UNAVAILABLE`, `DECRYPTION_FAILED` or
+`TARGET_NOT_ALLOWED` are `needs_attention` (cleared by the next success). `nextRetryAt` is set when *any* error of the run is
+retryable (`PROVIDER_RATE_LIMIT`, `PROVIDER_ERROR`, `TIMEOUT`); a rate limit never retries sooner than 5 minutes, or the provider's
+`Retry-After` when longer.
+
+Ledger: before each push the engine records the names it is about to set as *pending* (internal marker, never exposed). A lost
+response therefore leaves those names classified as HushVault's own (updated on the next run) instead of `conflict`.
+A name that stops matching the name filter (prefix/deny changed) while still in the environment is dropped from the ledger and never
+deleted on the target; `deleteRemoved` deletes only names removed from the environment.
 
 ## Security
 

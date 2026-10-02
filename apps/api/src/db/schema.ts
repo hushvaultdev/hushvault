@@ -234,3 +234,60 @@ export const integrationConnections = sqliteTable('integration_connections', {
   index('integration_connections_org_idx').on(t.orgId),
   uniqueIndex('integration_connections_label_idx').on(t.orgId, t.provider, t.label),
 ])
+
+// ─────────────────────────────────────────────
+// Secret sync (issue #40) — see migration 0011
+// ─────────────────────────────────────────────
+
+export const syncTargets = sqliteTable('sync_targets', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
+  projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  envId: text('env_id').notNull().references(() => environments.id, { onDelete: 'cascade' }),
+  // Cascade: a target must not outlive its credential.
+  connectionId: text('connection_id').notNull().references(() => integrationConnections.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  resourceJson: text('resource_json').notNull().default('{}'),
+  nameFilterJson: text('name_filter_json').notNull().default('{}'),
+  deleteRemoved: integer('delete_removed').notNull().default(0),
+  fingerprintSalt: text('fingerprint_salt').notNull(),
+  status: text('status', { enum: ['active', 'needs_attention'] }).notNull().default('active'),
+  lastRunAt: text('last_run_at'),
+  createdBy: text('created_by').references(() => users.id),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  deletedAt: text('deleted_at'),
+}, (t) => [
+  index('sync_targets_org_idx').on(t.orgId, t.deletedAt),
+  index('sync_targets_env_idx').on(t.envId),
+  index('sync_targets_connection_idx').on(t.connectionId),
+])
+
+// Ledger of names HushVault wrote to a target. Fingerprint is an HMAC, never the value.
+export const syncItems = sqliteTable('sync_items', {
+  targetId: text('target_id').notNull().references(() => syncTargets.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  fingerprint: text('fingerprint').notNull(),
+  lastPushedAt: text('last_pushed_at').notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.targetId, t.name] }),
+])
+
+export const syncRuns = sqliteTable('sync_runs', {
+  id: text('id').primaryKey(),
+  targetId: text('target_id').notNull().references(() => syncTargets.id, { onDelete: 'cascade' }),
+  trigger: text('trigger', { enum: ['manual', 'change', 'schedule'] }).notNull(),
+  status: text('status', { enum: ['queued', 'running', 'succeeded', 'partial', 'failed'] }).notNull(),
+  attempt: integer('attempt').notNull().default(1),
+  countsJson: text('counts_json').notNull().default('{}'),
+  errorCode: text('error_code'),
+  actorId: text('actor_id'),
+  startedAt: text('started_at').notNull(),
+  finishedAt: text('finished_at'),
+  nextRetryAt: text('next_retry_at'),
+  leaseUntil: text('lease_until'),
+}, (t) => [
+  index('sync_runs_target_idx').on(t.targetId, t.startedAt),
+  index('sync_runs_retry_idx').on(t.nextRetryAt),
+  // The single-flight partial unique index (status IN ('queued','running')) exists only in the migration.
+])

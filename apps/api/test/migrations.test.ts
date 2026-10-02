@@ -41,6 +41,43 @@ describe('migrations', () => {
     expect(await env.DB.prepare('SELECT id FROM environments').first()).toBeNull()
   })
 
+  it('0011 creates the sync tables, is idempotent, enforces single flight and cascades from the connection', async () => {
+    const env = createTestEnv()
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    env.DB.sqlite.exec(readFileSync(join(__dirname, '../migrations/0011_sync.sql'), 'utf8'))
+    const cols = async (t: string) =>
+      (await env.DB.prepare(`PRAGMA table_info(${t})`).all<{ name: string }>()).results.map((r) => r.name)
+    expect(await cols('sync_targets')).toEqual(expect.arrayContaining(['id', 'org_id', 'project_id', 'env_id', 'connection_id', 'provider', 'resource_json', 'name_filter_json', 'delete_removed', 'fingerprint_salt', 'status', 'last_run_at', 'created_by', 'created_at', 'updated_at', 'deleted_at']))
+    expect(await cols('sync_items')).toEqual(['target_id', 'name', 'fingerprint', 'last_pushed_at'])
+    expect(await cols('sync_runs')).toEqual(expect.arrayContaining(['id', 'target_id', 'trigger', 'status', 'attempt', 'counts_json', 'error_code', 'actor_id', 'started_at', 'finished_at', 'next_retry_at', 'lease_until']))
+
+    const now = new Date().toISOString()
+    const run = (sql: string, ...v: string[]) => env.DB.prepare(sql).bind(...v).run()
+    await run('INSERT INTO organisations (id, name, slug, created_at) VALUES (?, ?, ?, ?)', 'o1', 'O', 'o', now)
+    await run('INSERT INTO projects (id, org_id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', 'p1', 'o1', 'P', 'p', now, now)
+    await run('INSERT INTO environments (id, project_id, name, slug, created_at) VALUES (?, ?, ?, ?, ?)', 'e1', 'p1', 'E', 'e', now)
+    await run('INSERT INTO integration_connections (id, org_id, provider, label, encrypted_credential, wrapped_dek, key_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', 'c1', 'o1', 'x', 'l', 'x', 'x', 'v1', now, now)
+    await run('INSERT INTO sync_targets (id, org_id, project_id, env_id, connection_id, provider, fingerprint_salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', 't1', 'o1', 'p1', 'e1', 'c1', 'x', 's', now, now)
+    const insertRun = (id: string, status: string) =>
+      run("INSERT INTO sync_runs (id, target_id, trigger, status, started_at) VALUES (?, 't1', 'manual', ?, ?)", id, status, now)
+    await insertRun('r1', 'running')
+    await expect(insertRun('r2', 'queued')).rejects.toThrow(/UNIQUE/i)
+    await insertRun('r3', 'failed')
+    await expect(insertRun('r4', 'bogus')).rejects.toThrow(/CHECK/i)
+    await run("INSERT INTO sync_items (target_id, name, fingerprint, last_pushed_at) VALUES ('t1', 'A', 'f', ?)", now)
+    await expect(run("INSERT INTO sync_items (target_id, name, fingerprint, last_pushed_at) VALUES ('t1', 'A', 'f', ?)", now)).rejects.toThrow(/UNIQUE/i)
+    expect((await env.DB.prepare('SELECT delete_removed, status FROM sync_targets').first())).toEqual({ delete_removed: 0, status: 'active' })
+
+    // Re-applying changes nothing and loses nothing.
+    env.DB.sqlite.exec(readFileSync(join(__dirname, '../migrations/0011_sync.sql'), 'utf8'))
+    expect((await env.DB.prepare('SELECT id FROM sync_runs').all()).results).toHaveLength(2)
+
+    // Deleting the connection removes targets, ledger and runs.
+    await run('DELETE FROM integration_connections WHERE id = ?', 'c1')
+    for (const t of ['sync_targets', 'sync_items', 'sync_runs']) expect(await env.DB.prepare(`SELECT 1 AS x FROM ${t}`).first()).toBeNull()
+  })
+
   it('0006 is safe to apply twice and enforces a single running rotation', async () => {
     const env = createTestEnv()
     const { readFileSync } = await import('node:fs')

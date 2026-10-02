@@ -6,12 +6,15 @@
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  /** Structured extra from the error body (only `plan` on SYNC_BLOCKED); callers must treat it as untrusted. */
+  readonly details: unknown
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details?: unknown) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -72,6 +75,47 @@ export interface LoginResult {
 export interface ShareResult {
   token: string
   url: string
+}
+
+// Sync DTOs mirror the contract in packages/shared/src/integrations.ts (SyncTargetDto, SyncPlanDto,
+// SyncRunDto). The CLI does not depend on @hushvault/shared, so the field names are copied here.
+// They carry names and counts only: never secret values or provider credentials.
+export type SyncRunStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed'
+
+export interface SyncTarget {
+  id: string
+  projectId: string
+  envId: string
+  connectionId: string
+  provider: string
+  resource: Record<string, string>
+  nameFilter: { prefix?: string; deny?: string[] }
+  deleteRemoved: boolean
+  status: 'active' | 'needs_attention'
+  lastRunAt: string | null
+  lastRunStatus: SyncRunStatus | null
+}
+
+export interface SyncPlan {
+  create: string[]
+  update: string[]
+  delete: string[]
+  skip: string[]
+  conflict: string[]
+  blockers: { code: string; names: string[] }[]
+}
+
+export interface SyncRun {
+  id: string
+  targetId: string
+  trigger: string
+  status: SyncRunStatus
+  attempt: number
+  counts: { created: number; updated: number; deleted: number; skipped: number; failed: number }
+  errorCode: string | null
+  startedAt: string
+  finishedAt: string | null
+  nextRetryAt: string | null
 }
 
 export interface ClientOptions {
@@ -154,13 +198,18 @@ export class ApiClient {
       const code = typeof obj['error'] === 'string' ? obj['error'] : `HTTP_${res.status}`
       const message =
         typeof obj['message'] === 'string' ? obj['message'].slice(0, MAX_MESSAGE) : res.statusText || `Request failed (${res.status})`
-      throw new ApiError(res.status, code, message)
+      throw new ApiError(res.status, code, message, code === 'SYNC_BLOCKED' ? obj['plan'] : undefined)
     }
 
     if (typeof json !== 'object' || json === null || !('data' in json)) {
       throw new ApiError(res.status, 'BAD_RESPONSE', 'Unexpected response from server')
     }
     return (json as { data: T }).data
+  }
+
+  /** API keys (hv_...) cannot manage integrations; the API answers 403 for them. */
+  get usesApiKey(): boolean {
+    return this.token?.startsWith('hv_') === true
   }
 
   login(email: string, password: string): Promise<LoginResult> {
@@ -204,6 +253,22 @@ export class ApiClient {
     return this.request('GET', `/api/environments/${encodeURIComponent(envId)}/resolved`, { query: { values: 'true' } })
   }
 
+  listTargets(): Promise<SyncTarget[]> {
+    return this.request('GET', '/api/integrations/targets')
+  }
+
+  previewTarget(id: string): Promise<SyncPlan> {
+    return this.request('POST', `/api/integrations/targets/${encodeURIComponent(id)}/preview`)
+  }
+
+  runTarget(id: string): Promise<SyncRun> {
+    return this.request('POST', `/api/integrations/targets/${encodeURIComponent(id)}/run`)
+  }
+
+  listRuns(id: string): Promise<SyncRun[]> {
+    return this.request('GET', `/api/integrations/targets/${encodeURIComponent(id)}/runs`)
+  }
+
   createShare(input: { encryptedPayload: string; expiresAt?: string; maxViews?: number }): Promise<ShareResult> {
     return this.request('POST', '/api/share', { body: input })
   }
@@ -218,10 +283,16 @@ export function friendlyError(err: unknown, action = 'Request'): string {
       case 403:
         return `Permission denied: ${action} requires a higher role (member+ for secrets, admin+ for projects/environments).`
       case 409:
+        if (err.code === 'PLAN_LIMIT') {
+          return 'Plan limit reached: the Free plan allows at most 2 sync targets per organisation. Remove a target or upgrade in the dashboard.'
+        }
         return `Conflict: ${err.message}`
       case 400:
         return `Invalid input: ${err.message}`
+      case 429:
+        return 'Rate limited: too many sync requests. Wait a minute and try again.'
       case 422:
+        if (err.code === 'SYNC_BLOCKED') return 'Sync blocked: the plan cannot run until the listed problems are fixed (SYNC_BLOCKED).'
         return `${err.message} (${err.code})`
       default:
         return err.message

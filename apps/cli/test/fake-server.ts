@@ -19,6 +19,27 @@ export class FakeServer {
     { id: 'sec_2', project_id: 'prj_1', env_id: 'env_stg', name: 'OWN', value: 'own-val' },
   ]
   n = 0
+  /** Sync targets. Extra fields (apiToken, value, providerBody) simulate an over-sharing API; the CLI must never print them. */
+  targets: Record<string, unknown>[] = [
+    {
+      id: 'tgt_1', projectId: 'prj_1', envId: 'env_dev', connectionId: 'con_1', provider: 'cloudflare-workers',
+      resource: { accountId: 'acc_1', scriptName: 'api-worker' }, nameFilter: {}, deleteRemoved: false, status: 'active',
+      lastRunAt: '2026-01-01T00:00:00.000Z', lastRunStatus: 'succeeded', apiToken: 'cf-LEAK-token-123', value: 'LEAK-value',
+    },
+    {
+      id: 'tgt_2', projectId: 'prj_1', envId: 'env_stg', connectionId: 'con_1', provider: 'cloudflare-workers',
+      resource: { accountId: 'acc_1', scriptName: 'web-worker' }, nameFilter: {}, deleteRemoved: true, status: 'active',
+      lastRunAt: null, lastRunStatus: null,
+    },
+  ]
+  plan: Record<string, unknown> = { create: ['NEW_ONE'], update: ['BASE'], delete: [], skip: [], conflict: ['EXISTING'], blockers: [], providerBody: 'LEAK-body' }
+  /** When set, run answers 422 SYNC_BLOCKED with this plan. */
+  runBlockedPlan: Record<string, unknown> | null = null
+  runResult: Record<string, unknown> = {
+    id: 'run_1', targetId: 'tgt_1', trigger: 'manual', status: 'succeeded', attempt: 1,
+    counts: { created: 1, updated: 1, deleted: 0, skipped: 0, failed: 0 }, errorCode: null,
+    startedAt: '2026-01-02T00:00:00.000Z', finishedAt: '2026-01-02T00:00:01.000Z', nextRetryAt: null,
+  }
 
   json(status: number, body: unknown): Response {
     return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -38,6 +59,23 @@ export class FakeServer {
       return this.json(200, { data: { token: 'jwt-token', userId: 'usr_1', orgId: 'org_1', role: 'admin' } })
     }
     if (!headers['Authorization']) return this.json(401, { error: 'UNAUTHORIZED', message: 'Missing token' })
+    // Management endpoints are JWT-only: API keys (hv_...) get 403.
+    if (p.startsWith('/api/integrations')) {
+      if (headers['Authorization']!.startsWith('Bearer hv_')) return this.json(403, { error: 'FORBIDDEN', message: 'API keys cannot manage integrations' })
+      if (this.role !== 'admin') return this.json(403, { error: 'FORBIDDEN', message: 'Insufficient role' })
+      if (p === '/api/integrations/targets' && method === 'GET') return this.json(200, { data: this.targets })
+      const m = /^\/api\/integrations\/targets\/([^/]+)\/(preview|run|runs)$/.exec(p)
+      if (m) {
+        if (!this.targets.some((t) => t['id'] === decodeURIComponent(m[1]!))) return this.json(404, { error: 'NOT_FOUND', message: 'Target not found' })
+        if (m[2] === 'preview' && method === 'POST') return this.json(200, { data: this.plan })
+        if (m[2] === 'run' && method === 'POST') {
+          if (this.runBlockedPlan) return this.json(422, { error: 'SYNC_BLOCKED', message: 'Plan has blockers', plan: this.runBlockedPlan })
+          return this.json(200, { data: this.runResult })
+        }
+        if (m[2] === 'runs' && method === 'GET') return this.json(200, { data: [this.runResult] })
+      }
+      return this.json(404, { error: 'NOT_FOUND', message: 'No route' })
+    }
     const canAdmin = this.role === 'admin'
     const canWrite = this.role !== 'viewer'
 

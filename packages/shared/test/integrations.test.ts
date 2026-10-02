@@ -72,9 +72,10 @@ describe('copy lint', () => {
     expect(copyViolations('Inject secrets into any command with the CLI.', names)).toEqual([])
   })
 
-  it('README and web copy do not claim non-available integrations work', () => {
+  it('README, docs/INTEGRATIONS.md and web copy (including the FAQ) do not claim non-available integrations work', () => {
     const files = [
       join(ROOT, 'README.md'),
+      join(ROOT, 'docs/INTEGRATIONS.md'),
       ...walk(join(ROOT, 'apps/web/src'), (f) => /\.(tsx?|md)$/.test(f)),
     ]
     const bad = files.flatMap((f) => copyViolations(readFileSync(f, 'utf8'), names).map((v) => `${relative(ROOT, f)} -> ${v}`))

@@ -1,4 +1,4 @@
-import type { MiddlewareHandler } from 'hono'
+import type { Context, MiddlewareHandler } from 'hono'
 import type { Env } from '../index'
 import { consumeRateLimit, type RateLimitResult, type WindowState } from '../lib/rate-limiter-do'
 
@@ -8,6 +8,11 @@ type RateLimitOptions = {
   windowMs: number
   /** When the limiter backend errors: false (default) lets the request through; true returns 503. */
   failClosed?: boolean
+  /**
+   * Bucket identity. Default: the client IP (cf-connecting-ip). Return a string to key the limit on something else,
+   * e.g. the authenticated organisation (only valid after auth middleware ran); undefined falls back to the IP.
+   */
+  keyFn?: (c: Context<{ Bindings: Env }>) => string | undefined
 }
 
 // FALLBACK ONLY (local dev / tests where the RATE_LIMITER binding is absent).
@@ -49,7 +54,7 @@ export function createRateLimitMiddleware(options: RateLimitOptions): Middleware
   return async (c, next) => {
     // Only cf-connecting-ip is trusted (set by Cloudflare's edge). x-forwarded-for is
     // client-controlled, so when the header is missing everyone shares one bucket.
-    const identity = c.req.header('cf-connecting-ip') ?? 'unknown'
+    const identity = options.keyFn?.(c) ?? c.req.header('cf-connecting-ip') ?? 'unknown'
     const key = `${options.scope}:${identity}`
 
     let result: RateLimitResult
