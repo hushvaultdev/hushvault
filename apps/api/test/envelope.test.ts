@@ -18,6 +18,8 @@ function ringEnv(extra: Record<string, string | undefined> = {}) {
   return { ENCRYPTION_MASTER_KEY: b64(32), ...extra }
 }
 
+const CTX = { projectId: 'prj_1', envId: 'env_1', secretId: 'sec_1' }
+
 describe('legacy single-key envelope', () => {
   it('round-trips and uses a fresh DEK and IV each time', async () => {
     const key = b64(32)
@@ -61,32 +63,32 @@ describe('key ring', () => {
   it('encrypts under the active version and decrypts by the row version', async () => {
     const env = ringEnv({ ENCRYPTION_KEY_V2: b64(32), ENCRYPTION_ACTIVE_KEY_VERSION: 'v2' })
     const ring = loadKeyRing(env)
-    const written = await encryptSecretWithRing('hello', ring)
+    const written = await encryptSecretWithRing('hello', ring, CTX)
     expect(written.keyVersion).toBe('v2')
-    expect(await decryptSecretWithRing(written.encryptedValue, written.wrappedDek, 'v2', ring)).toBe('hello')
+    expect(await decryptSecretWithRing(written.encryptedValue, written.wrappedDek, 'v2', ring, CTX, 2)).toBe('hello')
     // Same wrapped DEK under the wrong version label fails (opaque GCM error), never plaintext.
-    await expect(decryptSecretWithRing(written.encryptedValue, written.wrappedDek, 'v1', ring)).rejects.toThrow()
+    await expect(decryptSecretWithRing(written.encryptedValue, written.wrappedDek, 'v1', ring, CTX, 2)).rejects.toThrow()
   })
 
   it('a value written under v1 stays readable after the active version moves to v2', async () => {
     const base = ringEnv({ ENCRYPTION_KEY_V2: b64(32) })
-    const v1 = await encryptSecretWithRing('legacy', loadKeyRing(base))
+    const v1 = await encryptSecretWithRing('legacy', loadKeyRing(base), CTX)
     expect(v1.keyVersion).toBe('v1')
     const later = loadKeyRing({ ...base, ENCRYPTION_ACTIVE_KEY_VERSION: 'v2' })
-    expect(await decryptSecretWithRing(v1.encryptedValue, v1.wrappedDek, 'v1', later)).toBe('legacy')
+    expect(await decryptSecretWithRing(v1.encryptedValue, v1.wrappedDek, 'v1', later, CTX, 2)).toBe('legacy')
   })
 
   it('detects tampering with the value or the wrapped DEK', async () => {
     const ring = loadKeyRing(ringEnv())
-    const w = await encryptSecretWithRing('x', ring)
+    const w = await encryptSecretWithRing('x', ring, CTX)
     const flip = (s: string) => {
-      const [iv, ct] = s.split(':') as [string, string]
+      const [tag, iv, ct] = s.split(':') as [string, string, string]
       const bytes = Buffer.from(ct, 'base64')
       bytes[0] = (bytes[0] ?? 0) ^ 1
-      return `${iv}:${bytes.toString('base64')}`
+      return `${tag}:${iv}:${bytes.toString('base64')}`
     }
-    await expect(decryptSecretWithRing(flip(w.encryptedValue), w.wrappedDek, 'v1', ring)).rejects.toThrow()
-    await expect(decryptSecretWithRing(w.encryptedValue, flip(w.wrappedDek), 'v1', ring)).rejects.toThrow()
+    await expect(decryptSecretWithRing(flip(w.encryptedValue), w.wrappedDek, 'v1', ring, CTX, 2)).rejects.toThrow()
+    await expect(decryptSecretWithRing(w.encryptedValue, flip(w.wrappedDek), 'v1', ring, CTX, 2)).rejects.toThrow()
   })
 })
 
@@ -94,21 +96,21 @@ describe('rewrapDek', () => {
   it('moves a DEK to a new key without changing the ciphertext, using a fresh IV', async () => {
     const env = ringEnv({ ENCRYPTION_KEY_V2: b64(32) })
     const ring = loadKeyRing(env)
-    const v1 = await encryptSecretWithRing('rotate me', ring)
-    const rewrapped = await rewrapDek(v1.wrappedDek, await ring.getKey('v1'), await ring.getKey('v2'))
+    const v1 = await encryptSecretWithRing('rotate me', ring, CTX)
+    const rewrapped = await rewrapDek(v1.wrappedDek, await ring.getKey('v1'), await ring.getKey('v2'), CTX.secretId)
     expect(rewrapped).not.toBe(v1.wrappedDek)
-    expect(rewrapped.split(':')[0]).not.toBe(v1.wrappedDek.split(':')[0])
+    expect(rewrapped.split(':')[1]).not.toBe(v1.wrappedDek.split(':')[1])
     // The KV blob is untouched and now decrypts with ONLY the v2 key.
     const onlyV2 = loadKeyRing({ ENCRYPTION_MASTER_KEY: '', ENCRYPTION_KEY_V2: env.ENCRYPTION_KEY_V2, ENCRYPTION_ACTIVE_KEY_VERSION: 'v2' })
-    expect(await decryptSecretWithRing(v1.encryptedValue, rewrapped, 'v2', onlyV2)).toBe('rotate me')
+    expect(await decryptSecretWithRing(v1.encryptedValue, rewrapped, 'v2', onlyV2, CTX, 2)).toBe('rotate me')
   })
 
   it('throws on a wrong source key or a corrupt wrapped DEK', async () => {
     const env = ringEnv({ ENCRYPTION_KEY_V2: b64(32), ENCRYPTION_KEY_V3: b64(32) })
     const ring = loadKeyRing(env)
-    const v1 = await encryptSecretWithRing('x', ring)
-    await expect(rewrapDek(v1.wrappedDek, await ring.getKey('v3'), await ring.getKey('v2'))).rejects.toThrow()
-    await expect(rewrapDek('garbage', await ring.getKey('v1'), await ring.getKey('v2'))).rejects.toThrow()
+    const v1 = await encryptSecretWithRing('x', ring, CTX)
+    await expect(rewrapDek(v1.wrappedDek, await ring.getKey('v3'), await ring.getKey('v2'), CTX.secretId)).rejects.toThrow()
+    await expect(rewrapDek('garbage', await ring.getKey('v1'), await ring.getKey('v2'), CTX.secretId)).rejects.toThrow()
   })
 })
 
@@ -140,5 +142,52 @@ describe('no key material in errors or logs', () => {
     }
     expect(log).not.toHaveBeenCalled()
     log.mockRestore()
+  })
+})
+
+describe('AAD context binding (v2)', () => {
+  const OTHER = { projectId: 'prj_1', envId: 'env_2', secretId: 'sec_1' }
+
+  it('rejects a blob moved to another environment, project or secret id', async () => {
+    const ring = loadKeyRing(ringEnv())
+    const w = await encryptSecretWithRing('prod-value', ring, CTX)
+    for (const ctx of [OTHER, { ...CTX, projectId: 'prj_2' }, { ...CTX, secretId: 'sec_2' }]) {
+      await expect(decryptSecretWithRing(w.encryptedValue, w.wrappedDek, 'v1', ring, ctx, 2)).rejects.toThrow()
+    }
+  })
+
+  it('rejects a wrapped DEK from another secret (cross-record swap)', async () => {
+    const ring = loadKeyRing(ringEnv())
+    const a = await encryptSecretWithRing('a', ring, CTX)
+    const b = await encryptSecretWithRing('b', ring, { ...CTX, secretId: 'sec_2' })
+    await expect(decryptSecretWithRing(a.encryptedValue, b.wrappedDek, 'v1', ring, CTX, 2)).rejects.toThrow()
+    await expect(decryptSecretWithRing(b.encryptedValue, b.wrappedDek, 'v1', ring, CTX, 2)).rejects.toThrow()
+  })
+
+  it('does not downgrade: a legacy blob is refused for an enc_version 2 row, and vice versa', async () => {
+    const env = ringEnv()
+    const ring = loadKeyRing(env)
+    const legacy = await encryptSecret('x', env.ENCRYPTION_MASTER_KEY)
+    const v2 = await encryptSecretWithRing('x', ring, CTX)
+    await expect(decryptSecretWithRing(legacy.encryptedValue, legacy.wrappedDek, 'v1', ring, CTX, 2)).rejects.toThrow()
+    await expect(decryptSecretWithRing(v2.encryptedValue, v2.wrappedDek, 'v1', ring, CTX, 1)).rejects.toThrow()
+  })
+
+  it('reads legacy rows until ENFORCE_AAD=true, then refuses them', async () => {
+    const env = ringEnv()
+    const legacy = await encryptSecret('old', env.ENCRYPTION_MASTER_KEY)
+    expect(await decryptSecretWithRing(legacy.encryptedValue, legacy.wrappedDek, 'v1', loadKeyRing(env), CTX, 1)).toBe('old')
+    await expect(
+      decryptSecretWithRing(legacy.encryptedValue, legacy.wrappedDek, 'v1', loadKeyRing({ ...env, ENFORCE_AAD: 'true' }), CTX, 1),
+    ).rejects.toThrow()
+  })
+
+  it('re-wrap keeps the binding: the new wrap only opens for the same secret id', async () => {
+    const env = ringEnv({ ENCRYPTION_KEY_V2: b64(32) })
+    const ring = loadKeyRing(env)
+    const w = await encryptSecretWithRing('x', ring, CTX)
+    const next = await rewrapDek(w.wrappedDek, await ring.getKey('v1'), await ring.getKey('v2'), CTX.secretId)
+    expect(await decryptSecretWithRing(w.encryptedValue, next, 'v2', ring, CTX, 2)).toBe('x')
+    await expect(rewrapDek(w.wrappedDek, await ring.getKey('v1'), await ring.getKey('v2'), 'sec_other')).rejects.toThrow()
   })
 })

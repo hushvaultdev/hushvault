@@ -155,8 +155,8 @@ async function bootstrap(env: Env, ring: KeyRing, nowIso: string): Promise<TickR
   const key = await ring.getKey(version)
   // Refuse to enshrine a key that cannot unwrap the data it is supposed to protect.
   for (const table of ['secrets', 'secret_history'] as const) {
-    const sample = await env.DB.prepare(`SELECT wrapped_dek FROM ${table} WHERE key_version = ? LIMIT 1`).bind(version).first<{ wrapped_dek: string }>()
-    if (sample && !(await canUnwrapDek(sample.wrapped_dek, key))) {
+    const sample = await env.DB.prepare(`SELECT wrapped_dek, ${table === 'secrets' ? 'id' : 'secret_id'} AS secret_id FROM ${table} WHERE key_version = ? LIMIT 1`).bind(version).first<{ wrapped_dek: string; secret_id: string }>()
+    if (sample && !(await canUnwrapDek(sample.wrapped_dek, key, sample.secret_id))) {
       console.error(JSON.stringify({ level: 'error', event: 'key_rotation.key_check_failed', keyVersion: version }))
       return { state: 'error', code: 'KEY_CHECK_FAILED' }
     }
@@ -270,8 +270,8 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
     const limit = batchSizeFrom(env, options.batchSize)
 
     const { results } = await env.DB.prepare(
-      `SELECT id, wrapped_dek, key_version FROM ${table} WHERE id > ? AND key_version <> ? AND id NOT IN (SELECT row_id FROM key_rotation_failures WHERE rotation_id = ? AND table_name = ?) ORDER BY id LIMIT ?`,
-    ).bind(cursor, job.to_version, job.id, table, limit).all<{ id: string; wrapped_dek: string; key_version: string }>()
+      `SELECT id, ${table === 'secrets' ? 'id' : 'secret_id'} AS secret_id, wrapped_dek, key_version FROM ${table} WHERE id > ? AND key_version <> ? AND id NOT IN (SELECT row_id FROM key_rotation_failures WHERE rotation_id = ? AND table_name = ?) ORDER BY id LIMIT ?`,
+    ).bind(cursor, job.to_version, job.id, table, limit).all<{ id: string; secret_id: string; wrapped_dek: string; key_version: string }>()
     const rows = results ?? []
 
     let rewrapped = 0
@@ -297,7 +297,7 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
         }
         try {
           const fromKey = await ring.getKey(row.key_version)
-          const next = await rewrapDek(row.wrapped_dek, fromKey, toKey)
+          const next = await rewrapDek(row.wrapped_dek, fromKey, toKey, row.secret_id)
           writes.push(
             env.DB.prepare(`UPDATE ${table} SET wrapped_dek = ?, key_version = ? WHERE id = ? AND wrapped_dek = ? AND key_version = ?`)
               .bind(next, job.to_version, row.id, row.wrapped_dek, row.key_version),

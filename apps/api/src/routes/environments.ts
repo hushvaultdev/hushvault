@@ -81,7 +81,7 @@ environmentRoutes.post('/', requireRole('admin'), zValidator('json', environment
 
 const MAX_INHERITANCE_DEPTH = 10
 
-type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string; key_version: string }
+type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string; key_version: string; enc_version: number }
 
 // GET /api/environments/:id/resolved — secrets with branch inheritance applied (child overrides parent by name)
 environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
@@ -117,7 +117,7 @@ environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
 
   const rank = new Map(chain.map((envId, index) => [envId, index]))
   const rows = await c.env.DB.prepare(
-    `SELECT id, env_id, name, is_computed, template, wrapped_dek, key_version FROM secrets WHERE project_id = ? AND env_id IN (${chain.map(() => '?').join(',')})`,
+    `SELECT id, env_id, name, is_computed, template, wrapped_dek, key_version, enc_version FROM secrets WHERE project_id = ? AND env_id IN (${chain.map(() => '?').join(',')})`,
   ).bind(environment.project_id, ...chain).all<SecretRow>()
 
   // Later (closer to the requested env) rank wins.
@@ -135,7 +135,10 @@ environmentRoutes.get('/:id/resolved', secretReadRateLimit, async (c) => {
         if (row.is_computed) continue
         const blob = await c.env.SECRETS_KV.get(`secret:${row.id}`)
         if (blob === null) throw new Error('missing blob')
-        plain.set(row.name, await decryptSecretWithRing(blob, row.wrapped_dek, row.key_version, ring))
+        plain.set(row.name, await decryptSecretWithRing(
+          blob, row.wrapped_dek, row.key_version, ring,
+          { projectId: environment.project_id, envId: row.env_id, secretId: row.id }, row.enc_version,
+        ))
       }
     } catch (err) {
       logKeyRingError(err)

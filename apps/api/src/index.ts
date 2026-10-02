@@ -27,6 +27,7 @@ export type Env = {
   // Key ring (docs/ENCRYPTION.md): v1 is ENCRYPTION_MASTER_KEY; vN is the secret ENCRYPTION_KEY_V<N>.
   ENCRYPTION_MASTER_KEY: string
   ENCRYPTION_ACTIVE_KEY_VERSION?: string
+  ENFORCE_AAD?: string
   ROTATION_BATCH_SIZE?: string
   // Transactional email (issue #26): Cloudflare Email Service binding + sender address.
   EMAIL?: EmailBinding

@@ -28,36 +28,38 @@ async function seedMany(ctx: Ctx, n: number, version = 'v1') {
   for (let i = 0; i < n; i += 1) {
     const id = createPrefixedId('sec')
     const value = `value-${i}-${crypto.randomUUID()}`
-    const w = await encryptSecretWithRing(value, ring)
+    const w = await encryptSecretWithRing(value, ring, { projectId: ctx.projectId, envId: ctx.envId, secretId: id })
     await ctx.env.SECRETS_KV.put(`secret:${id}`, w.encryptedValue)
     await ctx.env.DB.prepare(
-      'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, is_computed, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)',
+      'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, enc_version, is_computed, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 2, 0, ?, ?, ?)',
     ).bind(id, ctx.projectId, ctx.envId, `S_${i}`, w.wrappedDek, w.keyVersion, '[]', now, now).run()
     expected.set(`secret:${id}`, value)
 
     const hid = createPrefixedId('sech')
     const hv = `old-${i}-${crypto.randomUUID()}`
-    const hw = await encryptSecretWithRing(hv, ring)
+    const hw = await encryptSecretWithRing(hv, ring, { projectId: ctx.projectId, envId: ctx.envId, secretId: id })
     await ctx.env.SECRETS_KV.put(`secrethist:${hid}`, hw.encryptedValue)
-    await ctx.env.DB.prepare('INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, changed_at) VALUES (?, ?, ?, ?, ?)')
+    await ctx.env.DB.prepare('INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, enc_version, changed_at) VALUES (?, ?, ?, ?, 2, ?)')
       .bind(hid, id, hw.wrappedDek, hw.keyVersion, now).run()
     expected.set(`secrethist:${hid}`, hv)
   }
   return expected
 }
 
+type Row = { id: string; secret_id: string; project_id: string; env_id: string; wrapped_dek: string; key_version: string; enc_version: number }
+
 /** The central invariant: every row decrypts to its original value through the full ring. */
 async function assertAllDecryptable(ctx: Ctx, expected: Map<string, string>) {
   const ring = ringOf(ctx.env, 'v2')
   const rows = [
-    ...(await ctx.env.DB.prepare('SELECT id, wrapped_dek, key_version FROM secrets').all<{ id: string; wrapped_dek: string; key_version: string }>()).results.map((r) => ({ kv: `secret:${r.id}`, ...r })),
-    ...(await ctx.env.DB.prepare('SELECT id, wrapped_dek, key_version FROM secret_history').all<{ id: string; wrapped_dek: string; key_version: string }>()).results.map((r) => ({ kv: `secrethist:${r.id}`, ...r })),
+    ...(await ctx.env.DB.prepare('SELECT id, id AS secret_id, project_id, env_id, wrapped_dek, key_version, enc_version FROM secrets').all<Row>()).results.map((r) => ({ kv: `secret:${r.id}`, ...r })),
+    ...(await ctx.env.DB.prepare('SELECT h.id, h.secret_id, s.project_id, s.env_id, h.wrapped_dek, h.key_version, h.enc_version FROM secret_history h JOIN secrets s ON s.id = h.secret_id').all<Row>()).results.map((r) => ({ kv: `secrethist:${r.id}`, ...r })),
   ]
   expect(rows.length).toBe(expected.size)
   for (const r of rows) {
     const blob = await ctx.env.SECRETS_KV.get(r.kv)
     expect(blob).not.toBeNull()
-    const plain = await decryptSecretWithRing(blob as string, r.wrapped_dek, r.key_version, ring)
+    const plain = await decryptSecretWithRing(blob as string, r.wrapped_dek, r.key_version, ring, { projectId: r.project_id, envId: r.env_id, secretId: r.secret_id }, r.enc_version)
     expect(plain).toBe(expected.get(r.kv))
   }
 }
@@ -199,7 +201,7 @@ describe('key rotation engine', () => {
         raced = true
         // A PATCH lands after the job read its candidates: new value under the active key.
         const row = await (ctx.env.DB as TestEnv['DB']).prepare("SELECT id FROM secrets WHERE name = 'S_0'").first<{ id: string }>()
-        const w = await encryptSecretWithRing('patched', ring)
+        const w = await encryptSecretWithRing('patched', ring, { projectId: ctx.projectId, envId: ctx.envId, secretId: row!.id })
         await ctx.env.SECRETS_KV.put(`secret:${row!.id}`, w.encryptedValue)
         await ctx.env.DB.prepare('UPDATE secrets SET wrapped_dek = ?, key_version = ? WHERE id = ?').bind(w.wrappedDek, 'v2', row!.id).run()
         expected.set(`secret:${row!.id}`, 'patched')

@@ -96,6 +96,7 @@ export const secrets = sqliteTable('secrets', {
   // wrappedDek stored here (DEK encrypted with org master key)
   wrappedDek: text('wrapped_dek').notNull(),
   keyVersion: text('key_version').notNull().default('v1'), // for key rotation
+  encVersion: integer('enc_version').notNull().default(1), // 2 = AAD-bound ciphertext
   isComputed: integer('is_computed', { mode: 'boolean' }).notNull().default(false),
   template: text('template'),                   // e.g. "${DB_USER}:${DB_PASS}@host/db"
   dependencies: text('dependencies'),           // JSON array of secret names
@@ -113,6 +114,7 @@ export const secretHistory = sqliteTable('secret_history', {
   secretId: text('secret_id').notNull().references(() => secrets.id, { onDelete: 'cascade' }),
   wrappedDek: text('wrapped_dek').notNull(),
   keyVersion: text('key_version').notNull(),
+  encVersion: integer('enc_version').notNull().default(1),
   changedAt: text('changed_at').notNull(),
   changedBy: text('changed_by').references(() => users.id),
 }, (t) => [index('secret_history_secret_idx').on(t.secretId)])

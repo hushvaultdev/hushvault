@@ -87,8 +87,8 @@ secretRoutes.get('/:name', secretReadRateLimit, async (c) => {
   }
 
   const secret = await c.env.DB.prepare(
-    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.name = ? AND s.env_id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(name, envId, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; is_computed: number; template: string | null; org_id: string }>()
+    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.enc_version, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.name = ? AND s.env_id = ? AND p.org_id = ? LIMIT 1',
+  ).bind(name, envId, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; enc_version: number; is_computed: number; template: string | null; org_id: string }>()
 
   if (!secret) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
@@ -101,7 +101,10 @@ secretRoutes.get('/:name', secretReadRateLimit, async (c) => {
 
   let value: string
   try {
-    value = await decryptSecretWithRing(encryptedValue, secret.wrapped_dek, secret.key_version, loadKeyRing(c.env))
+    value = await decryptSecretWithRing(
+      encryptedValue, secret.wrapped_dek, secret.key_version, loadKeyRing(c.env),
+      { projectId: secret.project_id, envId: secret.env_id, secretId: secret.id }, secret.enc_version,
+    )
   } catch (err) {
     logKeyRingError(err)
     return c.json({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' }, 500)
@@ -146,13 +149,15 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
 
   const secretId = createPrefixedId('sec')
   const secretValue = value ?? template ?? ''
-  const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(secretValue, await loadWriteRing(c.env))
+  const { encryptedValue, wrappedDek, keyVersion, encVersion } = await encryptSecretWithRing(
+    secretValue, await loadWriteRing(c.env), { projectId, envId, secretId },
+  )
   await c.env.SECRETS_KV.put(`secret:${secretId}`, encryptedValue)
 
   const now = new Date().toISOString()
   try {
     await c.env.DB.prepare(
-      'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, is_computed, template, dependencies, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, enc_version, is_computed, template, dependencies, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).bind(
       secretId,
       projectId,
@@ -160,6 +165,7 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
       name,
       wrappedDek,
       keyVersion,
+      encVersion,
       Boolean(isComputed),
       template ?? null,
       '[]',
@@ -200,8 +206,8 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
   }
 
   const current = await c.env.DB.prepare(
-    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(id, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; is_computed: number; template: string | null; org_id: string }>()
+    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.enc_version, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
+  ).bind(id, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; enc_version: number; is_computed: number; template: string | null; org_id: string }>()
 
   if (!current) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
@@ -235,7 +241,9 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
       const oldBlob = await c.env.SECRETS_KV.get(kvKey)
       const historyId = createPrefixedId('sech')
       const historyKey = `secrethist:${historyId}`
-      const { encryptedValue, wrappedDek, keyVersion } = await encryptSecretWithRing(newPlaintext, await loadWriteRing(c.env))
+      const { encryptedValue, wrappedDek, keyVersion, encVersion } = await encryptSecretWithRing(
+        newPlaintext, await loadWriteRing(c.env), { projectId: current.project_id, envId: current.env_id, secretId: id },
+      )
 
       if (oldBlob !== null) {
         await c.env.SECRETS_KV.put(historyKey, oldBlob)
@@ -243,12 +251,12 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
       try {
         await c.env.SECRETS_KV.put(kvKey, encryptedValue)
         const update = c.env.DB.prepare(
-          'UPDATE secrets SET name = ?, wrapped_dek = ?, key_version = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
-        ).bind(nextName, wrappedDek, keyVersion, nextIsComputed, nextTemplate ?? null, now, id)
+          'UPDATE secrets SET name = ?, wrapped_dek = ?, key_version = ?, enc_version = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
+        ).bind(nextName, wrappedDek, keyVersion, encVersion, nextIsComputed, nextTemplate ?? null, now, id)
         if (oldBlob !== null) {
           const history = c.env.DB.prepare(
-            'INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, changed_at, changed_by) VALUES (?, ?, ?, ?, ?, ?)',
-          ).bind(historyId, id, current.wrapped_dek, current.key_version, now, auth.userId)
+            'INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, enc_version, changed_at, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          ).bind(historyId, id, current.wrapped_dek, current.key_version, current.enc_version, now, auth.userId)
           await c.env.DB.batch([history, update])
         } else {
           await update.run()
