@@ -9,6 +9,7 @@ import { enqueueSyncForEnvironment } from '../integrations/sync-scheduler'
 import { requireAuth, requireRole, secretReadRateLimit, secretWriteRateLimit } from '../middleware/auth'
 import { MAX_SECRET_VALUE_BYTES, getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
 import { KV_DELETE_CHUNK, allSecretBlobKeys, historyBlobKey, secretBlobKey } from '../lib/secret-blobs'
+import { validationHook } from '../lib/validation'
 
 export const secretRoutes = new Hono<{ Bindings: Env }>()
 
@@ -44,13 +45,6 @@ function isTooLarge(value: string | undefined | null): boolean {
 function isUniqueViolation(err: unknown): boolean {
   const message = err instanceof Error ? err.message : ''
   return message.includes('UNIQUE constraint failed') || message.includes('SQLITE_CONSTRAINT')
-}
-
-const validationHook = (result: { success: boolean; error?: { issues: { message: string }[] } }, c: { json: (body: unknown, status: 400) => Response }) => {
-  if (!result.success) {
-    return c.json({ error: 'VALIDATION_ERROR', message: result.error?.issues[0]?.message ?? 'Invalid request' }, 400)
-  }
-  return undefined
 }
 
 function conflict(c: { json: (body: unknown, status: 409) => Response }) {

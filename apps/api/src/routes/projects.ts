@@ -6,6 +6,7 @@ import { createPrefixedId } from '../lib/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 import { requireAuth, requireRole } from '../middleware/auth'
 import { KV_DELETE_CHUNK, allSecretBlobKeys, historyBlobKey } from '../lib/secret-blobs'
+import { validationHook } from '../lib/validation'
 
 export const projectRoutes = new Hono<{ Bindings: Env }>()
 
@@ -57,7 +58,7 @@ projectRoutes.get('/', async (c) => {
   return c.json({ data: projects.results ?? [] })
 })
 
-projectRoutes.post('/', requireRole('admin'), zValidator('json', createSchema), async (c) => {
+projectRoutes.post('/', requireRole('admin'), zValidator('json', createSchema, validationHook), async (c) => {
   const auth = c.get('auth')
   const { name, slug, description } = c.req.valid('json')
   const projectId = createPrefixedId('prj')
@@ -105,7 +106,7 @@ projectRoutes.get('/:id', async (c) => {
   return c.json({ data: project })
 })
 
-projectRoutes.patch('/:id', requireRole('admin'), zValidator('json', updateSchema), async (c) => {
+projectRoutes.patch('/:id', requireRole('admin'), zValidator('json', updateSchema, validationHook), async (c) => {
   const auth = c.get('auth')
   const { id } = c.req.param()
   const body = c.req.valid('json')

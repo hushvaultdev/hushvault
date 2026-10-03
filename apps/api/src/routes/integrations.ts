@@ -13,6 +13,7 @@ import { createPrefixedId } from '../lib/auth'
 import { loadWriteRing } from '../lib/key-rotation'
 import { getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
 import { integrationPreviewRateLimit, integrationRunRateLimit, integrationWriteRateLimit, requireAuth, requireCurrentAdmin, requireHuman, requireRole } from '../middleware/auth'
+import { validationHook } from '../lib/validation'
 
 // Outbound credential management (issue #39). Everything that creates, reads or changes a connection is
 // human-only (API keys are refused), admin+, rate limited and audited. The credential goes in once and
@@ -55,14 +56,6 @@ function metadata(row: ConnectionRow) {
     config = {}
   }
   return { id: row.id, provider: row.provider, label: row.label, config, createdAt: row.created_at, updatedAt: row.updated_at, lastVerifiedAt: row.last_verified_at }
-}
-
-const validationHook = (result: { success: boolean; error?: { issues: { message: string }[] } }, c: { json: (body: unknown, status: 400) => Response }) => {
-  if (!result.success) {
-    // Messages come from the schema, never from the submitted value.
-    return c.json({ error: 'VALIDATION_ERROR', message: result.error?.issues[0]?.message ?? 'Invalid request' }, 400)
-  }
-  return undefined
 }
 
 // GET /api/integrations/providers - what exists and how far along it is (any signed-in user)

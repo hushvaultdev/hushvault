@@ -5,6 +5,7 @@ import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { requireAuth, requireRole, requireVerifiedEmailIfEnforced, shareAccessRateLimit } from '../middleware/auth'
 import { getRequestIp, logEvent, writeAuditLog } from '../lib/security'
+import { validationHook } from '../lib/validation'
 
 export const shareRoutes = new Hono<{ Bindings: Env }>()
 
@@ -27,7 +28,7 @@ function webBaseUrl(env: Env): string {
 // requireVerifiedEmailIfEnforced is here for the same reason it is on api-keys: a share link
 // is an exfiltration path, and someone who signed up with an address they do not own should
 // not be able to use one. Without it the flag blocked API keys and left this route open.
-shareRoutes.post('/', requireAuth, requireVerifiedEmailIfEnforced, requireRole('member'), zValidator('json', shareSchema), async (c) => {
+shareRoutes.post('/', requireAuth, requireVerifiedEmailIfEnforced, requireRole('member'), zValidator('json', shareSchema, validationHook), async (c) => {
   const auth = c.get('auth')
   const { encryptedPayload, expiresAt, maxViews } = c.req.valid('json')
   const now = Date.now()

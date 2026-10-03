@@ -196,3 +196,45 @@ describe('key-rotation status reports what blocks key retirement', () => {
     expect(after.body.data.safeToRetireOldKeys).toBe(false)
   })
 })
+
+// One class of failure, one response shape. Routes without the shared hook returned zValidator's
+// raw ZodError instead, which is a different contract and exposes internal field paths.
+describe('validation failures have one shape across the API', () => {
+  const cases: [string, string, unknown][] = [
+    ['POST', '/api/auth/register', { email: 'not-an-email', password: 'x' }],
+    ['POST', '/api/auth/login', { email: 'not-an-email' }],
+    ['POST', '/api/auth/forgot-password', { email: 'nope' }],
+    ['POST', '/api/auth/verify-email', {}],
+    ['POST', '/api/auth/reset-password', { token: '' }],
+  ]
+
+  for (const [method, path, json] of cases) {
+    it(`${method} ${path}`, async () => {
+      const env = createTestEnv()
+      const res = await call(env, method, path, { json })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('VALIDATION_ERROR')
+      expect(typeof res.body.message).toBe('string')
+      // No ZodError internals.
+      expect(res.body).not.toHaveProperty('issues')
+      expect(JSON.stringify(res.body)).not.toContain('"path"')
+    })
+  }
+
+  it('authenticated routes too', async () => {
+    const env = createTestEnv()
+    const { token, orgId } = await seedUser(env, { role: 'admin', emailVerified: true })
+    const projectId = await seedProject(env, orgId)
+
+    for (const [method, path, json] of [
+      ['POST', '/api/projects', { name: '' }],
+      ['POST', '/api/environments', { projectId, name: '' }],
+      ['POST', '/api/share', { encryptedPayload: '' }],
+      ['PUT', '/api/audit/retention', { overrideDays: 0 }],
+    ] as [string, string, unknown][]) {
+      const res = await call(env, method, path, { token, json })
+      expect(res.status, `${method} ${path}`).toBe(400)
+      expect(res.body.error, `${method} ${path}`).toBe('VALIDATION_ERROR')
+    }
+  })
+})

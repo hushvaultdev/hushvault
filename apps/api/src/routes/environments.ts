@@ -6,6 +6,7 @@ import { createPrefixedId } from '../lib/auth'
 import { resolveEnvironment } from '../lib/resolve-environment'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 import { requireAuth, requireRole, secretReadRateLimit } from '../middleware/auth'
+import { validationHook } from '../lib/validation'
 
 export const environmentRoutes = new Hono<{ Bindings: Env }>()
 
@@ -29,7 +30,7 @@ environmentRoutes.get('/', async (c) => {
   return c.json({ data: environments.results ?? [] })
 })
 
-environmentRoutes.post('/', requireRole('admin'), zValidator('json', environmentSchema), async (c) => {
+environmentRoutes.post('/', requireRole('admin'), zValidator('json', environmentSchema, validationHook), async (c) => {
   const auth = c.get('auth')
   const { projectId, name, slug, parentEnvId, color } = c.req.valid('json')
   const project = await c.env.DB.prepare('SELECT id FROM projects WHERE id = ? AND org_id = ? LIMIT 1').bind(projectId, auth.orgId).first<{ id: string }>()

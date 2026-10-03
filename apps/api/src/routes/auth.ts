@@ -48,6 +48,7 @@ import { revokeApiKeysStatement, spendEmailBudget } from '../lib/account-securit
 import { sendEmail } from '../lib/email'
 import { buildTokenLink, passwordChangedMessage, resetPasswordMessage, verifyEmailMessage } from '../lib/email-templates'
 import { runBackground } from '../lib/background'
+import { validationHook } from '../lib/validation'
 
 type MemberRole = 'owner' | 'admin' | 'member' | 'viewer'
 
@@ -74,7 +75,7 @@ const apiKeySchema = z.object({
 })
 
 // POST /api/auth/register
-authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchema), async (c) => {
+authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchema, validationHook), async (c) => {
   const { email, password, organisationName } = c.req.valid('json')
   const db = c.env.DB
 
@@ -139,7 +140,7 @@ async function sendVerificationEmail(env: Env, user: { userId: string; email: st
 }
 
 // POST /api/auth/login
-authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async (c) => {
+authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema, validationHook), async (c) => {
   const { email, password } = c.req.valid('json')
   const db = c.env.DB
 
@@ -202,7 +203,7 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async
 // attacker holding one leaked hv_live_* key could mint more, each with its own hash — so
 // GitHub's leak report would revoke the one key it saw while the attacker kept the rest, and
 // the owner would read the incident as contained. Deleting keys is gated for the same reason.
-authRoutes.post('/api-keys', requireAuth, requireHuman, requireVerifiedEmailIfEnforced, zValidator('json', apiKeySchema), async (c) => {
+authRoutes.post('/api-keys', requireAuth, requireHuman, requireVerifiedEmailIfEnforced, zValidator('json', apiKeySchema, validationHook), async (c) => {
   const { name, expiresAt } = c.req.valid('json')
   const auth = c.get('auth')
   const db = c.env.DB
@@ -317,7 +318,7 @@ authRoutes.post('/verify-email/send', requireAuth, async (c) => {
 
 // POST /api/auth/verify-email { token } - consume a verification token. POST only, so mail scanners
 // that prefetch links cannot burn it. Invalid, expired, used and wrong-purpose tokens all look the same.
-authRoutes.post('/verify-email', tokenSubmitRateLimit, zValidator('json', tokenSchema), async (c) => {
+authRoutes.post('/verify-email', tokenSubmitRateLimit, zValidator('json', tokenSchema, validationHook), async (c) => {
   const { token } = c.req.valid('json')
   const consumed = await consumeToken(c.env, { token, purpose: 'verify_email' })
   if (!consumed) {
@@ -378,7 +379,7 @@ async function processPasswordResetRequest(env: Env, email: string): Promise<voi
 
 // POST /api/auth/forgot-password { email } - always the same 202, whether or not the address has an
 // account, is OAuth-only, was throttled, or the mail could not be sent. Work runs after the response.
-authRoutes.post('/forgot-password', forgotPasswordRateLimit, zValidator('json', emailSchema), async (c) => {
+authRoutes.post('/forgot-password', forgotPasswordRateLimit, zValidator('json', emailSchema, validationHook), async (c) => {
   const { email } = c.req.valid('json')
   await runBackground(c, processPasswordResetRequest(c.env, email.toLowerCase()))
   return c.json({ data: { ok: true } }, 202)
@@ -387,7 +388,7 @@ authRoutes.post('/forgot-password', forgotPasswordRateLimit, zValidator('json', 
 // POST /api/auth/reset-password { token, password } - consume a reset token and set a new password.
 // Revokes every session; revokes API keys only for accounts whose email was still unverified (owner
 // decision 4). Proving control of the mailbox also verifies the address. Does not sign the user in.
-authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', resetSchema), async (c) => {
+authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', resetSchema, validationHook), async (c) => {
   const { token, password } = c.req.valid('json')
   const consumed = await consumeToken(c.env, { token, purpose: 'reset_password' })
   if (!consumed) {
@@ -561,7 +562,7 @@ function refreshFailure(c: Context<{ Bindings: Env }>, reason: string, status: 4
 }
 
 // POST /api/auth/refresh - exchange a refresh token for a new access token (rotates the refresh token)
-authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.default({})), async (c) => {
+authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.default({}), validationHook), async (c) => {
   const bodyToken = c.req.valid('json').refreshToken
   const presented = presentedRefreshToken(c, bodyToken)
   // The token is only ever echoed in a body to a caller that already holds it there. A cookie-authenticated
@@ -603,7 +604,7 @@ authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.d
 })
 
 // POST /api/auth/logout - end this session (revokes its refresh token family). Always succeeds.
-authRoutes.post('/logout', refreshRateLimit, zValidator('json', refreshSchema.default({})), async (c) => {
+authRoutes.post('/logout', refreshRateLimit, zValidator('json', refreshSchema.default({}), validationHook), async (c) => {
   const presented = presentedRefreshToken(c, c.req.valid('json').refreshToken)
   if ('token' in presented) await revokeRefreshFamily(c.env, presented.token)
   clearRefreshCookie(c)
@@ -623,7 +624,7 @@ const logoutAllSchema = z
   .default({})
 
 // POST /api/auth/logout-all - end every session of the signed-in user (access tokens too)
-authRoutes.post('/logout-all', requireAuth, zValidator('json', logoutAllSchema), async (c) => {
+authRoutes.post('/logout-all', requireAuth, zValidator('json', logoutAllSchema, validationHook), async (c) => {
   const auth = c.get('auth')
   if (auth.actorType !== 'user') {
     return c.json({ error: 'FORBIDDEN', message: 'Sign in as a user to end all sessions' }, 403)

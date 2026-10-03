@@ -11,6 +11,7 @@ import {
   requireRole,
 } from '../middleware/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
+import { validationHook } from '../lib/validation'
 import {
   AUDIT_RETENTION_DAYS,
   DEFAULT_RETENTION_DAYS,
@@ -143,7 +144,7 @@ auditRoutes.put(
   requireHuman,
   requireRole('admin'),
   requireCurrentAdmin,
-  zValidator('json', retentionUpdateSchema),
+  zValidator('json', retentionUpdateSchema, validationHook),
   async (c) => {
   const auth = c.get('auth')
 
@@ -206,7 +207,7 @@ auditRoutes.put(
 // Admin+: the trail carries every member's IP, user agent and secret-read history, so a
 // viewer-level credential reading the whole organisation's activity is a bulk-exfiltration
 // primitive, not a read-only convenience. The export can stream 50,000 rows per call.
-auditRoutes.get('/export', requireRole('admin'), auditExportRateLimit, zValidator('query', exportQuerySchema), async (c) => {
+auditRoutes.get('/export', requireRole('admin'), auditExportRateLimit, zValidator('query', exportQuerySchema, validationHook), async (c) => {
   const auth = c.get('auth')
   const { format, from, to, action, actorId } = c.req.valid('query')
 
@@ -256,7 +257,7 @@ auditRoutes.get('/export', requireRole('admin'), auditExportRateLimit, zValidato
 
 // GET /api/audit — list the org's audit log (retention-filtered, paginated).
 // Supports from/to/action/actorId filters and keyset pagination via `cursor`.
-auditRoutes.get('/', requireRole('admin'), auditReadRateLimit, zValidator('query', listQuerySchema), async (c) => {
+auditRoutes.get('/', requireRole('admin'), auditReadRateLimit, zValidator('query', listQuerySchema, validationHook), async (c) => {
   const auth = c.get('auth')
   const { from, to, action, actorId, cursor } = c.req.valid('query')
 
