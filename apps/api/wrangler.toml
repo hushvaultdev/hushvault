@@ -29,8 +29,16 @@
 
 name = "hushvault-api"
 main = "src/index.ts"
-# No nodejs_compat: src/ uses WebCrypto only (verified by grep + dry-run build).
 compatibility_date = "2026-09-29"
+# Node compat OFF, explicitly. At a compatibility date of 2026-08-04 or later Workers enables
+# nodejs_compat and nodejs_compat_v2 by *default*, so the previous comment claiming "no
+# nodejs_compat" described an intention the deployment did not have. Turning it off makes the
+# project's own rule visible rather than aspirational: an accidental `node:crypto` import in
+# crypto code now produces a build warning and fails at runtime, instead of quietly working.
+# (Verified: adding `import 'node:fs'` makes the dry-run build warn that the module is not
+# available without nodejs_compat.)
+# https://developers.cloudflare.com/workers/configuration/compatibility-flags/#nodejs-compatibility-flag
+compatibility_flags = ["no_nodejs_compat", "no_nodejs_compat_v2"]
 
 # ---------------------------------------------------------------- local dev --
 [vars]
@@ -77,6 +85,11 @@ ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
 MAIL_FROM = "no-reply@hushvault.dev"
 # Used for OAuth redirects, share-link URLs and as an allowed CORS origin.
 WEB_APP_URL = "https://beta.hushvault.dev"
+# This deployment's own API origin. It is the default GitHub OIDC audience, and the Action
+# refuses to run unless the audience host matches its api-url host — so without this, a dev
+# deployment demands the production audience and rejects every token. Override only with
+# GITHUB_OIDC_AUDIENCE, and only if a different audience is deliberately required.
+API_PUBLIC_URL = "https://api-beta.hushvault.dev"
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -132,6 +145,8 @@ ENVIRONMENT = "production"
 ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
 MAIL_FROM = "no-reply@hushvault.dev"
 WEB_APP_URL = "https://hushvault.dev"
+# See the note in [env.dev.vars]: this is the default GitHub OIDC audience.
+API_PUBLIC_URL = "https://api.hushvault.dev"
 
 [[env.production.d1_databases]]
 binding = "DB"
