@@ -9,7 +9,10 @@ globs:
 
 ## Runtime Constraints
 
-- **No Node.js APIs** unless `nodejs_compat` flag is set AND the API is supported in Workers
+- **No Node.js APIs in the API Worker.** At a compatibility date of 2026-08-04 or later Workers
+  enables `nodejs_compat` and `nodejs_compat_v2` *by default*, so `apps/api/wrangler.toml` sets
+  `no_nodejs_compat` + `no_nodejs_compat_v2` to keep the WebCrypto-only rule enforceable. The web
+  Worker does use node compat, because OpenNext requires it.
 - **WebCrypto only** — `crypto.subtle`, not `require('crypto')` or `node:crypto`
 - **No filesystem** — no `fs`, `path.resolve` against the local filesystem
 - **CPU time limit** — avoid computationally expensive operations (no Argon2, limit PBKDF2 iterations to 100,000)
@@ -20,7 +23,7 @@ globs:
 
 ```typescript
 // In a Hono route handler:
-const db = drizzle(c.env.DB)              // D1
+const db = c.env.DB                       // D1 (raw prepared statements)
 const kv = c.env.SECRETS_KV             // KV
 const masterKey = c.env.ENCRYPTION_MASTER_KEY  // Secret var
 

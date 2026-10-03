@@ -5,6 +5,7 @@ import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 import { integrationWriteRateLimit, requireAuth, requireCurrentAdmin, requireHuman, requireRole } from '../middleware/auth'
+import { validationHook } from '../lib/validation'
 
 // Which GitHub Actions workflow may read which environment (issue #43). Managing these rules is the whole of the
 // access control for the OIDC pull, so it is human-only (API keys and CI tokens are refused), admin+, the caller's
@@ -43,11 +44,6 @@ function toDto(row: RuleRow) {
     id: row.id, envId: row.env_id, repository: row.repository, repositoryId: row.repository_id,
     ref: row.ref, environment: row.environment, createdAt: row.created_at, lastUsedAt: row.last_used_at,
   }
-}
-
-const validationHook = (result: { success: boolean; error?: { issues: { message: string }[] } }, c: { json: (body: unknown, status: 400) => Response }) => {
-  if (!result.success) return c.json({ error: 'VALIDATION_ERROR', message: result.error?.issues[0]?.message ?? 'Invalid request' }, 400)
-  return undefined
 }
 
 // GET /api/ci-access/github/rules

@@ -3,6 +3,7 @@ import type { Env } from '../index'
 import { hashApiKey } from '../lib/auth'
 import { notifyKeyRevoked } from '../lib/notify'
 import { getRequestIp, writeAuditLog } from '../lib/security'
+import { getScannerPublicKey } from '../lib/github-scanner-keys'
 
 export const secretScannerRouter = new Hono<{ Bindings: Env }>()
 
@@ -13,30 +14,17 @@ export const secretScannerRouter = new Hono<{ Bindings: Env }>()
 // body with an ECDSA P-256 key. We verify the signature against GitHub's
 // published public keys, then revoke any matching hv_live_* API key.
 
-const GITHUB_KEYS_URL = 'https://api.github.com/meta/public_keys/secret_scanning'
 const KEY_ID_HEADER = 'GITHUB-PUBLIC-KEY-IDENTIFIER'
 const SIGNATURE_HEADER = 'GITHUB-PUBLIC-KEY-SIGNATURE'
 // Bound work per request: GitHub batches are small; reject implausibly large
 // payloads so a single callback can't tie up the worker with hashes + queries.
 const MAX_MATCHES = 1000
-// Cap the upstream key fetch so a hung GitHub response can't stall the callback.
-const KEY_FETCH_TIMEOUT_MS = 5000
 
 type GitHubSecretMatch = {
   token: string
   type: string
   url?: string
   source?: string
-}
-
-type GitHubPublicKey = {
-  key_identifier: string
-  key: string // PEM-encoded SPKI public key
-  is_current: boolean
-}
-
-type GitHubPublicKeysResponse = {
-  public_keys: GitHubPublicKey[]
 }
 
 // GitHub's per-match resolution response shape.
@@ -101,25 +89,6 @@ function derEcdsaToRaw(der: Uint8Array): Uint8Array | null {
   return raw
 }
 
-async function fetchGitHubPublicKey(keyId: string): Promise<string | null> {
-  try {
-    const res = await fetch(GITHUB_KEYS_URL, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'HushVault-SecretScanner',
-      },
-      signal: AbortSignal.timeout(KEY_FETCH_TIMEOUT_MS),
-    })
-    if (!res.ok) return null
-    const body = (await res.json()) as GitHubPublicKeysResponse
-    const match = body.public_keys?.find((k) => k.key_identifier === keyId)
-    return match?.key ?? null
-  } catch {
-    // Network error, non-JSON body, or timeout — treat as unavailable.
-    return null
-  }
-}
-
 // Verify GitHub's ECDSA P-256 / SHA-256 signature over the raw request body.
 async function verifyGitHubSignature(keyPem: string, signatureB64: string, rawBody: string): Promise<boolean> {
   try {
@@ -154,12 +123,18 @@ secretScannerRouter.post('/github', async (c) => {
   // Read the raw body exactly as signed (do not parse before verifying).
   const rawBody = await c.req.text()
 
-  const keyPem = await fetchGitHubPublicKey(keyId)
-  if (!keyPem) {
-    return c.json({ error: 'UNAUTHORIZED', message: 'Unknown signing key' }, 401)
+  // A 401 is terminal for GitHub, a 5xx is retried. So "this key id is not in the set"
+  // is 401, but "we could not look the set up right now" must be 503 — otherwise an
+  // outage or a flood of junk key ids would make us drop genuine leak reports.
+  const lookup = await getScannerPublicKey(c.env, keyId, getRequestIp(c) ?? 'unknown')
+  if (!lookup.ok) {
+    if (lookup.code === 'UNKNOWN_KEY') {
+      return c.json({ error: 'UNAUTHORIZED', message: 'Unknown signing key' }, 401)
+    }
+    return c.json({ error: 'KEY_LOOKUP_UNAVAILABLE', message: 'Could not verify the signature right now' }, 503)
   }
 
-  const isValid = await verifyGitHubSignature(keyPem, signature, rawBody)
+  const isValid = await verifyGitHubSignature(lookup.pem, signature, rawBody)
   if (!isValid) {
     return c.json({ error: 'UNAUTHORIZED', message: 'Invalid signature' }, 401)
   }

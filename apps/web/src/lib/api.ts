@@ -94,6 +94,9 @@ async function send(path: string, method: string, body: unknown, token: string |
       method,
       headers,
       credentials: 'include', // the refresh cookie is set/rotated by login and refresh responses
+      // Responses can carry plaintext secret values. The API sends Cache-Control: no-store, and
+      // this says the same thing from the client side so nothing is served from the HTTP cache.
+      cache: 'no-store',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
   } catch {

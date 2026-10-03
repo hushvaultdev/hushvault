@@ -16,7 +16,16 @@ Envelope encryption separates key material from encrypted data:
 |-----------|-----------|-----|
 | Secret encryption | AES-256-GCM | Authenticated encryption, prevents ciphertext tampering |
 | DEK wrapping | AES-256-GCM | Same algorithm, KEK as key |
-| Key derivation (password) | PBKDF2-SHA256, 100K iterations | WebCrypto compatible; Argon2 not viable in Workers |
+| Key derivation (password) | PBKDF2-SHA256, 100,000 iterations | WebCrypto compatible; Argon2 not viable in Workers. **Below current guidance — see the note below.** |
+
+> **PBKDF2 iteration count: a known deviation.** OWASP's Password Storage Cheat Sheet currently
+> recommends **600,000** iterations for PBKDF2-HMAC-SHA256; this deployment uses 100,000, which is
+> one sixth of that. The reason is the Workers CPU-time limit, and that reason has been asserted
+> rather than measured — 600,000 iterations of PBKDF2-SHA256 is on the order of a few hundred
+> milliseconds of CPU, which may well fit the paid-plan budget for a login. It is stated here
+> because it will be the first finding of any security questionnaire, and it should be either
+> measured and raised or deliberately accepted, not left implicit.
+> Source: <https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html>
 | IV/nonce | Random, `crypto.getRandomValues()` | Must be unique per encryption operation |
 | Key size | 256 bits | Maximum AES strength |
 | IV size | 96 bits (12 bytes) | Required for GCM mode |

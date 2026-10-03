@@ -234,3 +234,35 @@ describe('REQUIRE_VERIFIED_EMAIL', () => {
     expect((await call(env, 'POST', '/api/auth/forgot-password', { json: { email: 'x@x.com' } })).status).toBe(202)
   })
 })
+
+// The per-kind budget exists so that a sign-up flood cannot take account recovery down with it.
+// Password reset was spending the verification bucket, which undid exactly that.
+describe('email budget is per kind', () => {
+  it('a registration flood that exhausts verification mail still leaves password reset working', async () => {
+    const { env, sent } = makeEnv({ EMAIL_DAILY_BUDGET: '2' })
+
+    // A real account to recover, created before the flood.
+    await register(env, 'victim@x.com')
+    await wait(20)
+    expect(sent.filter((m) => m.subject.startsWith("Confirm your")).length).toBe(1)
+
+    // Spend what is left of the verification budget, then overrun it.
+    await register(env, 'flood1@x.com')
+    await register(env, 'flood2@x.com')
+    await register(env, 'flood3@x.com')
+    await wait(20)
+    const verificationMails = sent.filter((m) => m.subject.startsWith("Confirm your")).length
+    expect(verificationMails).toBe(2)
+
+    sent.length = 0
+    const forgot = await call(env, 'POST', '/api/auth/forgot-password', { json: { email: 'victim@x.com' } })
+    expect(forgot.status).toBe(202)
+    await wait(20)
+
+    // The reset mail is sent from its own bucket, and a usable token was issued.
+    expect(sent.length).toBe(1)
+    const tokens = await env.DB.prepare("SELECT COUNT(*) AS n FROM auth_tokens WHERE purpose = 'reset_password'")
+      .first<{ n: number }>()
+    expect(tokens?.n).toBe(1)
+  })
+})

@@ -135,6 +135,15 @@
   font-size: 0.95rem;
 }
 
+/* Key-custody disclosure under the trust band. Deliberately readable rather than fine print. */
+.sectionNote {
+  margin: 18px 0 0;
+  max-width: 68ch;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  line-height: 1.65;
+}
+
 .sectionHeader {
   display: grid;
   gap: 18px;

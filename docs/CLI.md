@@ -14,9 +14,22 @@ node apps/cli/dist/index.js --help # run it directly
 # optional: pnpm --filter hushvault dev   (runs src/index.ts via tsx)
 ```
 
-Requirements: Node.js >= 20. Credentials are stored with the native `keytar` module, which uses the OS keychain
-(macOS Keychain, Windows Credential Vault, or libsecret on Linux). The CLI still starts if `keytar` cannot be
-loaded; only `login` (and keychain-based auth) is affected, see [Authentication](#authentication).
+Requirements: Node.js **>= 22.13** (matching the rest of the repo) and pnpm **>= 10**.
+
+Credentials are stored in the OS keychain (macOS Keychain, Windows Credential Vault, or libsecret
+on Linux) via the native `keytar` module. Two things to know about it:
+
+- **pnpm 10 blocks dependency build scripts by default**, and `keytar` builds its native binding
+  in one. This repo therefore lists it in `pnpm.onlyBuiltDependencies`; without that entry there
+  is no `keytar.node` after install and `login` reports the keychain as unavailable on *every*
+  platform. If you install with a different package manager or an older pnpm and hit that, run
+  `pnpm approve-builds` or add the allowlist entry.
+- `keytar` is **unmaintained** — the upstream repository (`atom/node-keytar`) was archived in
+  December 2022 and 7.9.0 is its final release — so it will receive no further fixes and ships no
+  prebuilt binaries for newer platforms. Replacing it is tracked as an issue.
+
+The CLI still starts if `keytar` cannot be loaded; only `login` (and keychain-based auth) is
+affected, see [Authentication](#authentication).
 
 The examples below call `hushvault`; substitute `node apps/cli/dist/index.js` (or your own alias) as needed.
 
@@ -117,7 +130,7 @@ Create a temporary share link for a value (omit `value` or pass `-` to read stdi
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--views <n>` | `1` | Max views, integer 1-100 |
-| `--hours <n>` | `24` | Expiry in hours, positive; the CLI accepts up to 8760 but the API may reject expiries beyond its own maximum (7 days in current code) |
+| `--hours <n>` | `24` | Expiry in hours, from 1 to 168 (7 days). The CLI rejects anything above 168 before making a request, matching the API's own cap |
 
 The value is encrypted on your machine with a fresh one-time AES-256-GCM key (WebCrypto) before upload. The
 CLI prints `<url>#<key>`; the key is only in the URL fragment and is never sent to the server, so share the
@@ -217,7 +230,10 @@ export HUSHVAULT_TOKEN=<api-key-from-your-dashboard-or-api>   # placeholder
 hushvault run -e staging -- ./deploy.sh
 ```
 
-JWTs expire after 7 days; API keys can have an optional expiry.
+Access JWTs expire after **15 minutes** and are renewed automatically from the refresh token in
+the keychain, so an interactive session keeps working. A login JWT is therefore the wrong thing
+to put in `HUSHVAULT_TOKEN` for CI — it will start returning 401 within the quarter hour. Use an
+API key (`hv_live_…`), which is long-lived and can carry an optional expiry.
 
 ## API URL
 

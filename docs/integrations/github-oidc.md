@@ -48,12 +48,22 @@ jobs:
       id-token: write        # required: without it GitHub mints no token
       contents: read
     steps:
-      - uses: hushvaultdev/secrets-action@v0
+      - uses: hushvaultdev/secrets-action@v0     # NOT PUBLISHED YET — see the note below
         with:
           environment-id: env_...
           api-url: https://api.hushvault.dev
+          prefix: APP_          # required (or `names`): you choose what enters the environment
       - run: ./deploy.sh      # secrets are environment variables here
 ```
+
+> **The action is not released.** `hushvaultdev/secrets-action` has no published tag, so the
+> `uses:` line above cannot resolve yet. The API side is complete and the action's source lives in
+> `apps/secrets-action/` of this repository. Until it is split out and tagged, this guide
+> describes the intended usage, not something you can run.
+>
+> `export-env` also requires either `prefix` or `names`. This is deliberate: without it, whoever
+> can add a secret to the environment chooses which environment variables the job receives, and
+> the workflow author does not.
 
 The action masks every value before it can reach the log, writes values only to `$GITHUB_ENV`, and outputs the secret
 **names** only. It has no third-party dependencies.

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { app } from '../src/index'
-import { assertSecretSize, redactPath, SecretTooLargeError } from '../src/lib/security'
+import { assertSecretSize, getRequestIp, redactPath, SecretTooLargeError } from '../src/lib/security'
 import { call, createTestEnv, seedApiKey, seedUser } from './helpers/env'
 
 app.get('/__test/too-large', () => { assertSecretSize('x'.repeat(70_000)) })
@@ -125,5 +125,21 @@ describe('CORS', () => {
       const env = createTestEnv({ ENVIRONMENT: 'production', WEB_APP_URL })
       expect((await preflight(env, 'https://evil.example')).headers.get('access-control-allow-origin')).toBeNull()
     }
+  })
+})
+
+// Audit rows must never carry a caller-chosen IP.
+describe('getRequestIp', () => {
+  const withHeaders = (headers: Record<string, string>) => ({
+    req: { header: (name: string) => headers[name.toLowerCase()] },
+  })
+
+  it('uses cf-connecting-ip', () => {
+    expect(getRequestIp(withHeaders({ 'cf-connecting-ip': '203.0.113.7' }))).toBe('203.0.113.7')
+  })
+
+  it('ignores a spoofable x-forwarded-for', () => {
+    expect(getRequestIp(withHeaders({ 'x-forwarded-for': '9.9.9.9' }))).toBeNull()
+    expect(getRequestIp(withHeaders({ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '9.9.9.9' }))).toBe('203.0.113.7')
   })
 })

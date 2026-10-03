@@ -17,11 +17,17 @@ The project was created to deliver a self-hostable alternative with a polished d
 
 ## How do I use HushVault?
 
-1. Install the CLI:
+1. Build the CLI from source. **It is not published to npm yet** — the `hushvault` package name
+   is unclaimed, so do not run `npm install -g hushvault`.
 
    ```bash
-   npm install -g hushvault
+   git clone https://github.com/hushvaultdev/hushvault
+   cd hushvault && pnpm install
+   pnpm --filter @hushvault/cli build
+   # then run it as: node apps/cli/dist/index.js <command>
    ```
+
+   See [docs/CLI.md](CLI.md).
 
 2. Authenticate with your HushVault host:
 
@@ -56,23 +62,37 @@ Environments are organized as a tree. Child environments inherit all values from
 
 ## Can I self-host for free?
 
-Yes. HushVault is built to run on Cloudflare Workers, D1, KV, and Pages, and it can fit inside Cloudflare's free tier for many small teams and MVPs.
+Yes — HushVault runs entirely on Cloudflare Workers, D1 and KV (the dashboard is a Worker too,
+via OpenNext). Note that the API Worker needs a Durable Object and a minute Cron Trigger, so
+check current Workers pricing for your own usage rather than assuming $0.
 
 ## How do I rotate the master key?
 
 HushVault uses envelope encryption:
 
 - secret values are encrypted with per-secret DEKs
-- each DEK is wrapped with a master key
+- each DEK is wrapped with a key-encryption key (KEK)
 
-To rotate the master key:
+**Do not overwrite `ENCRYPTION_MASTER_KEY`.** That is `v1` of the key ring, and every DEK
+still wrapped under `v1` can only be unwrapped with it. Replacing its value destroys every
+secret that has not already been re-wrapped, with no way back — a Worker secret cannot be
+read again once it is overwritten.
 
-1. Generate a new 32-byte base64 key.
-2. Re-wrap each secret's DEK with the new master key.
-3. Update `ENCRYPTION_MASTER_KEY` in Cloudflare.
-4. Deploy the updated worker.
+Rotation adds a new key alongside the old one and re-wraps in the background:
 
-The ciphertext stored in KV does not need to be re-encrypted during master key rotation.
+1. Generate the new key and back it up offline **before** installing it.
+2. `wrangler secret put ENCRYPTION_KEY_V2 --env <env>` — the old key stays exactly as it is.
+3. Set `ENCRYPTION_ACTIVE_KEY_VERSION = "v2"` in `wrangler.toml` and deploy.
+4. The Cron Trigger verifies both keys, then re-wraps the stored DEKs in batches. Watch
+   `GET /api/security/key-rotation`.
+5. Retire `v1` only once no row uses it and every backup you might restore has aged out.
+
+Every row stays decryptable with whichever key version it was wrapped under, which is what
+makes this zero downtime and reversible. The ciphertext in KV is never touched: only the
+wrapped DEKs in D1 change.
+
+The full procedure, including rollback and the retirement conditions, is in
+[docs/ENCRYPTION.md](ENCRYPTION.md#key-rotation). Follow it rather than this summary.
 
 ## How do API tokens rotate?
 
@@ -93,6 +113,6 @@ Secrets are never stored in plaintext in the database or repository.
 
 ## Where can I find more documentation?
 
-- `README.md` for quick start and architecture overview
+- `README.md` for status, local development and self-hosting
 - `docs/ENCRYPTION.md` for encryption details and key rotation
 - `docs/DEPLOYMENT.md` for self-hosted deployment and Cloudflare setup

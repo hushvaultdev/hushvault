@@ -34,8 +34,8 @@ is not built.
 
 - Beta means the code and its tests exist; it has **not** been exercised against a live Cloudflare account in this repository's tests.
   Several Cloudflare API details are unverified (list in the provider doc).
-- No scheduler yet: runs are manual (`POST /targets/:id/run`). Failed runs record `nextRetryAt`, but nothing retries them yet.
-- No automatic sync on secret change.
+- Automatic triggers (on change, on a schedule, and retries) are built and wired to the cron —
+  see the next section. They are off by default per target; manual runs always work.
 - Surfaces: the dashboard (Integrations) creates, edits, previews and runs targets; `hushvault sync` lists, previews and runs them; the API does all of it.
   Connections and targets are created in the dashboard or the API, not the CLI.
 

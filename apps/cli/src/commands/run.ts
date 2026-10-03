@@ -15,11 +15,25 @@ export async function fetchSecretEnv(ctx: ProjectContext, envInput: string): Pro
   return { env: env.slug, secrets }
 }
 
+/**
+ * The HUSHVAULT_* variables a child process is allowed to see. Everything else under that prefix
+ * is removed.
+ *
+ * This is an allowlist on purpose. It used to be a keyword denylist
+ * (`/^HUSHVAULT_.*(TOKEN|SECRET|KEY|PASSWORD)/`), which was both case-sensitive and guesswork
+ * about future names: `HUSHVAULT_SESSION`, `HUSHVAULT_AUTH`, `HUSHVAULT_PAT` or a lowercase
+ * spelling would all have been handed to whatever `hv run` spawns. The same reasoning as the
+ * GitHub Action's exported variable names — a list of what is safe, never a list of what is not.
+ */
+const CHILD_SAFE_HUSHVAULT_VARS = new Set(['HUSHVAULT_API_URL', 'HUSHVAULT_CONFIG_DIR'])
+
 export function buildChildEnv(secrets: Record<string, string>, inherit: boolean): NodeJS.ProcessEnv {
   if (inherit) {
-    // The child must not receive HushVault's own credentials (HUSHVAULT_TOKEN etc.; HUSHVAULT_API_URL is not secret) just because it is spawned by the CLI.
+    // The child must not receive HushVault's own credentials just because the CLI spawned it.
     const parent = { ...process.env }
-    for (const k of Object.keys(parent)) if (/^HUSHVAULT_.*(TOKEN|SECRET|KEY|PASSWORD)/.test(k)) delete parent[k]
+    for (const k of Object.keys(parent)) {
+      if (/^HUSHVAULT_/i.test(k) && !CHILD_SAFE_HUSHVAULT_VARS.has(k.toUpperCase())) delete parent[k]
+    }
     return { ...parent, ...secrets }
   }
   const base: NodeJS.ProcessEnv = {}
@@ -56,6 +70,21 @@ export function spawnWithEnv(command: string, args: string[], env: NodeJS.Proces
   })
 }
 
+/**
+ * What is about to be injected, and from where.
+ *
+ * `projectId` and `defaultEnv` come from .hushvault.json, which belongs to the repository — and a
+ * repository you cloned is not necessarily one you trust. Printing only "Injecting N secrets from
+ * production" meant a checked-in config naming someone else's project id could feed that
+ * project's secrets to a script the same repository controls, with nothing on screen to show the
+ * substitution. (The server still enforces that the project is yours; the risk is you not
+ * noticing which of *your* projects it chose.)
+ */
+export function describeInjection(ctx: ProjectContext, env: string, count: number): string {
+  const name = ctx.config.projectName ? `${ctx.config.projectName} (${ctx.config.projectId})` : ctx.config.projectId
+  return `Injecting ${count} secrets from ${env} of ${name}`
+}
+
 export async function runAction(
   ctx: ProjectContext,
   command: string,
@@ -64,7 +93,7 @@ export async function runAction(
   log: (msg: string) => void = () => {},
 ): Promise<number> {
   const { env, secrets } = await fetchSecretEnv(ctx, pickEnvInput(options.env, ctx.config))
-  log(`Injecting ${Object.keys(secrets).length} secrets from ${env}`)
+  log(describeInjection(ctx, env, Object.keys(secrets).length))
   return spawnWithEnv(command, args, buildChildEnv(secrets, options.inherit !== false))
 }
 
@@ -81,7 +110,7 @@ export const runCommand = new Command('run')
     try {
       const ctx = await loadProjectContext()
       const { env, secrets } = await fetchSecretEnv(ctx, pickEnvInput(options.env, ctx.config))
-      spinner.succeed(`Injecting ${Object.keys(secrets).length} secrets from ${env}`)
+      spinner.succeed(describeInjection(ctx, env, Object.keys(secrets).length))
       const code = await spawnWithEnv(command, args, buildChildEnv(secrets, options.inherit))
       process.exit(code)
     } catch (err) {

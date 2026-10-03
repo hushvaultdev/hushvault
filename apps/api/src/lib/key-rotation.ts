@@ -291,9 +291,11 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
       const chunk = rows.slice(start, start + WRITE_CHUNK)
       const writes: ReturnType<D1Database['prepare']>[] = []
       const failures: ReturnType<D1Database['prepare']>[] = []
+      let chunkFailed = 0
       for (const row of chunk) {
         const quarantine = (code: string) => {
           failed += 1
+          chunkFailed += 1
           failures.push(
             env.DB.prepare('INSERT OR IGNORE INTO key_rotation_failures (rotation_id, table_name, row_id, error_code) VALUES (?, ?, ?, ?)')
               .bind(job.id, table, row.id, code),
@@ -320,15 +322,30 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
       const progress = env.DB.prepare(
         `UPDATE key_rotations SET ${spec.cursor} = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
       ).bind(last?.id ?? cursor, nowIso, job.id)
-      const batchResults = await env.DB.batch([...writes, ...failures, progress])
+      // The quarantine count goes in the same batch as the failure rows and the cursor. It used
+      // to be accumulated in memory and written once after the loop: a tick that died in between
+      // (CPU limit, wall clock, a runtime update's grace period, any D1 error) left the cursor
+      // advanced and the failure rows committed while `failed` stayed 0 — so the job finished as
+      // `completed`, the operator read that as "nothing left on the old key", retired it, and the
+      // quarantined rows became permanently undecryptable.
+      const statements = [...writes, ...failures, progress]
+      if (chunkFailed > 0) {
+        statements.push(
+          env.DB.prepare("UPDATE key_rotations SET failed = failed + ?, updated_at = ? WHERE id = ? AND status = 'running'")
+            .bind(chunkFailed, nowIso, job.id),
+        )
+      }
+      const batchResults = await env.DB.batch(statements)
       for (let i = 0; i < writes.length; i += 1) {
         if (Number(batchResults[i]?.meta.changes ?? 0) === 1) rewrapped += 1
         else skipped += 1
       }
     }
 
-    await env.DB.prepare("UPDATE key_rotations SET rewrapped = rewrapped + ?, skipped = skipped + ?, failed = failed + ?, last_error_code = NULL, updated_at = ? WHERE id = ? AND status = 'running'")
-      .bind(rewrapped, skipped, failed, nowIso, job.id).run()
+    // rewrapped/skipped are progress reporting only — they are derived from the batch results, so
+    // they cannot be written atomically with it, and nothing safety-critical reads them.
+    await env.DB.prepare("UPDATE key_rotations SET rewrapped = rewrapped + ?, skipped = skipped + ?, last_error_code = NULL, updated_at = ? WHERE id = ? AND status = 'running'")
+      .bind(rewrapped, skipped, nowIso, job.id).run()
 
     if (rows.length === limit) {
       logEvent('key_rotation.progress', { rewrapped, skipped, failed })
@@ -350,8 +367,13 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
       return { state: 'progress', rewrapped, skipped, failed }
     }
 
-    const final = await env.DB.prepare('SELECT failed FROM key_rotations WHERE id = ?').bind(job.id).first<{ failed: number }>()
-    const failedTotal = final?.failed ?? 0
+    // Authoritative: count the quarantine rows themselves. A counter can be lost; the rows cannot,
+    // because they are written in the same batch as the cursor that passed over them.
+    const final = await env.DB.prepare('SELECT count(*) AS n FROM key_rotation_failures WHERE rotation_id = ?')
+      .bind(job.id).first<{ n: number }>()
+    const failedTotal = final?.n ?? 0
+    // Reconcile the reported counter with the truth, so the status endpoint and the row agree.
+    await env.DB.prepare("UPDATE key_rotations SET failed = ? WHERE id = ? AND status = 'running'").bind(failedTotal, job.id).run()
     const status = failedTotal > 0 ? 'completed_with_errors' : 'completed'
     const done = await env.DB.prepare("UPDATE key_rotations SET status = ?, completed_at = ?, updated_at = ?, lease_until = NULL, lease_owner = NULL WHERE id = ? AND status = 'running'")
       .bind(status, nowIso, nowIso, job.id).run()

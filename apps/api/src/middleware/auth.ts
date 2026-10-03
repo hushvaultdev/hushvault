@@ -219,10 +219,30 @@ export const oauthRateLimit = createRateLimitMiddleware({
   failClosed: true,
 })
 
+// Deliberately fail-open: if the limiter backend is unreachable, a 503 here would stop
+// every CI deploy and every `hv run` worldwide, and a rate limit is not what contains a
+// stolen credential (revocation and the audit row are). The middleware degrades to the
+// per-isolate counter on a backend error, so the endpoint is still bounded, just loosely.
 export const secretReadRateLimit = createRateLimitMiddleware({
   scope: 'secret-read',
   limit: 120,
   windowMs: 60_000,
+})
+
+// Audit reads return every member's IP and user-agent history, so they get their own
+// bucket rather than only the coarse global net. The export is far heavier (up to
+// 50,000 rows per call), so it is capped much lower and keyed per organisation.
+export const auditReadRateLimit = createRateLimitMiddleware({
+  scope: 'audit-read',
+  limit: 60,
+  windowMs: 60_000,
+})
+
+export const auditExportRateLimit = createRateLimitMiddleware({
+  scope: 'audit-export',
+  limit: 6,
+  windowMs: 60_000,
+  keyFn: byOrganisation,
 })
 
 // Unauthenticated share-link reads are a secret-enumeration vector; cap per IP.

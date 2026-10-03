@@ -6,7 +6,7 @@
 
 ## What We're Building
 
-HushVault manages application secrets with envelope encryption (AES-256-GCM), branch inheritance, computed secrets, and one-click Cloudflare Pages sync. The entire backend runs on Cloudflare Workers + D1 + KV — no servers, no VMs.
+HushVault manages application secrets with envelope encryption (AES-256-GCM), branch inheritance, computed secrets, and one-way Cloudflare Workers secrets sync (beta). The entire backend runs on Cloudflare Workers + D1 + KV — no servers, no VMs. Cloudflare **Pages** sync is planned, not built — see `packages/shared/src/integrations.ts`, which is the single source of truth for what ships.
 
 **Users:** Developers who want Doppler-quality secrets management at Infisical prices ($0 self-host).
 
@@ -17,10 +17,10 @@ HushVault manages application secrets with envelope encryption (AES-256-GCM), br
 | Layer | Technology |
 |-------|-----------|
 | API | Cloudflare Workers + Hono |
-| DB | Cloudflare D1 (SQLite) + Drizzle ORM |
+| DB | Cloudflare D1 (SQLite); raw prepared statements. Drizzle is used for the schema definition only |
 | Secrets Storage | Cloudflare KV (AES-256-GCM encrypted blobs) |
-| Dashboard | Next.js 14 + Cloudflare Pages |
-| CLI | Commander.js + node-keytar (OS keychain) |
+| Dashboard | Next.js 15 on Cloudflare Workers via OpenNext (`@opennextjs/cloudflare`) |
+| CLI | Commander.js + `keytar` (OS keychain; unmaintained upstream, needs a pnpm build approval) |
 | Crypto | WebCrypto API (envelope encryption) |
 | Monorepo | Turborepo + pnpm workspaces |
 
@@ -31,9 +31,10 @@ HushVault manages application secrets with envelope encryption (AES-256-GCM), br
 ```
 hushvault/
 ├── apps/
-│   ├── api/          # Hono API on Cloudflare Workers
-│   ├── cli/          # Commander.js CLI (npm: hushvault)
-│   └── web/          # Next.js dashboard on Cloudflare Pages
+│   ├── api/             # Hono API on Cloudflare Workers
+│   ├── cli/             # Commander.js CLI (not published to npm yet)
+│   ├── secrets-action/  # GitHub Action (OIDC); dependency-free, runs src/index.js
+│   └── web/             # Next.js dashboard on Cloudflare Workers (OpenNext)
 ├── packages/
 │   └── shared/       # Shared types, Hono AppType, crypto utils
 ├── .claude/          # Claude Code configuration
@@ -49,15 +50,23 @@ hushvault/
 - **Never** log, `console.log`, or embed secrets/keys in error messages or responses
 - **Never** use hardcoded keys, IVs, or salts — always generate with `crypto.getRandomValues()`
 - **Never** implement custom cryptography — use WebCrypto (`crypto.subtle`) only
-- **Always** use parameterized queries via Drizzle ORM (never raw SQL string interpolation)
+- **Always** bind every user value: `DB.prepare(...).bind(...)`, never string interpolation.
+  D1 queries are written as raw prepared statements — Drizzle is imported in exactly one file
+  (`apps/api/src/db/schema.ts`) for the table definitions, and no route builds a `drizzle()`
+  instance. Interpolation into SQL is allowed only for fixed internal fragments (a column list,
+  a known table name), never for anything a caller supplied.
 - **Always** validate and sanitize all user input at API boundaries
 - **Always** use envelope encryption: KEK (master key) wraps DEK, DEK encrypts secret value
 
 ### Cloudflare Workers Constraints
-- **No** Node.js APIs — use WebCrypto, not `node:crypto`
-- **No** Argon2 — CPU time limits; use PBKDF2-SHA256 (100,000 iterations)
+- **No** Node.js APIs — use WebCrypto, not `node:crypto`. The API Worker sets
+  `no_nodejs_compat` + `no_nodejs_compat_v2`, because at a compatibility date of 2026-08-04 or
+  later Workers would otherwise enable Node compat by default; an accidental `node:*` import
+  therefore warns at build time and fails at runtime rather than quietly working.
+- **No** Argon2 — CPU time limits; use PBKDF2-SHA256. Currently 100,000 iterations, which is
+  below OWASP's current recommendation of 600,000 for PBKDF2-HMAC-SHA256; see docs/ENCRYPTION.md
 - **Use** `Env` type for all Cloudflare bindings (D1Database, KVNamespace)
-- **Use** `nodejs_compat` flag in wrangler.toml for CLI-adjacent packages only
+- The web Worker does use `nodejs_compat` (OpenNext requires it); the API Worker does not
 
 ### TypeScript
 - Strict mode everywhere — `noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature`
@@ -79,7 +88,7 @@ pnpm dev              # Start all apps in dev mode (Turborepo)
 pnpm build            # Build all packages
 pnpm test             # Run all tests (Vitest)
 pnpm type-check       # TypeScript check across monorepo
-pnpm lint             # ESLint across monorepo
+pnpm lint             # ESLint — apps/web only (api, cli and shared have no lint task yet)
 
 # API (apps/api)
 wrangler dev          # Local Workers dev server
@@ -122,7 +131,10 @@ return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
 
 Schema lives in `apps/api/src/db/schema.ts`. Drizzle migrations via `wrangler d1`.
 
-- All tables use `text('id').primaryKey()` with `nanoid()` IDs (never auto-increment integers)
+- All tables use `text('id').primaryKey()` with ids from `createPrefixedId(prefix)` — 16 random
+  bytes from `crypto.getRandomValues`, base64url, with a type prefix (`prj_`, `env_`, `sec_`,
+  `tok_`). Never auto-increment integers, which leak the record count. `nanoid` is not used
+  anywhere in the source.
 - Timestamps: `createdAt` / `updatedAt` as ISO strings
 - Soft deletes where applicable: `deletedAt` text field
 - Branch inheritance: `parentEnvId` text reference
@@ -163,6 +175,11 @@ Read the skills for specialised tasks:
 - [docs/API.md](docs/API.md) — REST API reference
 - [docs/CLI.md](docs/CLI.md) — CLI command reference
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Deploy, migrate, rotate keys
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — Runbooks, backup/restore, key loss
+- [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) — Sync engine and provider status
+- [docs/integrations/](docs/integrations/) — Per-provider guides (Cloudflare Workers, GitHub OIDC)
+- [docs/FAQ.md](docs/FAQ.md) — User-facing questions
+- [apps/web/DEPLOY.md](apps/web/DEPLOY.md) — Dashboard Worker deployment
 
 ---
 
@@ -198,6 +215,6 @@ Environments: `dev` (`beta.hushvault.dev`, `api-beta.hushvault.dev`) and `produc
 
 ---
 
-**Last Updated:** March 31, 2026
+**Last Updated:** October 3, 2026
 **Org:** hushvaultdev
 **Repo:** hushvaultdev/hushvault

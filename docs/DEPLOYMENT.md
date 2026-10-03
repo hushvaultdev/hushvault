@@ -61,8 +61,9 @@ root directory, API token, build variables and secrets):
 | `hushvault-web-dev` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:dev` |
 | `hushvault-web` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:production` |
 
-- `verify` (API) runs type-check and the unit tests for the API and the packages it
-  depends on; (web) type-check and lint. Defined in each app's `package.json`.
+- `verify` (API) runs type-check and the unit tests for the API, the packages it
+  depends on, and the GitHub Action in `apps/secrets-action`; (web) type-check, lint
+  and the web + shared tests. Defined in each app's `package.json`.
 - API deploy scripts run **D1 migrations first, then deploy**
   (`wrangler d1 migrations apply DB --remote --env <env>` then `wrangler deploy --env <env>`).
   Use `deploy:dev:code-only` / `deploy:production:code-only` to skip migrations.
@@ -70,6 +71,9 @@ root directory, API token, build variables and secrets):
   so an API change does not rebuild the web Worker and vice versa
   (<https://developers.cloudflare.com/workers/ci-cd/builds/build-watch-paths/>;
   include `apps/<app>/**`, `packages/shared/**`, `pnpm-lock.yaml`).
+  For the **API** Workers also include `apps/secrets-action/**`: the GitHub Action has
+  no Worker of its own, so its tests ride the API `verify` and only run when the API
+  build does. Without that watch path, an action-only change ships untested.
 - Web only: set the **build variable** `NEXT_PUBLIC_API_URL` (inlined at build time).
 - Node: Workers Builds defaults to Node 24.18.0 and preinstalls 22.23.2 and 24.18.0;
   `.nvmrc` in this repo pins major `22`. The API tests use `node:sqlite`
@@ -134,6 +138,22 @@ openssl rand -base64 64 | tr -d '\n'    # JWT_SECRET
 Required: `ENCRYPTION_MASTER_KEY`, `JWT_SECRET`. Optional (the OAuth routes return
 503 until set): `GITHUB_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET`,
 `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`.
+
+**Plain vars, not secrets** (they live in `wrangler.toml`, per environment, and are listed here
+because they were previously documented only inside an integration guide):
+
+| Var | Why it matters |
+|---|---|
+| `API_PUBLIC_URL` | This deployment's own API origin, and the default GitHub OIDC audience. The Action refuses to run unless the audience host matches its `api-url` host, so if this is unset the dev deployment demands the production audience and rejects every token. |
+| `GITHUB_OIDC_AUDIENCE` | Overrides the above. Only set it if a different audience is deliberately required. |
+| `GITHUB_OIDC_ISSUER`, `GITHUB_OIDC_JWKS_URL` | Override GitHub's defaults. Leave unset in normal use. |
+| `ENCRYPTION_ACTIVE_KEY_VERSION` | Which key-ring version new writes use. See docs/ENCRYPTION.md. |
+| `ENFORCE_AAD` | Refuses rows still on the pre-AAD blob format. **Check `legacyEncVersionRows` on `GET /api/security/key-rotation` is 0 before turning this on** — otherwise every read of an affected environment fails as a unit. |
+| `HUSHVAULT_SYNC_DENY_SCRIPTS`, `HUSHVAULT_SYNC_DENY_ACCOUNT_IDS` | Extra sync targets that may never be written. |
+
+**Rotating `JWT_SECRET`** also invalidates every sync fingerprint (they are derived from it), so
+the next run of each target re-pushes every value it manages. That is safe — it can never turn
+into a delete — but it does re-send every secret to the provider and spend provider quota.
 
 **Back up the production `ENCRYPTION_MASTER_KEY` offline before the first real
 secret is stored**: losing it makes all stored secrets unrecoverable (OPERATIONS.md).

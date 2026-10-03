@@ -69,7 +69,15 @@ export function createRateLimitMiddleware(options: RateLimitOptions): Middleware
       if (options.failClosed) {
         return c.json({ error: 'SERVICE_UNAVAILABLE', message: 'Service temporarily unavailable. Please try again shortly.' }, 503)
       }
-      return next()
+      // The Durable Object is unreachable and this scope would rather serve than refuse.
+      // Degrade to the per-isolate counter instead of dropping the limit entirely: it is
+      // weak (not shared across isolates or colos) but finite, so an outage of the limiter
+      // does not hand an attacker an unmetered secret-read endpoint.
+      try {
+        result = consumeInMemory(c.env, key, Date.now(), options.limit, options.windowMs)
+      } catch {
+        return next()
+      }
     }
 
     c.header('X-RateLimit-Limit', String(options.limit))

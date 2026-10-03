@@ -28,7 +28,8 @@ export const PLANS: PlanDefinition[] = [
     features: [
       'Computed secrets',
       'Branch inheritance',
-      'Share links (API)',
+      'One-time share links, encrypted in your browser',
+      'Cloudflare Workers secrets sync (beta)',
       'Cloudflare Pages sync (planned)',
       'GitHub Actions sync (planned)',
     ],
@@ -52,7 +53,7 @@ export const PLANS: PlanDefinition[] = [
     status: 'planned',
     audience: 'Startups that need governance and shared infrastructure.',
     features: [
-      'Role-based access control',
+      'Role-based access control (planned: needs team invites, which are not built)',
       'SSO (planned)',
       'Audit log export (API)',
       'Custom domain (planned)',
