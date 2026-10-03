@@ -10,7 +10,7 @@ Use this skill when working on any part of the HushVault codebase.
 1. Computed secrets — `${DB_USER}:${DB_PASS}@host` interpolation with dependency graph
 2. Branch inheritance — environments form a tree; children inherit and override
 3. Temporary share URLs — E2E encrypted, key in fragment (zero-knowledge)
-4. Native Cloudflare Pages sync — auto-pushes on save
+4. Cloudflare Workers secrets sync (beta, one-way, with opt-in automatic triggers). Cloudflare **Pages** sync is planned, not built.
 5. `$0/month` self-host — Workers + D1 + KV free tier
 
 ## Architecture Summary
@@ -37,19 +37,10 @@ GitHub Actions ──→ hushvaultdev/secrets-action ──→ same API
 
 ## Env Type
 
-All Cloudflare bindings are typed via `Env` in `apps/api/src/index.ts`:
-
-```typescript
-type Env = {
-  DB: D1Database
-  SECRETS_KV: KVNamespace
-  ENVIRONMENT: string
-  ENCRYPTION_MASTER_KEY: string  // base64 AES-256 key
-  JWT_SECRET: string
-  STRIPE_SECRET_KEY?: string
-  STRIPE_WEBHOOK_SECRET?: string
-}
-```
+All Cloudflare bindings are typed via `Env` in `apps/api/src/index.ts`. **Read it there** — the
+copy that used to live in this file drifted by about fifteen bindings (the rate-limiter Durable
+Object, the email binding, the key-ring and AAD vars, the GitHub OIDC vars, the sync denylists)
+before anyone noticed.
 
 ## Encryption Pattern
 
@@ -70,7 +61,7 @@ const plaintext = await decryptSecret(encryptedValue, wrappedDek, masterKey)
 
 When `isComputed = true`, the `value` column contains a template like `${DB_USER}:${DB_PASS}@host`.
 Resolution happens at fetch-time by substituting referenced secrets.
-Dependency tracking: `dependencies` column is JSON array of secret names referenced.
+Dependencies are derived at resolve time from the template, not stored. (An early design had a `dependencies` column; the live schema has none.)
 
 ## Branch Inheritance
 
@@ -79,21 +70,21 @@ Implement in `apps/api/src/routes/environments.ts` `/resolved` endpoint.
 
 ## Zero-Knowledge Share Links
 
-Share links: encryption key in URL fragment (never reaches server).
+Share links: the key is generated client-side and travels only in the URL fragment, so it never reaches the server. This is the one part of HushVault that is genuinely zero-knowledge; stored secrets are not (the server holds the master key).
 Server stores ciphertext only. Client decrypts in-browser.
 See `apps/api/src/routes/share.ts` for structure.
 
 ## Pricing Model
 
-| Tier | Price | Limits |
-|------|-------|--------|
-| Free | $0 | 3 projects, 100 secrets, 3 environments |
-| Pro | $12/mo | 10 projects, 1,000 secrets, unlimited environments |
-| Team | $99/mo | Unlimited, SSO, audit log, SCIM |
-| Enterprise | Custom | Custom domains, SLAs, support |
+**Do not copy a price sheet here.** `apps/web/src/lib/plans.ts` is the single source of truth, and
+it is explicit that only the self-hosted Free tier exists: there is no billing, no plan-limit
+enforcement beyond a few gates, no SSO and no SCIM, and every other tier's price is provisional.
+A table in this file duplicated those numbers with no "planned" marker, which read as a product
+commitment in a public repository.
 
-## Current Phase
+## Status and roadmap
 
-Phase 1 (MVP, Weeks 1-8): Auth, CRUD secrets, CLI `run` command, Cloudflare Pages sync.
-Phase 2 (Weeks 9-16): Computed secrets, branch inheritance, share links, GitHub Action.
-Phase 3 (Weeks 17-24): Dashboard UI, Stripe billing, SSO, public launch.
+Tracked in GitHub issues, not here — the roadmap epic is
+[#18](https://github.com/hushvaultdev/hushvault/issues/18), and `README.md` carries the
+what-works-today list. A phase plan written in this file went six months stale without anyone
+noticing.

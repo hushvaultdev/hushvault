@@ -20,7 +20,11 @@ const router = new Hono<{ Bindings: Env }>()
 
 router.get('/:id', async (c) => {
   const { id } = c.req.param()
-  const db = drizzle(c.env.DB)
+  // Raw prepared statement with every user value bound. No route builds a drizzle() instance;
+  // Drizzle is imported only by apps/api/src/db/schema.ts for the table definitions.
+  const result = await c.env.DB.prepare('SELECT ... FROM thing WHERE id = ? LIMIT 1')
+    .bind(id)
+    .first()
   // ...
   return c.json({ data: result })
 })
@@ -87,9 +91,11 @@ router.post('/', zValidator('json', createSecretSchema), async (c) => {
 
 ## ID Generation
 
-Use `nanoid()` for all record IDs. Never auto-increment integers (leaks record count).
+Use `createPrefixedId()` for all record IDs — 16 random bytes from `crypto.getRandomValues`,
+base64url, with a type prefix. Never auto-increment integers (leaks record count). `nanoid` is
+not a dependency of any workspace and appears nowhere in the source.
 
 ```typescript
-import { nanoid } from 'nanoid'
-const id = nanoid()
+import { createPrefixedId } from '../lib/auth.js'
+const id = createPrefixedId('sec')   // sec_…
 ```

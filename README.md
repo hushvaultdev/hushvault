@@ -16,10 +16,10 @@
 - Secrets CRUD with envelope encryption (AES-256-GCM via WebCrypto; KEK wraps a per-secret DEK)
 - Branch inheritance: per-environment parent/child resolution
 - Computed secrets: `${NAME}` templates evaluated server-side
-- Role-based access control (viewer / member / admin / owner) and API keys
+- Role-based access control (viewer / member / admin / owner) and API keys. Note: there is no way to add a second person to an organisation yet, so every account is a single-member organisation and the roles are not reachable in practice
 - Audit log API
 - GitHub and Google OAuth sign-in
-- One-time share links (API only; there is no web page for opening a link yet)
+- One-time share links: create with the CLI or API, open at `/share/<token>` in the dashboard (the value is encrypted in the browser before upload and decrypted in the recipient's browser; the server never sees the key)
 - GitHub secret-scanning callback (revokes leaked HushVault API keys)
 - Email verification and password reset (on the dev deployment; production rollout pending)
 - Short-lived sessions with rotating refresh tokens, and ciphertext bound to its record (AAD)
@@ -29,12 +29,17 @@
 
 **Planned, not built**
 
-- Integrations still planned: GitHub Actions, Cloudflare Pages, Slack, webhooks (status in `packages/shared/src/integrations.ts`)
-- Stripe billing, hosted paid plans, and plan-limit enforcement
+- Integrations still planned: Cloudflare Pages, Slack, webhooks (status in `packages/shared/src/integrations.ts`)
+- GitHub Actions: the API side is built (OIDC token exchange, per-repository access rules) and the
+  action itself lives in `apps/secrets-action/`, but it is **not released** — there is no published
+  `hushvaultdev/secrets-action` tag to reference from a workflow yet
+- Stripe billing and hosted paid plans. A few plan gates *are* already enforced (audit export,
+  audit retention, max 2 sync targets on Free) — and with no billing, every organisation is on
+  Free forever, so `GET /api/audit/export` currently returns 403 for everyone with no way to
+  unlock it
 - SSO/SAML
 - Team invites and member management
 - Rotation of secret values and compromise-response re-encryption (master-key rotation exists; see docs/ENCRYPTION.md)
-- Public web page for opening share links
 - Compliance attestations (e.g. SOC 2). None are held today.
 
 ---
@@ -47,7 +52,7 @@ HushVault started as a developer-first alternative to expensive secrets managers
 
 ## Local Development
 
-Requirements: Node.js **>= 22.13** (the API tests use `node:sqlite`, which needs no flags from 22.13) and pnpm >= 9.
+Requirements: Node.js **>= 22.13** (the API tests use `node:sqlite`, which needs no flags from 22.13) and pnpm **>= 10** (pnpm 9 blocks dependency build scripts differently, which breaks the CLI's keychain).
 
 ```bash
 git clone https://github.com/hushvaultdev/hushvault
@@ -106,7 +111,12 @@ base (shared vars)
 
 ## GitHub Actions
 
-Planned. The `hushvaultdev/secrets-action` action and GitHub Actions sync do not exist yet.
+Code complete, **not released**. The API accepts a GitHub OIDC token and exchanges it for a
+short-lived, environment-scoped read token (`POST /api/auth/github-oidc`), access is granted
+per repository with an explicit rule, and the action is in `apps/secrets-action/`.
+
+What is missing is only distribution: there is no published `hushvaultdev/secrets-action` tag, so
+no workflow can `uses:` it yet. See [docs/integrations/github-oidc.md](docs/integrations/github-oidc.md).
 
 ---
 
@@ -117,25 +127,44 @@ git clone https://github.com/hushvaultdev/hushvault
 cd hushvault
 pnpm install
 
-# Create D1 database and KV namespace
-wrangler d1 create hushvault-db
-wrangler kv:namespace create SECRETS_KV
+cd apps/api
 
-# Update wrangler.toml with the IDs, then deploy
+# Create the D1 database and the KV namespace, then put their ids in wrangler.toml
+wrangler d1 create hushvault-db
+wrangler kv namespace create SECRETS_KV
+
+# Required secrets (never in wrangler.toml)
+wrangler secret put ENCRYPTION_MASTER_KEY   # openssl rand -base64 32 — back this up offline
+wrangler secret put JWT_SECRET
+
+# Apply migrations (DB is the binding name, not the database name), then deploy
+wrangler d1 migrations apply DB --remote
 wrangler deploy
 ```
 
-Self-hosting targets the Cloudflare free tier, so it should cost $0/month for small workloads. Also run `wrangler d1 migrations apply hushvault-db` from `apps/api` and set secrets with `wrangler secret put`. Review the status above before relying on it.
+Then deploy the dashboard from `apps/web` (`pnpm run build:cf && wrangler deploy`) and set
+`WEB_APP_URL` and `API_PUBLIC_URL` in `apps/api/wrangler.toml` to your own hostnames.
+
+Two caveats on cost, stated plainly because the headline says $0:
+
+- The API Worker requires a **Durable Object** (`RATE_LIMITER`) and a **Cron Trigger** that runs
+  every minute. Check current Workers pricing for your account before assuming $0; we have not
+  verified the free-tier limits against this workload.
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is written for *this* project's Cloudflare account
+  (hardcoded `hushvault.dev` hostnames and pre-created resource ids), not as a third-party
+  self-hosting guide. Read it as a reference, not a recipe.
+
+Review the status section above before relying on any of this.
 
 ---
 
 ## Stack
 
 - **API:** [Hono](https://hono.dev) + [Cloudflare Workers](https://workers.cloudflare.com)
-- **Database:** [Cloudflare D1](https://developers.cloudflare.com/d1) + [Drizzle ORM](https://orm.drizzle.team)
+- **Database:** [Cloudflare D1](https://developers.cloudflare.com/d1) (raw prepared statements; [Drizzle](https://orm.drizzle.team) for the schema definition only)
 - **Secrets Storage:** [Cloudflare KV](https://developers.cloudflare.com/kv) (AES-256-GCM encrypted)
-- **Dashboard:** Next.js on [Cloudflare Pages](https://pages.cloudflare.com)
-- **CLI:** Commander.js + node-keytar (OS keychain)
+- **Dashboard:** Next.js 15 on [Cloudflare Workers](https://workers.cloudflare.com) via [OpenNext](https://opennext.js.org/cloudflare)
+- **CLI:** Commander.js + `keytar` (OS keychain; unmaintained upstream — see docs/CLI.md)
 - **Encryption:** Envelope encryption via WebCrypto API
 
 ---

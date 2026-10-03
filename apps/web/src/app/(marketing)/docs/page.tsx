@@ -20,12 +20,12 @@ export default function DocsPage() {
         <article className={styles['card']}>
           <h2>Quick start</h2>
           <p>Install the CLI, log in, initialize your project, and start setting secrets immediately.</p>
-          <a className={styles['link']} href="https://github.com/hushvaultdev/hushvault#quick-start" rel="noreferrer">Getting started</a>
+          <a className={styles['link']} href="https://github.com/hushvaultdev/hushvault#local-development" rel="noreferrer">Getting started</a>
         </article>
 
         <article className={styles['card']}>
           <h2>Encryption & key rotation</h2>
-          <p>Read how HushVault uses envelope encryption. Automated master key rotation is planned.</p>
+          <p>Read how HushVault uses envelope encryption, and how master-key rotation works as a versioned key ring with a scheduled re-wrap.</p>
           <a className={styles['link']} href="https://github.com/hushvaultdev/hushvault/blob/main/docs/ENCRYPTION.md" rel="noreferrer">Encryption design</a>
         </article>
 

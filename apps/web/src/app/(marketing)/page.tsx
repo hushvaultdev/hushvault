@@ -28,8 +28,17 @@ const trustPoints = [
   'Envelope encryption with AES-256-GCM',
   'Cloudflare Workers, D1, and KV runtime',
   'Open source with self-hosting path',
-  'Free to self-host on the Cloudflare free tier',
+  'Self-host on Cloudflare — designed for the free tier',
 ]
+
+// Said plainly, because listing encryption facts and nothing about key custody invites the
+// opposite inference — and because it is true, checkable, and the honest answer to the first
+// question anyone comparing secrets managers should ask. docs/ARCHITECTURE.md says the same.
+const keyCustodyNote =
+  'HushVault is not zero-knowledge for stored secrets: the server holds the master key and '
+  + 'decrypts them to serve them, which is what makes CI pulls and sync possible. Share links '
+  + 'are the exception — those are encrypted and decrypted in the browser, and the server never '
+  + 'sees the key.'
 
 const comparison = [
   { label: 'Computed secrets', hushvault: 'Server-side ${NAME} templates, included', others: 'Varies by vendor' },
@@ -115,6 +124,9 @@ export default function HomePage() {
               <p>{item}</p>
             </Card>
           ))}
+        </div>
+        <div className="page-container">
+          <p className={s('sectionNote')}>{keyCustodyNote}</p>
         </div>
       </Section>
 

@@ -32,7 +32,7 @@ Request and response bodies are JSON.
 Error codes are SCREAMING_SNAKE_CASE. Codes used by the routes: `UNAUTHORIZED` (401), `FORBIDDEN` (403),
 `PLAN_UPGRADE_REQUIRED` (403), `NOT_FOUND` (404), `CONFLICT` (409), `VALIDATION_ERROR` (400),
 `PAYLOAD_TOO_LARGE` (413), `INVALID_ENVIRONMENT_CHAIN` (422), `COMPUTED_SECRET_ERROR` (422),
-`RATE_LIMIT_EXCEEDED` (429), `INTERNAL_ERROR` / `DECRYPTION_FAILED` (500), `NOT_IMPLEMENTED` (501),
+`RATE_LIMIT_EXCEEDED` (429), `INTERNAL_ERROR` / `DECRYPTION_FAILED` (500),
 `OAUTH_NOT_CONFIGURED` (503). Error messages never contain secret values.
 
 One response does not follow this shape: an unknown path returns `404 {"error":"Not found"}` (no `message`).
@@ -81,31 +81,61 @@ Roles are hierarchical: `viewer < member < admin < owner`. Insufficient role ret
 | Read secrets (list names, get decrypted value, `resolved?values=true`) | yes | yes | yes | yes |
 | Create/update/delete secrets | no | yes | yes | yes |
 | Create share links | no | yes | yes | yes |
+| Revoke a share link (`DELETE /api/share/:id`) | no | yes | yes | yes |
 | Create/update/delete projects | no | no | yes | yes |
 | Create environments | no | no | yes | yes |
-| Set audit retention (`PUT /api/audit/retention`) | no | no | yes | yes |
-| Read audit log, retention, export | yes | yes | yes | yes |
-| Manage own API keys | yes | yes | yes | yes |
+| Set audit retention (`PUT /api/audit/retention`) | no | no | yes* | yes* |
+| List the organisation's live share links (`GET /api/share`) | no | no | yes | yes |
+| Read audit log, retention, export | no | no | yes | yes |
+| Manage own API keys | yes* | yes* | yes* | yes* |
 
-Notes: viewers can read plaintext secret values. Audit read endpoints have no role gate (export is gated by
-plan instead, see below). Registration creates the user as `owner` of a new organisation. There are no
-endpoints yet for inviting members or changing roles.
+`*` These routes additionally require a **signed-in person**: an API key is refused with `403`.
+That covers API-key creation and deletion (a credential must not be able to mint another
+credential, or the leaked-key revocation path can be defeated), audit-retention changes, and
+every integrations and CI-access route. Audit-retention changes also re-read the caller's
+membership per request, so a just-demoted admin loses the lever immediately rather than at the
+end of their token's lifetime.
+
+Notes: viewers can read plaintext secret values — this is deliberate, and worth knowing before
+granting the role. Audit reads are admin-only: the trail carries every member's IP, user agent
+and secret-read history, and the export can stream 50,000 rows per call. Registration creates the
+user as `owner` of a new organisation, and there are **no endpoints for inviting members or
+changing roles**, so in practice every organisation has exactly one member and the roles below
+`owner` are not reachable yet.
 
 ## Rate limits
 
-Per-client-IP fixed 60-second windows (identity: `cf-connecting-ip`, falling back to `x-forwarded-for`; the
-counter's backing store is being reworked). Limits stack: every `/api/*` request counts against `global-api`, plus the route scope.
-CORS preflight (`OPTIONS`) skips the global limit. **(may change: limits and internals are being reworked)**
+Fixed 60-second windows. The client identity is **only** `cf-connecting-ip` (set by Cloudflare's
+edge); `x-forwarded-for` is caller-controlled and is never used, so a request arriving without
+`cf-connecting-ip` shares one bucket with every other such request. Some scopes are keyed per
+organisation instead, which the table states per row. Limits stack: every `/api/*` request counts
+against `global-api`, plus the route scope. CORS preflight (`OPTIONS`) skips the global limit.
 
-| Scope | Applies to | Limit / min |
-|-------|------------|-------------|
-| `global-api` | all `/api/*` | 600 |
-| `auth-login` | `POST /api/auth/login` | 10 |
-| `auth-register` | `POST /api/auth/register` | 5 |
-| `auth-oauth` | `GET /api/auth/{github,google}` and `.../callback` | 20 |
-| `secret-read` | `GET /api/secrets`, `GET /api/secrets/:name`, `GET /api/environments/:id/resolved` | 120 |
-| `secret-write` | `POST/PATCH/DELETE /api/secrets` | 60 |
-| `share-access` | `GET /api/share/:token` | 20 |
+A window is aligned to the clock, so a caller can obtain up to 2× the limit across a boundary.
+
+| Scope | Applies to | Keyed on | Limit / min | On limiter outage |
+|-------|------------|----------|-------------|-------------------|
+| `global-api` | all `/api/*` | IP | 600 | degrades to a per-isolate counter |
+| `auth-login` | `POST /api/auth/login` | IP | 10 | 503 |
+| `auth-register` | `POST /api/auth/register` | IP | 5 | 503 |
+| `auth-oauth` | `GET /api/auth/{github,google}` and `.../callback` | IP | 20 | 503 |
+| `auth-refresh` | `POST /api/auth/{refresh,logout}` | IP | 60 | 503 |
+| `auth-forgot` | `POST /api/auth/forgot-password`, verification resend | IP | 5 | 503 |
+| `auth-token-submit` | `POST /api/auth/{verify-email,reset-password}` | IP | 10 | 503 |
+| `auth-oidc` | `POST /api/auth/github-oidc` | IP | 30 | 503 |
+| `secret-read` | `GET /api/secrets`, `GET /api/secrets/:name`, `GET /api/environments/:id/resolved` | IP | 120 | degrades to a per-isolate counter |
+| `secret-write` | `POST/PATCH/DELETE /api/secrets` | IP | 60 | degrades to a per-isolate counter |
+| `share-access` | `GET /api/share/:token` | IP | 20 | 503 |
+| `audit-read` | `GET /api/audit` | IP | 60 | degrades to a per-isolate counter |
+| `audit-export` | `GET /api/audit/export` | **organisation** | 6 | degrades to a per-isolate counter |
+| `integration-write` | integration and CI-access mutations | **organisation** | 20 | 503 |
+| `integration-run` | `POST /api/integrations/targets/:id/run` | **organisation** | 6 | 503 |
+| `integration-preview` | `POST /api/integrations/targets/:id/preview` | **organisation** | 12 | 503 |
+
+The secret and global scopes deliberately do not fail closed: a 503 there would stop every CI
+deploy worldwide during a limiter outage, and a rate limit is not what contains a stolen
+credential (revocation and the audit row are). They fall back to a per-isolate counter instead,
+which is weak but finite.
 
 Rate-limited responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`. When exceeded:
 
@@ -273,13 +303,8 @@ Referer; the web pages POST it. Verification links last 24 h, reset links 60 min
 
 Configuration: `MAIL_FROM`, the `EMAIL` send_email binding (Cloudflare Email Service; without it mail is not sent
 and the flows still return their normal responses), `EMAIL_DAILY_BUDGET` (global sends per day, default 200) and
-`REQUIRE_VERIFIED_EMAIL` (when set, API-key creation requires a verified email).
+`REQUIRE_VERIFIED_EMAIL` (when set, API-key creation and share-link creation both require a verified email).
 
-### POST /api/auth/github-oidc
-
-Not implemented. Always `501 NOT_IMPLEMENTED`.
-
----
 
 ## Projects
 
@@ -654,6 +679,13 @@ These are real quirks of the current API, documented rather than hidden:
   currently rejected as exceeding the plan limit; use `null`.
 - **API-key DELETE** removes the row, while the scanner soft-revokes (`revoked_at`); `revokedAt` in the list
   is therefore only set for scanner-revoked keys.
-- **Secret history** is recorded but not readable through the API.
-- **Roles in JWTs** are fixed at issue time (7 days); a role change does not affect existing JWTs.
+- **Secret history** is recorded but not readable through the API, and there is no endpoint to
+  list or restore a previous version.
+- **Audit export is unreachable in practice.** It requires the `team` or `enterprise` plan, and
+  with no billing every organisation is on `free` forever — so `GET /api/audit/export` returns
+  403 `PLAN_UPGRADE_REQUIRED` for every real caller today.
+- **Roles in JWTs** are fixed at issue time, for the 15-minute access-token lifetime; a refresh
+  re-reads the caller's membership and role, so a role change takes effect within one token
+  lifetime. Routes where that window is too long (integrations, CI access, audit retention) also
+  re-read the membership per request via `requireCurrentAdmin`.
 - **`GET /api/secrets/:name`** takes a name while PATCH/DELETE take an id.

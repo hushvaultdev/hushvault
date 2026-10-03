@@ -61,7 +61,7 @@ export default function FAQPage() {
         <article className={styles['card']}>
           <h2>How does master key rotation work?</h2>
           <p>
-            Envelope encryption is designed so that rotating the master key only requires re-wrapping the data encryption keys (DEKs); secret ciphertext in KV does not need to be re-encrypted. Automated rotation tooling is planned and is not available yet.
+            Envelope encryption means rotating the master key only requires re-wrapping the data encryption keys (DEKs); the secret ciphertext in KV is never touched. Rotation is implemented: you add the new key alongside the old one, point the deployment at it, and a scheduled job re-wraps the stored DEKs in batches while every row stays readable under whichever key version it was wrapped with. Admins can watch progress through the API.
           </p>
         </article>
 

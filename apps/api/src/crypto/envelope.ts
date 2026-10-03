@@ -3,7 +3,11 @@
  *
  * Pattern: Master Key (KEK) → wraps Data Encryption Key (DEK) → encrypts secret value
  *
- * Storage format: base64(iv):base64(ciphertext):base64(authTag)
+ * Storage format (two parts, not three — AES-GCM appends the 16-byte auth tag to the ciphertext):
+ *   legacy: base64(iv):base64(ciphertext+tag)
+ *   v2:     v2:base64(iv):base64(ciphertext+tag)     value blobs, AAD-bound to their record
+ *   c2:     c2:base64(iv):base64(ciphertext+tag)     integration credentials
+ * See docs/ENCRYPTION.md for the AAD definitions.
  */
 
 const ALGORITHM = 'AES-GCM'
