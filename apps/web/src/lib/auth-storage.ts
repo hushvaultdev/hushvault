@@ -43,6 +43,25 @@ export function hasSessionHint(): boolean {
   }
 }
 
+/** The key other tabs watch, so a sign-out in one tab is noticed by the rest. */
+export const SESSION_HINT_KEY = HINT_KEY
+
+/**
+ * Paths where a missing hint must NOT be taken as "no session".
+ *
+ * The hint is plain localStorage and is absent in more situations than "signed out": site data
+ * cleared selectively, storage blocked by policy or an extension, browser eviction, a cap on
+ * script-writable storage for low-interaction sites. In every one of those the HttpOnly refresh
+ * cookie is still valid, but a missing hint sent the user to /sign-in — and signing in again is
+ * the only way to recreate the hint, so the failure looks like "it logs me out on every reload".
+ * On a page that requires a session, spend the one refresh request and find out for real.
+ */
+const PROTECTED_PREFIXES = ['/dashboard', '/projects', '/audit', '/integrations', '/billing', '/onboarding']
+
+export function pathRequiresSession(pathname: string): boolean {
+  return PROTECTED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`))
+}
+
 // One-time cleanup of the pre-refresh-token storage so old 7-day tokens do not linger in browsers.
 export function purgeLegacyStorage(): void {
   if (typeof window === 'undefined') return

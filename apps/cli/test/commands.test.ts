@@ -4,11 +4,12 @@ import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient, ApiError, friendlyError } from '../src/api.js'
 import { getAction } from '../src/commands/get.js'
-import { runAction } from '../src/commands/run.js'
+import { buildChildEnv, describeInjection, runAction } from '../src/commands/run.js'
 import { setAction, readValue } from '../src/commands/set.js'
 import { initAction } from '../src/commands/init.js'
 import { shareAction } from '../src/commands/share.js'
 import { resolveEnvironment, type ProjectContext } from '../src/lib/context.js'
+import { DEFAULT_API_URL, parseProjectConfig } from '../src/config/project.js'
 import { FakeServer } from './fake-server.js'
 import { Readable } from 'stream'
 
@@ -204,5 +205,74 @@ describe('credential origin pinning', () => {
     } finally {
       delete process.env['HUSHVAULT_TOKEN']
     }
+  })
+})
+
+describe('child environment is an allowlist, not a denylist', () => {
+  it('removes every HUSHVAULT_* variable except the two that are not credentials', () => {
+    const saved = { ...process.env }
+    try {
+      // The names the old keyword denylist would have let through.
+      process.env['HUSHVAULT_TOKEN'] = 'tok'
+      process.env['HUSHVAULT_SESSION'] = 'sess'
+      process.env['HUSHVAULT_AUTH'] = 'auth'
+      process.env['HUSHVAULT_PAT'] = 'pat'
+      process.env['HUSHVAULT_REFRESH'] = 'refresh'
+      process.env['hushvault_token'] = 'lowercase'
+      process.env['HUSHVAULT_API_URL'] = 'https://api.example.test'
+      process.env['HUSHVAULT_CONFIG_DIR'] = '/tmp/cfg'
+      process.env['UNRELATED_VAR'] = 'keep me'
+
+      const child = buildChildEnv({ APP_KEY: 'v' }, true)
+      const leaked = Object.keys(child).filter((k) => /^HUSHVAULT_/i.test(k)).sort()
+      expect(leaked).toEqual(['HUSHVAULT_API_URL', 'HUSHVAULT_CONFIG_DIR'])
+      expect(child['UNRELATED_VAR']).toBe('keep me')
+      expect(child['APP_KEY']).toBe('v')
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
+      Object.assign(process.env, saved)
+    }
+  })
+})
+
+describe('.hushvault.json comes from a repository, so it is validated', () => {
+  const cases: [string, string][] = [
+    ['null', 'must contain a JSON object'],
+    ['[]', 'must contain a JSON object'],
+    ['"hello"', 'must contain a JSON object'],
+    ['not json at all', 'is not valid JSON'],
+    ['{"defaultEnv":"production"}', 'is missing "projectId"'],
+    ['{"projectId":"prj_1"}', 'is missing "defaultEnv"'],
+    ['{"projectId":123,"defaultEnv":"production"}', '"projectId" must be a string'],
+    ['{"projectId":"prj_1","defaultEnv":"production","apiUrl":7}', '"apiUrl" must be a string'],
+  ]
+
+  for (const [raw, expected] of cases) {
+    it(`rejects ${raw} with a message naming the file`, () => {
+      expect(() => parseProjectConfig(raw, '/repo/.hushvault.json')).toThrow(expected)
+      expect(() => parseProjectConfig(raw, '/repo/.hushvault.json')).toThrow('/repo/.hushvault.json')
+    })
+  }
+
+  it('accepts a well-formed config and defaults apiUrl', () => {
+    const config = parseProjectConfig('{"projectId":"prj_1","defaultEnv":"production"}', '/repo/.hushvault.json')
+    expect(config).toEqual({ projectId: 'prj_1', defaultEnv: 'production', apiUrl: DEFAULT_API_URL })
+  })
+})
+
+describe('describeInjection', () => {
+  // Without the project in the line, a checked-in config could point at a different project of
+  // yours and nothing on screen would show it.
+  const ctx = (projectName?: string) =>
+    ({ config: { projectId: 'prj_abc', defaultEnv: 'production', apiUrl: DEFAULT_API_URL, ...(projectName ? { projectName } : {}) } }) as never
+
+  it('names the project and the environment', () => {
+    expect(describeInjection(ctx('Billing API'), 'production', 3)).toBe(
+      'Injecting 3 secrets from production of Billing API (prj_abc)',
+    )
+  })
+
+  it('falls back to the id when the config has no name', () => {
+    expect(describeInjection(ctx(), 'staging', 0)).toBe('Injecting 0 secrets from staging of prj_abc')
   })
 })

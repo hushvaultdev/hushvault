@@ -20,6 +20,44 @@ function globalConfigFile(): string {
 }
 
 /**
+ * Validate a parsed .hushvault.json.
+ *
+ * This file comes from a repository, which may not be yours — `JSON.parse(raw) as HushVaultConfig`
+ * was a lie that surfaced as a confusing error much later: a file containing `null` produced
+ * "Cannot read properties of null", and `{"projectId": 123}` produced "Not logged in". Check the
+ * shape here and say which file is wrong.
+ */
+export function parseProjectConfig(raw: string, configPath: string): HushVaultConfig {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error(`${configPath} is not valid JSON.`)
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${configPath} must contain a JSON object.`)
+  }
+  const o = parsed as Record<string, unknown>
+  const str = (key: string, required: boolean): string | undefined => {
+    const v = o[key]
+    if (v === undefined || v === null) {
+      if (required) throw new Error(`${configPath} is missing "${key}".`)
+      return undefined
+    }
+    if (typeof v !== 'string') throw new Error(`${configPath}: "${key}" must be a string.`)
+    return v
+  }
+  const projectId = str('projectId', true) as string
+  const defaultEnv = str('defaultEnv', true) as string
+  const config: HushVaultConfig = { projectId, defaultEnv, apiUrl: str('apiUrl', false) ?? DEFAULT_API_URL }
+  const projectName = str('projectName', false)
+  if (projectName !== undefined) config.projectName = projectName
+  const createdAt = str('createdAt', false)
+  if (createdAt !== undefined) config.createdAt = createdAt
+  return config
+}
+
+/**
  * Walk up parent directories to find .hushvault.json (like git)
  */
 export async function findProjectConfig(startDir = process.cwd()): Promise<{ config: HushVaultConfig; configDir: string } | null> {
@@ -27,14 +65,18 @@ export async function findProjectConfig(startDir = process.cwd()): Promise<{ con
 
   while (true) {
     const configPath = path.join(currentDir, CONFIG_FILE)
+    let raw: string
     try {
-      const raw = await fs.readFile(configPath, 'utf8')
-      return { config: JSON.parse(raw) as HushVaultConfig, configDir: currentDir }
+      raw = await fs.readFile(configPath, 'utf8')
     } catch {
       const parent = path.dirname(currentDir)
       if (parent === currentDir) return null // reached filesystem root
       currentDir = parent
+      continue
     }
+    // Parse failures are reported, not swallowed: walking past a malformed config and silently
+    // picking up an ancestor's is worse than saying which file is broken.
+    return { config: parseProjectConfig(raw, configPath), configDir: currentDir }
   }
 }
 

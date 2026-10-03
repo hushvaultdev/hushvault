@@ -30,7 +30,10 @@ export default function ProjectPage() {
   const [envName, setEnvName] = useState('')
   const [secretName, setSecretName] = useState('')
   const [secretValue, setSecretValue] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [creatingEnv, setCreatingEnv] = useState(false)
+  const [creatingSecret, setCreatingSecret] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
@@ -80,7 +83,7 @@ export default function ProjectPage() {
   async function onCreateEnv(e: React.FormEvent) {
     e.preventDefault()
     if (!envName.trim()) return
-    setBusy(true)
+    setCreatingEnv(true)
     setError(null)
     try {
       const created = await apiFetch<{ id: string }>('/api/environments', {
@@ -93,14 +96,14 @@ export default function ProjectPage() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not create environment.')
     } finally {
-      setBusy(false)
+      setCreatingEnv(false)
     }
   }
 
   async function onCreateSecret(e: React.FormEvent) {
     e.preventDefault()
     if (!selectedEnvId || !secretName.trim()) return
-    setBusy(true)
+    setCreatingSecret(true)
     setError(null)
     try {
       await apiFetch('/api/secrets', {
@@ -113,7 +116,7 @@ export default function ProjectPage() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not create secret.')
     } finally {
-      setBusy(false)
+      setCreatingSecret(false)
     }
   }
 
@@ -137,14 +140,21 @@ export default function ProjectPage() {
     }
   }
 
+  // Deleting a secret cannot be undone — there is no restore endpoint and the value's KV blobs
+  // are removed — so it takes a confirmation, like the far less destructive integrations actions
+  // already do. The button also used to be visually identical to Reveal and Edit beside it.
   async function onDelete(secret: SecretRow) {
     if (!selectedEnvId) return
     setError(null)
+    setDeletingId(secret.id)
     try {
       await apiFetch(`/api/secrets/${secret.id}`, { method: 'DELETE' })
+      setConfirmDeleteId(null)
       await loadSecrets(selectedEnvId)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not delete secret.')
+    } finally {
+      setDeletingId(null)
     }
   }
 
@@ -179,9 +189,11 @@ export default function ProjectPage() {
     setError(null)
     try {
       await apiFetch(`/api/secrets/${secret.id}`, { method: 'PATCH', body: { value: editValue } })
-      // Keep the freshly saved value visible; the table only shows name/value/type,
-      // none of which change on a value edit, so a full reload is unnecessary.
-      setRevealed((prev) => ({ ...prev, [secret.id]: editValue }))
+      // Only keep it on screen if it was already revealed. Editing a masked secret used to leave
+      // its new value in cleartext on save, which the user never asked for.
+      if (revealed[secret.id] !== undefined) {
+        setRevealed((prev) => ({ ...prev, [secret.id]: editValue }))
+      }
       setEditingId(null)
       setEditValue('')
     } catch (err) {
@@ -206,11 +218,15 @@ export default function ProjectPage() {
 
       {!loading ? (
         <>
-          <div className={s('envBar')}>
+          <div className={s('envBar')} role="group" aria-label="Environment">
             {environments.map((env) => (
               <button
                 key={env.id}
                 type="button"
+                // aria-pressed, because the active chip differs only by border and a 12%-alpha
+                // background: on the one page where the wrong environment means editing the wrong
+                // secret, which one is selected has to be available without seeing colour.
+                aria-pressed={selectedEnvId === env.id}
                 className={`${s('envChip')} ${selectedEnvId === env.id ? s('envChipActive') : ''}`.trim()}
                 onClick={() => setSelectedEnvId(env.id)}
               >
@@ -226,7 +242,7 @@ export default function ProjectPage() {
                 onChange={(e) => setEnvName(e.target.value)}
                 style={{ minHeight: 40, padding: '8px 12px', borderRadius: 999, border: '1px solid var(--border)' }}
               />
-              <Button type="submit" variant="ghost" loading={busy}>Add env</Button>
+              <Button type="submit" variant="ghost" loading={creatingEnv}>Add env</Button>
             </form>
           </div>
 
@@ -241,9 +257,17 @@ export default function ProjectPage() {
                 <h2 style={{ margin: 0, fontSize: '1.1rem' }}>Add secret</h2>
                 <form className={s('inlineForm')} onSubmit={onCreateSecret}>
                   <Field label="Name" name="secretName" value={secretName} onChange={setSecretName} placeholder="DATABASE_URL" required />
-                  <Field label="Value" name="secretValue" value={secretValue} onChange={setSecretValue} placeholder="postgres://…" />
+                  <Field
+                    label="Value"
+                    name="secretValue"
+                    type="password"
+                    autoComplete="off"
+                    value={secretValue}
+                    onChange={setSecretValue}
+                    placeholder="postgres://…"
+                  />
                   <div className={s('formAction')}>
-                    <Button type="submit" variant="primary" loading={busy}>Add</Button>
+                    <Button type="submit" variant="primary" loading={creatingSecret}>Add</Button>
                   </div>
                 </form>
               </Card>
@@ -271,6 +295,8 @@ export default function ProjectPage() {
                               <input
                                 className={s('inlineInput')}
                                 aria-label={`Value for ${secret.name}`}
+                                type="password"
+                                autoComplete="off"
                                 value={editValue}
                                 onChange={(e) => setEditValue(e.target.value)}
                                 autoFocus
@@ -297,7 +323,26 @@ export default function ProjectPage() {
                                     {revealed[secret.id] !== undefined ? 'Hide' : 'Reveal'}
                                   </Button>
                                   <Button variant="ghost" onClick={() => onStartEdit(secret)}>Edit</Button>
-                                  <Button variant="ghost" onClick={() => onDelete(secret)}>Delete</Button>
+                                  {confirmDeleteId === secret.id ? (
+                                    <span role="alertdialog" aria-label={`Confirm deleting ${secret.name}`}>
+                                      <Button
+                                        variant="danger"
+                                        loading={deletingId === secret.id}
+                                        onClick={() => onDelete(secret)}
+                                      >
+                                        Delete for good
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        disabled={deletingId === secret.id}
+                                        onClick={() => setConfirmDeleteId(null)}
+                                      >
+                                        Keep it
+                                      </Button>
+                                    </span>
+                                  ) : (
+                                    <Button variant="ghost" onClick={() => setConfirmDeleteId(secret.id)}>Delete</Button>
+                                  )}
                                 </>
                               )}
                             </span>

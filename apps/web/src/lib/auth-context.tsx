@@ -3,7 +3,16 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
 import { apiFetch, endSession, refreshSession } from './api'
-import { clearSession, hasSessionHint, markSessionHint, purgeLegacyStorage, readSession, writeSession } from './auth-storage'
+import {
+  SESSION_HINT_KEY,
+  clearSession,
+  hasSessionHint,
+  markSessionHint,
+  pathRequiresSession,
+  purgeLegacyStorage,
+  readSession,
+  writeSession,
+} from './auth-storage'
 import type { Session } from './types'
 
 interface AuthContextValue {
@@ -30,7 +39,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // A page load has no access token in memory: trade the HttpOnly refresh cookie for one.
     // The OAuth callback adopts its own session, so skip the exchange there.
     purgeLegacyStorage()
-    if (window.location.pathname.startsWith('/auth/callback') || !hasSessionHint()) {
+    const pathname = window.location.pathname
+    // The hint only exists to keep public pages from making a pointless refresh request. On a page
+    // that needs a session it is not evidence of anything, so try the refresh anyway.
+    const shouldRefresh = hasSessionHint() || pathRequiresSession(pathname)
+    if (pathname.startsWith('/auth/callback') || !shouldRefresh) {
       setReady(true)
       return
     }
@@ -87,6 +100,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     clearSession()
     setSession(null)
     void endSession()
+  }, [])
+
+  // Signing out in one tab revokes the refresh family server-side, but another tab kept its
+  // in-memory access token and stayed fully able to read and write secrets until it expired. On a
+  // shared machine "I signed out" has to be true everywhere. endSession() removes the hint, which
+  // fires a storage event in every other tab of this origin.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== SESSION_HINT_KEY) return
+      if (hasSessionHint()) return
+      clearSession()
+      setSession(null)
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
   }, [])
 
   const value = useMemo<AuthContextValue>(

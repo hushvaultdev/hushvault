@@ -18,17 +18,23 @@ export function MarketingHeader() {
           </div>
         </Link>
 
+        {/*
+          Root-relative, not bare fragments. `#workflows` and `#trust` only exist on the home
+          page, so on /faq, /docs and /pricing these links — and the primary call to action —
+          did nothing at all. Pricing now points at the real /pricing route, which the nav
+          never linked to.
+        */}
         <nav className={s('nav')} aria-label="Primary navigation">
-          <a href="#workflows">Product</a>
-          <a href="#pricing">Pricing</a>
-          <a href="/faq">FAQ</a>
-          <a href="/docs">Docs</a>
-          <a href="#trust">Security</a>
+          <Link href="/#workflows">Product</Link>
+          <Link href="/pricing">Pricing</Link>
+          <Link href="/faq">FAQ</Link>
+          <Link href="/docs">Docs</Link>
+          <Link href="/#trust">Security</Link>
         </nav>
 
         <div className={s('actions')}>
           <Button href="/sign-in" variant="ghost">Sign In</Button>
-          <Button href="#pricing" variant="primary">Start Free</Button>
+          <Button href="/sign-up" variant="primary">Start Free</Button>
         </div>
       </div>
     </header>
