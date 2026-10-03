@@ -203,7 +203,10 @@ auditRoutes.put(
 
 // GET /api/audit/export — compliance export of the org's audit log as CSV/JSON.
 // Team/Enterprise plans only. Org-scoped, retention-filtered, capped row count.
-auditRoutes.get('/export', auditExportRateLimit, zValidator('query', exportQuerySchema), async (c) => {
+// Admin+: the trail carries every member's IP, user agent and secret-read history, so a
+// viewer-level credential reading the whole organisation's activity is a bulk-exfiltration
+// primitive, not a read-only convenience. The export can stream 50,000 rows per call.
+auditRoutes.get('/export', requireRole('admin'), auditExportRateLimit, zValidator('query', exportQuerySchema), async (c) => {
   const auth = c.get('auth')
   const { format, from, to, action, actorId } = c.req.valid('query')
 
@@ -253,7 +256,7 @@ auditRoutes.get('/export', auditExportRateLimit, zValidator('query', exportQuery
 
 // GET /api/audit — list the org's audit log (retention-filtered, paginated).
 // Supports from/to/action/actorId filters and keyset pagination via `cursor`.
-auditRoutes.get('/', auditReadRateLimit, zValidator('query', listQuerySchema), async (c) => {
+auditRoutes.get('/', requireRole('admin'), auditReadRateLimit, zValidator('query', listQuerySchema), async (c) => {
   const auth = c.get('auth')
   const { from, to, action, actorId, cursor } = c.req.valid('query')
 

@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
+import { execFileSync } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const require_ = createRequire(import.meta.url)
@@ -247,17 +248,28 @@ describe('names allowlist', () => {
   })
 })
 
-// The workflow runs dist/index.js (action.yml `main`), but every test above imports
-// src/index.js. If the two ever diverge, the shipped action is untested code.
-describe('shipped bundle', () => {
-  it('dist/index.js is byte-identical to src/index.js', () => {
-    const src = readFileSync(join(__dirname, '..', 'src', 'index.js'))
-    const dist = readFileSync(join(__dirname, '..', 'dist', 'index.js'))
-    expect(dist.equals(src)).toBe(true)
+// action.yml used to name dist/index.js, which .gitignore excluded, so the entrypoint
+// was never committed and the action failed to load for anyone using it from a ref.
+// It now runs src/index.js, which is the file these tests exercise. Keep it that way:
+// the action has no dependencies and needs no bundle, so a build step would only
+// reintroduce a second copy that can drift or go missing.
+describe('shipped entrypoint', () => {
+  it('action.yml runs the file the tests exercise, and it is committed', () => {
+    const yml = readFileSync(join(__dirname, '..', 'action.yml'), 'utf8')
+    expect(yml).toContain('main: src/index.js')
+    expect(yml).not.toContain('dist/')
+
+    const tracked = execFileSync('git', ['ls-files', '--error-unmatch', 'apps/secrets-action/src/index.js'], {
+      cwd: join(__dirname, '..', '..', '..'),
+      encoding: 'utf8',
+    })
+    expect(tracked.trim()).toBe('apps/secrets-action/src/index.js')
   })
 
-  it('action.yml points at the file the build produces', () => {
-    const yml = readFileSync(join(__dirname, '..', 'action.yml'), 'utf8')
-    expect(yml).toContain('dist/index.js')
+  it('needs no bundler: it requires only node builtins', () => {
+    const src = readFileSync(join(__dirname, '..', 'src', 'index.js'), 'utf8')
+    const required = [...src.matchAll(/require\(['"]([^'"]+)['"]\)/g)].map((m) => m[1])
+    expect(required.length).toBeGreaterThan(0)
+    for (const mod of required) expect(mod.startsWith('node:')).toBe(true)
   })
 })

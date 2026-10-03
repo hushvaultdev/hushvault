@@ -62,6 +62,15 @@ export async function writeAuditLog(env: Env, entry: {
 export function getRequestIp(c: { req: { header(name: string): string | undefined } }): string | null {
   return c.req.header('cf-connecting-ip') ?? null
 }
+/**
+ * One structured line for an operational event. Codes, counts and labels only — never a secret
+ * value, a key, a DEK, a token or anything a caller supplied. These lines are what an operator
+ * alerts on, so an event that means "a control just stopped working" must emit one.
+ */
+export function logEvent(event: string, fields: Record<string, string | number | boolean | null> = {}): void {
+  console.log(JSON.stringify({ level: 'info', event, ...fields }))
+}
+
 /** Log a key-ring configuration problem: error code and key version label only, never key material. */
 export function logKeyRingError(err: unknown): void {
   if (err instanceof KeyRingError) {

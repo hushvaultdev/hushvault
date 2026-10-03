@@ -44,8 +44,17 @@ export async function enqueueSyncForEnvironment(env: Env, envId: string, now: Da
        FROM sync_targets t
        WHERE t.deleted_at IS NULL AND t.sync_on_change = 1 AND t.status = 'active'
          AND t.env_id IN (
+           -- Descendants, pinned to the starting environment's own project. resolveEnvironment
+           -- already refuses an ancestor outside the project, so without the same predicate here
+           -- a cross-project parent link (a future environment move, a repair script, a restore)
+           -- would let one organisation's write enqueue runs against another's targets: not a
+           -- disclosure, since the run then resolves under its own org and fails, but it would
+           -- burn their run budget and flip their targets to needs_attention.
            WITH RECURSIVE descendants(id) AS (
-             SELECT ?3 UNION SELECT e.id FROM environments e JOIN descendants d ON e.parent_env_id = d.id
+             SELECT ?3
+             UNION
+             SELECT e.id FROM environments e JOIN descendants d ON e.parent_env_id = d.id
+             WHERE e.project_id = (SELECT project_id FROM environments WHERE id = ?3)
            ) SELECT id FROM descendants
          )
        ON CONFLICT (target_id) WHERE done_at IS NULL DO UPDATE SET changed_at = excluded.changed_at`,

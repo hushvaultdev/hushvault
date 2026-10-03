@@ -8,6 +8,7 @@ import { createPrefixedId } from '../lib/auth'
 import { enqueueSyncForEnvironment } from '../integrations/sync-scheduler'
 import { requireAuth, requireRole, secretReadRateLimit, secretWriteRateLimit } from '../middleware/auth'
 import { MAX_SECRET_VALUE_BYTES, getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
+import { KV_DELETE_CHUNK, allSecretBlobKeys, historyBlobKey, secretBlobKey } from '../lib/secret-blobs'
 
 export const secretRoutes = new Hono<{ Bindings: Env }>()
 
@@ -88,14 +89,14 @@ secretRoutes.get('/:name', secretReadRateLimit, async (c) => {
   }
 
   const secret = await c.env.DB.prepare(
-    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.enc_version, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.name = ? AND s.env_id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(name, envId, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; enc_version: number; is_computed: number; template: string | null; org_id: string }>()
+    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.enc_version, s.blob_rev, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.name = ? AND s.env_id = ? AND p.org_id = ? LIMIT 1',
+  ).bind(name, envId, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; enc_version: number; blob_rev: number; is_computed: number; template: string | null; org_id: string }>()
 
   if (!secret) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
   }
 
-  const encryptedValue = await c.env.SECRETS_KV.get(`secret:${secret.id}`)
+  const encryptedValue = await c.env.SECRETS_KV.get(secretBlobKey(secret.id, secret.blob_rev))
   if (!encryptedValue) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret value not found' }, 404)
   }
@@ -153,12 +154,13 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
   const { encryptedValue, wrappedDek, keyVersion, encVersion } = await encryptSecretWithRing(
     secretValue, await loadWriteRing(c.env), { projectId, envId, secretId },
   )
-  await c.env.SECRETS_KV.put(`secret:${secretId}`, encryptedValue)
+  const blobRev = 1
+  await c.env.SECRETS_KV.put(secretBlobKey(secretId, blobRev), encryptedValue)
 
   const now = new Date().toISOString()
   try {
     await c.env.DB.prepare(
-      'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, enc_version, is_computed, template, dependencies, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, enc_version, blob_rev, is_computed, template, dependencies, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).bind(
       secretId,
       projectId,
@@ -167,6 +169,7 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
       wrappedDek,
       keyVersion,
       encVersion,
+      blobRev,
       Boolean(isComputed),
       template ?? null,
       '[]',
@@ -175,7 +178,8 @@ secretRoutes.post('/', requireRole('member'), secretWriteRateLimit, zValidator('
       auth.userId,
     ).run()
   } catch (err) {
-    await c.env.SECRETS_KV.delete(`secret:${secretId}`).catch(() => undefined)
+    // The id is a fresh nanoid, so this key can never be reused; a failed delete only leaks storage.
+    await c.env.SECRETS_KV.delete(secretBlobKey(secretId, blobRev)).catch(() => undefined)
     if (isUniqueViolation(err)) {
       return conflict(c)
     }
@@ -208,8 +212,8 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
   }
 
   const current = await c.env.DB.prepare(
-    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.enc_version, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(id, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; enc_version: number; is_computed: number; template: string | null; org_id: string }>()
+    'SELECT s.id, s.project_id, s.env_id, s.name, s.wrapped_dek, s.key_version, s.enc_version, s.blob_rev, s.is_computed, s.template, p.org_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
+  ).bind(id, auth.orgId).first<{ id: string; project_id: string; env_id: string; name: string; wrapped_dek: string; key_version: string; enc_version: number; blob_rev: number; is_computed: number; template: string | null; org_id: string }>()
 
   if (!current) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
@@ -232,7 +236,6 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
   }
 
   const now = new Date().toISOString()
-  const kvKey = `secret:${id}`
 
   try {
     if (newPlaintext === undefined) {
@@ -240,37 +243,31 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
         'UPDATE secrets SET name = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
       ).bind(nextName, nextIsComputed, nextTemplate ?? null, now, id).run()
     } else {
-      const oldBlob = await c.env.SECRETS_KV.get(kvKey)
+      // Write-once blob, then move the pointer (migration 0014). The new ciphertext goes to
+      // a KV key that has never existed, so nothing can be left disagreeing with D1: if the
+      // D1 write below fails, the row still points at the previous revision, which still
+      // matches the wrapped DEK it is stored with, and the secret stays readable. The orphan
+      // is swept later. The previous code overwrote the live key first and tried to put the
+      // old bytes back on failure — a second write to the same key in the same request, which
+      // KV's one-write-per-second-per-key limit makes unreliable, so a failed update could
+      // leave the secret permanently undecryptable (and with it the whole environment).
+      const nextRev = current.blob_rev + 1
       const historyId = createPrefixedId('sech')
-      const historyKey = `secrethist:${historyId}`
       const { encryptedValue, wrappedDek, keyVersion, encVersion } = await encryptSecretWithRing(
         newPlaintext, await loadWriteRing(c.env), { projectId: current.project_id, envId: current.env_id, secretId: id },
       )
 
-      if (oldBlob !== null) {
-        await c.env.SECRETS_KV.put(historyKey, oldBlob)
-      }
-      try {
-        await c.env.SECRETS_KV.put(kvKey, encryptedValue)
-        const update = c.env.DB.prepare(
-          'UPDATE secrets SET name = ?, wrapped_dek = ?, key_version = ?, enc_version = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
-        ).bind(nextName, wrappedDek, keyVersion, encVersion, nextIsComputed, nextTemplate ?? null, now, id)
-        if (oldBlob !== null) {
-          const history = c.env.DB.prepare(
-            'INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, enc_version, changed_at, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          ).bind(historyId, id, current.wrapped_dek, current.key_version, current.enc_version, now, auth.userId)
-          await c.env.DB.batch([history, update])
-        } else {
-          await update.run()
-        }
-      } catch (err) {
-        // Best-effort rollback of KV so the old blob still matches the old wrapped DEK in D1.
-        if (oldBlob !== null) {
-          await c.env.SECRETS_KV.put(kvKey, oldBlob).catch(() => undefined)
-          await c.env.SECRETS_KV.delete(historyKey).catch(() => undefined)
-        }
-        throw err
-      }
+      await c.env.SECRETS_KV.put(secretBlobKey(id, nextRev), encryptedValue)
+
+      const update = c.env.DB.prepare(
+        'UPDATE secrets SET name = ?, wrapped_dek = ?, key_version = ?, enc_version = ?, blob_rev = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
+      ).bind(nextName, wrappedDek, keyVersion, encVersion, nextRev, nextIsComputed, nextTemplate ?? null, now, id)
+      // The history row points at the revision that already holds the old bytes rather than
+      // copying them to a second key, so a value change costs one KV write instead of two.
+      const history = c.env.DB.prepare(
+        'INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, enc_version, blob_rev, changed_at, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(historyId, id, current.wrapped_dek, current.key_version, current.enc_version, current.blob_rev, now, auth.userId)
+      await c.env.DB.batch([history, update])
     }
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -299,21 +296,30 @@ secretRoutes.delete('/:id', requireRole('member'), secretWriteRateLimit, async (
   const auth = c.get('auth')
   const { id } = c.req.param()
   const secret = await c.env.DB.prepare(
-    'SELECT s.id, s.env_id FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
-  ).bind(id, auth.orgId).first<{ id: string; env_id: string }>()
+    'SELECT s.id, s.env_id, s.blob_rev FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE s.id = ? AND p.org_id = ? LIMIT 1',
+  ).bind(id, auth.orgId).first<{ id: string; env_id: string; blob_rev: number }>()
 
   if (!secret) {
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
   }
 
-  const history = await c.env.DB.prepare('SELECT id FROM secret_history WHERE secret_id = ?').bind(id).all<{ id: string }>()
+  const history = await c.env.DB.prepare('SELECT id, blob_rev FROM secret_history WHERE secret_id = ?')
+    .bind(id).all<{ id: string; blob_rev: number | null }>()
+
+  // Every revision of the value, plus the pre-0014 per-history copies. Collected before
+  // the D1 delete, because afterwards there is nothing left to tell us which keys exist.
+  const blobKeys = new Set(allSecretBlobKeys(id, secret.blob_rev))
+  for (const row of history.results ?? []) blobKeys.add(historyBlobKey(id, row.id, row.blob_rev))
 
   // D1 first (history rows cascade); then remove blobs. Orphaned KV blobs are unreadable without their wrapped DEK.
   await c.env.DB.prepare('DELETE FROM secrets WHERE id = ?').bind(id).run()
   await enqueueSyncForEnvironment(c.env, secret.env_id)
-  await c.env.SECRETS_KV.delete(`secret:${id}`)
-  for (const row of history.results ?? []) {
-    await c.env.SECRETS_KV.delete(`secrethist:${row.id}`).catch(() => undefined)
+  // Bounded concurrency: a secret with many revisions must not turn one delete into a
+  // long serial chain of subrequests, and a single KV error must not 500 a request whose
+  // D1 row is already gone (the leftovers are unreadable, so they cost storage, not safety).
+  const keys = [...blobKeys]
+  for (let i = 0; i < keys.length; i += KV_DELETE_CHUNK) {
+    await Promise.all(keys.slice(i, i + KV_DELETE_CHUNK).map((k) => c.env.SECRETS_KV.delete(k).catch(() => undefined)))
   }
 
   await writeAuditLog(c.env, {

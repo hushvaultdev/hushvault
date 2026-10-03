@@ -4,7 +4,7 @@
   "private": true,
   "description": "GitHub Action that loads HushVault secrets using OIDC (no stored token).",
   "scripts": {
-    "build": "mkdir -p dist && cp src/index.js dist/index.js",
+    "type-check": "node --check src/index.js",
     "test": "vitest run"
   }
 }

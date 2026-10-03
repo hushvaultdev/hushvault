@@ -37,11 +37,12 @@ import {
   refreshRateLimit,
   registerRateLimit,
   requireAuth,
+  requireHuman,
   requireVerifiedEmailIfEnforced,
   tokenSubmitRateLimit,
 } from '../middleware/auth'
 import { consumeIdentityLimit, identityKey } from '../middleware/rate-limit'
-import { getRequestIp, writeAuditLog } from '../lib/security'
+import { getRequestIp, logEvent, writeAuditLog } from '../lib/security'
 import { consumeToken, issueToken, purgeExpiredTokens } from '../lib/auth-tokens'
 import { revokeApiKeysStatement, spendEmailBudget } from '../lib/account-security'
 import { sendEmail } from '../lib/email'
@@ -196,7 +197,12 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema), async
 })
 
 // POST /api/auth/api-keys
-authRoutes.post('/api-keys', requireAuth, requireVerifiedEmailIfEnforced, zValidator('json', apiKeySchema), async (c) => {
+//
+// requireHuman: a credential must never be able to mint another credential. Without it, an
+// attacker holding one leaked hv_live_* key could mint more, each with its own hash — so
+// GitHub's leak report would revoke the one key it saw while the attacker kept the rest, and
+// the owner would read the incident as contained. Deleting keys is gated for the same reason.
+authRoutes.post('/api-keys', requireAuth, requireHuman, requireVerifiedEmailIfEnforced, zValidator('json', apiKeySchema), async (c) => {
   const { name, expiresAt } = c.req.valid('json')
   const auth = c.get('auth')
   const db = c.env.DB
@@ -264,7 +270,7 @@ authRoutes.get('/api-keys', requireAuth, async (c) => {
 })
 
 // DELETE /api/auth/api-keys/:id
-authRoutes.delete('/api-keys/:id', requireAuth, async (c) => {
+authRoutes.delete('/api-keys/:id', requireAuth, requireHuman, async (c) => {
   const { id } = c.req.param()
   const auth = c.get('auth')
   const db = c.env.DB
@@ -343,7 +349,13 @@ async function processPasswordResetRequest(env: Env, email: string): Promise<voi
   const hashedEmail = await identityKey(email)
   const limit = await consumeIdentityLimit(env, { scope: 'forgot-email', identity: hashedEmail, limit: 3, windowMs: 3_600_000 })
   if (!('allowed' in limit) || !limit.allowed) return // throttled: stay silent, never a distinguishable 429
-  if (!(await spendEmailBudget(env, 'verify'))) return
+  // 'reset', not 'verify': the two buckets exist so that a sign-up flood cannot exhaust the
+  // budget that account recovery depends on. Spending the verify bucket here undid that, and
+  // the failure is invisible — forgot-password still answers 202 and sends nothing.
+  if (!(await spendEmailBudget(env, 'reset'))) {
+    logEvent('email.budget_exhausted', { kind: 'reset' })
+    return
+  }
 
   const member = await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(user.id).first<{ org_id: string }>()
   const { token } = await issueToken(env, { userId: user.id, purpose: 'reset_password', email: user.email })

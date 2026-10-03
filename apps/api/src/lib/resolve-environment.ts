@@ -1,14 +1,21 @@
 // Environment resolution shared by GET /api/environments/:id/resolved and the sync engine (issue #40):
 // branch inheritance (child overrides parent by name, depth-limited), per-org scoping, AAD-bound
 // decryption and computed-secret evaluation. Returns data or a coded failure; never logs values.
-import { decryptSecretWithRing, loadKeyRing } from '../crypto/envelope'
+import { KeyRingError, decryptSecretWithRing, loadKeyRing } from '../crypto/envelope'
 import type { Env } from '../index'
 import { describeComputedError, evaluateSecrets, type ComputedError } from './resolve'
-import { logKeyRingError } from './security'
+import { logEvent, logKeyRingError } from './security'
+import { secretBlobKey } from './secret-blobs'
 
 export const MAX_INHERITANCE_DEPTH = 10
 
-type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string; key_version: string; enc_version: number }
+/**
+ * Workers allows a small number of simultaneous outgoing connections per invocation, so a
+ * wider fan-out queues rather than going faster.
+ */
+const KV_READ_CONCURRENCY = 6
+
+type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string; key_version: string; enc_version: number; blob_rev: number }
 
 export type ResolvedSecret = {
   id: string
@@ -59,7 +66,7 @@ export async function resolveEnvironment(env: Env, orgId: string, environmentId:
 
   const rank = new Map(chain.map((envId, index) => [envId, index]))
   const rows = await env.DB.prepare(
-    `SELECT id, env_id, name, is_computed, template, wrapped_dek, key_version, enc_version FROM secrets WHERE project_id = ? AND env_id IN (${chain.map(() => '?').join(',')})`,
+    `SELECT id, env_id, name, is_computed, template, wrapped_dek, key_version, enc_version, blob_rev FROM secrets WHERE project_id = ? AND env_id IN (${chain.map(() => '?').join(',')})`,
   ).bind(environment.project_id, ...chain).all<SecretRow>()
 
   // Later (closer to the requested env) rank wins.
@@ -73,17 +80,36 @@ export async function resolveEnvironment(env: Env, orgId: string, environmentId:
   if (opts.values) {
     try {
       const ring = loadKeyRing(env)
-      for (const row of selected) {
-        if (row.is_computed) continue
-        const blob = await env.SECRETS_KV.get(`secret:${row.id}`)
-        if (blob === null) throw new Error('missing blob')
-        plain.set(row.name, await decryptSecretWithRing(
-          blob, row.wrapped_dek, row.key_version, ring,
-          { projectId: environment.project_id, envId: row.env_id, secretId: row.id }, row.enc_version,
-        ))
+      // This is the hot path for `hv run`, a CI pull and every sync run. One awaited KV read
+      // per secret made the request's latency the sum of them all and spent one subrequest
+      // each, so a large environment could run into Cloudflare's per-invocation subrequest
+      // ceiling. Fetch in bounded batches instead: concurrent enough to collapse the latency,
+      // small enough to stay under the simultaneous-connection limit.
+      const toFetch = selected.filter((row) => !row.is_computed)
+      for (let i = 0; i < toFetch.length; i += KV_READ_CONCURRENCY) {
+        const batch = toFetch.slice(i, i + KV_READ_CONCURRENCY)
+        const blobs = await Promise.all(batch.map((row) => env.SECRETS_KV.get(secretBlobKey(row.id, row.blob_rev))))
+        for (const [index, row] of batch.entries()) {
+          const blob = blobs[index]
+          if (blob === null || blob === undefined) throw new Error('missing blob')
+          plain.set(row.name, await decryptSecretWithRing(
+            blob, row.wrapped_dek, row.key_version, ring,
+            { projectId: environment.project_id, envId: row.env_id, secretId: row.id }, row.enc_version,
+          ))
+        }
       }
     } catch (err) {
       logKeyRingError(err)
+      // logKeyRingError only speaks for KeyRingError, so the most likely cause of a failure here
+      // used to produce no log line at all: one row still on enc_version 1 under ENFORCE_AAD makes
+      // the whole environment unreadable, and nothing said why. Error name only — never a value,
+      // a key or a secret id.
+      if (!(err instanceof KeyRingError)) {
+        logEvent('resolve.decrypt_failed', {
+          environmentId,
+          reason: err instanceof Error ? err.name : 'UnknownError',
+        })
+      }
       return { ok: false, code: 'DECRYPTION_FAILED' }
     }
   }

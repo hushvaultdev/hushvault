@@ -5,6 +5,7 @@ import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 import { requireAuth, requireRole } from '../middleware/auth'
+import { KV_DELETE_CHUNK, allSecretBlobKeys, historyBlobKey } from '../lib/secret-blobs'
 
 export const projectRoutes = new Hono<{ Bindings: Env }>()
 
@@ -22,7 +23,6 @@ const updateSchema = z.object({
   description: z.string().max(500).nullable().optional(),
 })
 
-const KV_DELETE_CHUNK = 50
 
 // Single place that turns user input into a URL-safe slug. Returns '' if nothing usable remains.
 function toSlug(input: string): string {
@@ -161,14 +161,19 @@ projectRoutes.delete('/:id', requireRole('admin'), async (c) => {
   }
 
   // Collect KV blob keys BEFORE the D1 cascade removes the rows that reference them.
-  const secretRows = await c.env.DB.prepare('SELECT id FROM secrets WHERE project_id = ?').bind(id).all<{ id: string }>()
+  const secretRows = await c.env.DB.prepare('SELECT id, blob_rev FROM secrets WHERE project_id = ?')
+    .bind(id).all<{ id: string; blob_rev: number }>()
   const historyRows = await c.env.DB.prepare(
-    'SELECT h.id AS id FROM secret_history h JOIN secrets s ON s.id = h.secret_id WHERE s.project_id = ?',
-  ).bind(id).all<{ id: string }>()
-  const kvKeys = [
-    ...(secretRows.results ?? []).map((r) => `secret:${r.id}`),
-    ...(historyRows.results ?? []).map((r) => `secrethist:${r.id}`),
-  ]
+    'SELECT h.id AS id, h.secret_id AS secret_id, h.blob_rev AS blob_rev FROM secret_history h JOIN secrets s ON s.id = h.secret_id WHERE s.project_id = ?',
+  ).bind(id).all<{ id: string; secret_id: string; blob_rev: number | null }>()
+  // Every revision of every value, deduplicated: a history row written since migration 0014
+  // points at one of the secret's own revisions rather than a copy of its own.
+  const kvKeySet = new Set<string>()
+  for (const r of secretRows.results ?? []) {
+    for (const key of allSecretBlobKeys(r.id, r.blob_rev)) kvKeySet.add(key)
+  }
+  for (const r of historyRows.results ?? []) kvKeySet.add(historyBlobKey(r.secret_id, r.id, r.blob_rev))
+  const kvKeys = [...kvKeySet]
 
   // D1 first: data must never be gone from KV while still present in D1.
   const result = await c.env.DB.prepare('DELETE FROM projects WHERE id = ? AND org_id = ?').bind(id, auth.orgId).run()

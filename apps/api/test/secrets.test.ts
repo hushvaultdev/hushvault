@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { createTestEnv, seedUser, seedApiKey, seedProject, seedEnvironment, call, type TestEnv } from './helpers/env'
+import { secretBlobKey } from '../src/lib/secret-blobs'
 
 const PLAINTEXT = 'super-secret-plaintext-value-12345'
 
 // Rate limiter also stores counters in KV, so only look at secret blobs.
 function blobKeys(env: TestEnv) {
   return [...env.SECRETS_KV.store.keys()].filter((k) => k.startsWith('secret:') || k.startsWith('secrethist:'))
+}
+
+/** The KV key the row currently points at. Never hardcode the layout in a test. */
+async function liveBlobKey(env: TestEnv, secretId: string) {
+  const row = await env.DB.prepare('SELECT blob_rev FROM secrets WHERE id = ?').bind(secretId).first<{ blob_rev: number }>()
+  return secretBlobKey(secretId, row?.blob_rev ?? 0)
 }
 
 async function setup() {
@@ -70,23 +77,33 @@ describe('secrets routes', () => {
     expect(got.body.data.isComputed).toBe(true)
   })
 
-  it('PATCH value writes history row and old blob', async () => {
+  it('PATCH value writes a new revision and leaves the old one untouched', async () => {
     const { env, member, projectId, envId } = ctx
     const res = await create(env, member.token, projectId, envId)
     const id = res.body.data.id
-    const oldBlob = env.SECRETS_KV.store.get(`secret:${id}`)
-    const oldRow = await env.DB.prepare('SELECT wrapped_dek, key_version FROM secrets WHERE id = ?').bind(id).first<{ wrapped_dek: string; key_version: string }>()
+    const oldKey = await liveBlobKey(env, id)
+    const oldBlob = env.SECRETS_KV.store.get(oldKey)
+    const oldRow = await env.DB.prepare('SELECT wrapped_dek, key_version, blob_rev FROM secrets WHERE id = ?').bind(id).first<{ wrapped_dek: string; key_version: string; blob_rev: number }>()
     const patch = await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'new-value' } })
     expect(patch.status).toBe(200)
     const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
     expect(got.body.data.value).toBe('new-value')
+
     const rows = (await env.DB.prepare('SELECT * FROM secret_history WHERE secret_id = ?').bind(id).all<any>()).results
     expect(rows).toHaveLength(1)
     expect(rows[0].wrapped_dek).toBe(oldRow?.wrapped_dek)
     expect(rows[0].key_version).toBe(oldRow?.key_version)
     expect(rows[0].changed_by).toBe(member.userId)
-    expect(env.SECRETS_KV.store.get(`secrethist:${rows[0].id}`)).toBe(oldBlob)
-    expect(env.SECRETS_KV.store.get(`secret:${id}`)).not.toBe(oldBlob)
+
+    // The history row points at the revision that already holds those bytes; nothing is copied.
+    expect(rows[0].blob_rev).toBe(oldRow?.blob_rev)
+    expect(blobKeys(env).filter((k) => k.startsWith('secrethist:'))).toHaveLength(0)
+
+    // The pointer moved to a key that did not exist before, and the old one is byte-identical.
+    const newKey = await liveBlobKey(env, id)
+    expect(newKey).not.toBe(oldKey)
+    expect(env.SECRETS_KV.store.get(oldKey)).toBe(oldBlob)
+    expect(env.SECRETS_KV.store.get(newKey)).not.toBe(oldBlob)
   })
 
   it('returns 409 on duplicate create and duplicate rename', async () => {
@@ -163,14 +180,15 @@ describe('secrets routes', () => {
     expect(p2.status).toBe(400)
   })
 
-  it('delete removes KV blob and history blobs', async () => {
+  it('delete removes every revision of the value', async () => {
     const { env, member, projectId, envId } = ctx
     const res = await create(env, member.token, projectId, envId)
     const id = res.body.data.id
     await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'v2' } })
     await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'v3' } })
     const keys = () => blobKeys(env)
-    expect(keys().filter((k) => k.startsWith('secrethist:'))).toHaveLength(2)
+    // Three values written, three revisions, no separate history copies.
+    expect(keys()).toHaveLength(3)
     const del = await call(env, 'DELETE', `/api/secrets/${id}`, { token: member.token })
     expect(del.status).toBe(200)
     expect(keys()).toHaveLength(0)
@@ -182,7 +200,7 @@ describe('secrets routes', () => {
   it('returns opaque DECRYPTION_FAILED when the blob is corrupt', async () => {
     const { env, member, projectId, envId } = ctx
     const res = await create(env, member.token, projectId, envId)
-    env.SECRETS_KV.store.set(`secret:${res.body.data.id}`, 'not-a-valid-blob')
+    env.SECRETS_KV.store.set(await liveBlobKey(env, res.body.data.id), 'not-a-valid-blob')
     const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
     expect(got.status).toBe(500)
     expect(got.body).toEqual({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' })
@@ -197,18 +215,33 @@ describe('secrets routes', () => {
     expect(blobKeys(env)).toHaveLength(0)
   })
 
-  it('restores the old KV blob when the D1 update fails', async () => {
+  // The whole point of the write-once layout: a failed D1 write cannot desynchronise KV
+  // from D1, so there is nothing to roll back and the secret stays readable. The old code
+  // overwrote the live key first and compensated with a second write to the same key,
+  // which KV's one-write-per-second-per-key limit makes unreliable.
+  it('leaves the secret readable when the D1 update fails', async () => {
     const { env, member, projectId, envId } = ctx
     const res = await create(env, member.token, projectId, envId)
     const id = res.body.data.id
-    const oldBlob = env.SECRETS_KV.store.get(`secret:${id}`)
+    const liveKey = await liveBlobKey(env, id)
+    const oldBlob = env.SECRETS_KV.store.get(liveKey)
+    expect(oldBlob).toBeTruthy()
+
     env.DB.sqlite.exec('CREATE TRIGGER fail_update BEFORE UPDATE ON secrets BEGIN SELECT RAISE(ABORT, \'boom\'); END')
     const p = await call(env, 'PATCH', `/api/secrets/${id}`, { token: member.token, json: { value: 'nope' } })
     expect(p.status).toBe(500)
-    expect(env.SECRETS_KV.store.get(`secret:${id}`)).toBe(oldBlob)
-    expect([...env.SECRETS_KV.store.keys()].filter((k) => k.startsWith('secrethist:'))).toHaveLength(0)
+
+    // The pointer never moved, and the bytes it points at were never touched.
+    expect(await liveBlobKey(env, id)).toBe(liveKey)
+    expect(env.SECRETS_KV.store.get(liveKey)).toBe(oldBlob)
     const hist = await env.DB.prepare('SELECT COUNT(*) AS n FROM secret_history').first<{ n: number }>()
     expect(hist?.n).toBe(0)
+
+    // And the secret is still decryptable, which is what the old design could not guarantee.
+    env.DB.sqlite.exec('DROP TRIGGER fail_update')
+    const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
+    expect(got.status).toBe(200)
+    expect(got.body.data.value).toBe(PLAINTEXT)
   })
 
   it('works with API-key bearer auth for a member', async () => {
