@@ -4,7 +4,7 @@ import { z } from 'zod'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { requireAuth, requireRole, requireVerifiedEmailIfEnforced, shareAccessRateLimit } from '../middleware/auth'
-import { getRequestIp, writeAuditLog } from '../lib/security'
+import { getRequestIp, logEvent, writeAuditLog } from '../lib/security'
 
 export const shareRoutes = new Hono<{ Bindings: Env }>()
 
@@ -47,7 +47,7 @@ shareRoutes.post('/', requireAuth, requireVerifiedEmailIfEnforced, requireRole('
   const token = createPrefixedId('tok')
 
   await c.env.DB.prepare(
-    'INSERT INTO share_links (id, token, encrypted_payload, expires_at, max_views, view_count, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO share_links (id, token, encrypted_payload, expires_at, max_views, view_count, created_by, org_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).bind(
     id,
     token,
@@ -57,6 +57,8 @@ shareRoutes.post('/', requireAuth, requireVerifiedEmailIfEnforced, requireRole('
     maxViews ?? 1,
     0,
     auth.userId,
+    // Recorded here so the access audit row does not depend on the creator still existing.
+    auth.orgId,
     new Date(now).toISOString(),
   ).run()
 
@@ -82,37 +84,93 @@ shareRoutes.get('/:token', shareAccessRateLimit, async (c) => {
   // Single atomic statement: concurrent requests cannot exceed max_views.
   // Missing, expired and exhausted links are indistinguishable to the caller.
   const row = await c.env.DB.prepare(
-    'UPDATE share_links SET view_count = view_count + 1 WHERE token = ? AND view_count < max_views AND expires_at > ? RETURNING id, encrypted_payload, created_by',
+    'UPDATE share_links SET view_count = view_count + 1 WHERE token = ? AND view_count < max_views AND expires_at > ? RETURNING id, encrypted_payload, org_id',
   )
     .bind(token, new Date().toISOString())
-    .first<{ id: string; encrypted_payload: string; created_by: string | null }>()
+    .first<{ id: string; encrypted_payload: string; org_id: string | null }>()
 
   if (!row) {
     return c.json({ error: 'NOT_FOUND', message: 'Share link unavailable' }, 404)
   }
 
-  // Best-effort audit (never includes the token); must not block delivery.
-  try {
-    if (row.created_by) {
-      const org = await c.env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
-        .bind(row.created_by)
-        .first<{ org_id: string }>()
-      if (org) {
-        await writeAuditLog(c.env, {
-          orgId: org.org_id,
-          actorId: null,
-          actorType: 'system',
-          action: 'share.access',
-          resourceType: 'share_link',
-          resourceId: row.id,
-          ip: getRequestIp(c),
-          userAgent: c.req.header('user-agent'),
-        })
-      }
-    }
-  } catch {
-    // audit failure is intentionally swallowed
+  // A link created before migration 0015, by a user who has since been deleted, has no owner to
+  // audit against. Delivering a secret that nothing can record is worse than reporting the link
+  // unavailable, so this fails closed — with the same body as every other failure, so it is not
+  // an oracle. The view is already consumed, which is the conservative direction.
+  if (!row.org_id) {
+    logEvent('share.unattributed_refused', { shareId: row.id })
+    return c.json({ error: 'NOT_FOUND', message: 'Share link unavailable' }, 404)
   }
 
+  // The audit row is awaited and not swallowed: the payload is only returned once the access is
+  // recorded. It used to be best-effort inside an empty catch, so a failed write delivered the
+  // secret silently.
+  await writeAuditLog(c.env, {
+    orgId: row.org_id,
+    actorId: null,
+    actorType: 'system',
+    action: 'share.access',
+    resourceType: 'share_link',
+    resourceId: row.id,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+
   return c.json({ data: { encryptedPayload: row.encrypted_payload } })
+})
+
+// GET /api/share — the organisation's live links. Never the payload and never the token:
+// knowing a link exists must not be enough to open it. Admins only, because this is the
+// "what of ours is currently in flight" view.
+shareRoutes.get('/', requireAuth, requireRole('admin'), async (c) => {
+  const auth = c.get('auth')
+  const rows = await c.env.DB.prepare(
+    `SELECT id, created_by, created_at, expires_at, max_views, view_count
+       FROM share_links
+      WHERE org_id = ? AND expires_at > ? AND view_count < max_views
+      ORDER BY created_at DESC LIMIT 200`,
+  ).bind(auth.orgId, new Date().toISOString()).all<{
+    id: string; created_by: string | null; created_at: string; expires_at: string; max_views: number; view_count: number
+  }>()
+
+  return c.json({
+    data: (rows.results ?? []).map((r) => ({
+      id: r.id,
+      createdBy: r.created_by,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at,
+      maxViews: r.max_views,
+      viewCount: r.view_count,
+    })),
+  })
+})
+
+// DELETE /api/share/:id — revoke a link before it is opened.
+//
+// Pasting a share URL into the wrong channel used to be unrecoverable: there was no revoke, so
+// the only option was to wait out a TTL of up to seven days with up to 100 views remaining. The
+// row is deleted rather than marked, so the ciphertext stops existing too. Scoped by org_id, and
+// by id (not token) so revoking never requires handling the secret-bearing part of the URL.
+shareRoutes.delete('/:id', requireAuth, requireRole('member'), async (c) => {
+  const auth = c.get('auth')
+  const { id } = c.req.param()
+
+  const result = await c.env.DB.prepare('DELETE FROM share_links WHERE id = ? AND org_id = ?')
+    .bind(id, auth.orgId).run()
+  if (!result.success || !result.meta.changes) {
+    return c.json({ error: 'NOT_FOUND', message: 'Share link not found' }, 404)
+  }
+
+  await writeAuditLog(c.env, {
+    orgId: auth.orgId,
+    actorId: auth.userId,
+    actorType: auth.actorType,
+    action: 'share.revoke',
+    resourceType: 'share_link',
+    resourceId: id,
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
+
+  return c.json({ data: { revoked: true } })
 })

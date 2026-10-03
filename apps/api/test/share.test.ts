@@ -101,3 +101,69 @@ describe('share links', () => {
     expect(res.status).toBe(403)
   })
 })
+
+describe('share link ownership, listing and revocation', () => {
+  it('refuses to deliver a link that has no organisation to audit against', async () => {
+    const env = createTestEnv()
+    const { token, orgId } = await seedUser(env, { role: 'member', emailVerified: true })
+    const created = await call(env, 'POST', '/api/share', { token, json: { encryptedPayload: 'CIPHERTEXT' } })
+    expect(created.status).toBe(201)
+
+    // The pre-0015 state: created_by nulled by a user deletion, no owning organisation.
+    await env.DB.prepare('UPDATE share_links SET org_id = NULL, created_by = NULL').run()
+
+    const got = await call(env, 'GET', `/api/share/${created.body.data.token}`)
+    expect(got.status).toBe(404)
+    expect(got.body).toEqual({ error: 'NOT_FOUND', message: 'Share link unavailable' })
+
+    const rows = await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'share.access' AND org_id = ?")
+      .bind(orgId).first<{ n: number }>()
+    expect(rows?.n).toBe(0)
+  })
+
+  it('records the access against the organisation that created it', async () => {
+    const env = createTestEnv()
+    const { token, orgId } = await seedUser(env, { role: 'member', emailVerified: true })
+    const created = await call(env, 'POST', '/api/share', { token, json: { encryptedPayload: 'CIPHERTEXT' } })
+    expect((await call(env, 'GET', `/api/share/${created.body.data.token}`)).status).toBe(200)
+
+    const rows = await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'share.access' AND org_id = ?")
+      .bind(orgId).first<{ n: number }>()
+    expect(rows?.n).toBe(1)
+  })
+
+  it('lists live links without the payload or the token, admin only', async () => {
+    const env = createTestEnv()
+    const admin = await seedUser(env, { role: 'admin', emailVerified: true })
+    const member = await seedUser(env, { role: 'member', orgId: admin.orgId, emailVerified: true })
+    await call(env, 'POST', '/api/share', { token: member.token, json: { encryptedPayload: 'CIPHERTEXT' } })
+
+    expect((await call(env, 'GET', '/api/share', { token: member.token })).status).toBe(403)
+
+    const list = await call(env, 'GET', '/api/share', { token: admin.token })
+    expect(list.status).toBe(200)
+    expect(list.body.data).toHaveLength(1)
+    expect(JSON.stringify(list.body)).not.toContain('CIPHERTEXT')
+    expect(JSON.stringify(list.body)).not.toContain('tok_')
+    expect(list.body.data[0]).toMatchObject({ createdBy: member.userId, maxViews: 1, viewCount: 0 })
+  })
+
+  it('revokes a link so the URL stops working, and refuses another organisation', async () => {
+    const env = createTestEnv()
+    const mine = await seedUser(env, { role: 'member', emailVerified: true })
+    const other = await seedUser(env, { role: 'member', emailVerified: true })
+    const created = await call(env, 'POST', '/api/share', { token: mine.token, json: { encryptedPayload: 'CIPHERTEXT' } })
+    const id = (await env.DB.prepare('SELECT id FROM share_links LIMIT 1').first<{ id: string }>())?.id as string
+
+    expect((await call(env, 'DELETE', `/api/share/${id}`, { token: other.token })).status).toBe(404)
+    expect((await call(env, 'GET', `/api/share/${created.body.data.token}`)).status).toBe(200)
+
+    const second = await call(env, 'POST', '/api/share', { token: mine.token, json: { encryptedPayload: 'AGAIN', maxViews: 5 } })
+    const secondId = (await env.DB.prepare("SELECT id FROM share_links WHERE encrypted_payload = 'AGAIN'").first<{ id: string }>())?.id as string
+    expect((await call(env, 'DELETE', `/api/share/${secondId}`, { token: mine.token })).status).toBe(200)
+    expect((await call(env, 'GET', `/api/share/${second.body.data.token}`)).status).toBe(404)
+
+    const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM share_links WHERE encrypted_payload = 'AGAIN'").first<{ n: number }>()
+    expect(left?.n).toBe(0)
+  })
+})

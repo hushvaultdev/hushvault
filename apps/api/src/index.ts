@@ -16,6 +16,7 @@ import { securityHeaders } from './middleware/security-headers'
 import { globalApiRateLimit } from './middleware/auth'
 import { RateLimiter } from './lib/rate-limiter-do'
 import { SecretTooLargeError, redactPath } from './lib/security'
+import { housekeepingTick } from './lib/housekeeping'
 import { rotationTick } from './lib/key-rotation'
 import { syncTick } from './integrations/sync-scheduler'
 import type { EmailBinding } from './lib/email'
@@ -178,5 +179,8 @@ export default {
     ctx.waitUntil(rotationTick(env).then(() => undefined, () => undefined))
     // Automatic sync triggers (M4): outbox, schedules, retries. Independent of rotation; never throws.
     ctx.waitUntil(syncTick(env).then(() => undefined, () => undefined))
+    // Retention and purge deletes (audit log, expired share links, used auth tokens). Nothing
+    // else removes these rows, so without this they grow until D1's storage limit stops writes.
+    ctx.waitUntil(housekeepingTick(env).then(() => undefined, () => undefined))
   },
 }
