@@ -30,10 +30,12 @@ Tracked in [issue #89](https://github.com/hushvaultdev/hushvault/issues/89).
 
 `hashPassword()` in `apps/api/src/lib/auth.ts` derives password hashes with PBKDF2-HMAC-SHA256,
 **100,000 iterations**, 256-bit output, 16-byte random salt per user. OWASP's Password Storage
-Cheat Sheet recommends **600,000** for PBKDF2-HMAC-SHA256 — verified at source in issue #89
-(<https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html>); that domain
-is egress-blocked from the dev container, so it was **[unverified]** at the time of this
-measurement and the 600,000 figure is taken from the issue.
+Cheat Sheet recommends **600,000** for PBKDF2-HMAC-SHA256 **[verified]** — read from the cheat
+sheet's own source, which quotes "PBKDF2-HMAC-SHA256: 600,000 iterations (recommended)" alongside
+220,000 for PBKDF2-HMAC-SHA512
+(<https://github.com/OWASP/CheatSheetSeries/blob/master/cheatsheets/Password_Storage_Cheat_Sheet.md>;
+the rendered site at cheatsheetseries.owasp.org is egress-blocked from the dev container, so the
+repository source was used instead).
 
 The reason given for 100,000 has always been the Workers CPU-time limit. That reason is now
 measured rather than asserted.
