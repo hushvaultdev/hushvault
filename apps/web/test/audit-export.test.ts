@@ -66,10 +66,16 @@ describe('retentionNote', () => {
     )
   })
 
-  it('credits the organisation when an override is the window in force', () => {
-    expect(retentionNote(retention({ overrideDays: 3, effectiveDays: 3 }))).toMatch(
-      /^Events are kept for 3 days, from this organisation’s retention setting\./,
-    )
+  // An override narrows what the API shows; the cron sweep deletes by the PLAN window and
+  // ignores the override on purpose, so that an admin cannot destroy the trail of their own
+  // actions. The note must therefore say "hidden", not "deleted" — and must not claim the
+  // events are gone when they are still in D1.
+  it('says an override hides events rather than deleting them', () => {
+    const note = retentionNote(retention({ overrideDays: 3, effectiveDays: 3 })) as string
+    expect(note).toContain('older than 3 days are hidden')
+    expect(note).toContain('this organisation’s retention setting')
+    expect(note).toContain('still stored')
+    expect(note).not.toContain('deleted')
   })
 
   it('credits the plan when a stale override is clamped by the plan cap', () => {
@@ -85,7 +91,8 @@ describe('retentionNote', () => {
   })
 
   it('uses a singular day for a one-day window', () => {
-    expect(retentionNote(retention({ overrideDays: 1, effectiveDays: 1 }))).toContain('1 day,')
+    expect(retentionNote(retention({ overrideDays: 1, effectiveDays: 1 }))).toContain('older than 1 day are')
+    expect(retentionNote(retention({ overrideDays: null, effectiveDays: 1, planMaxDays: 1 }))).toContain('for 1 day on the')
   })
 })
 

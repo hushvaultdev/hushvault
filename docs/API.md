@@ -579,7 +579,7 @@ Read-only encryption key status for the caller's organisation. Roles: `admin`, `
 
 ## Audit
 
-Prefix `/api/audit`. All routes require auth; reads have no minimum role. All queries are scoped to the
+Prefix `/api/audit`. All routes require auth, and **reads are admin-only** (the trail carries every member's IP, user agent and secret-read history, and the export can stream 50,000 rows per call). All queries are scoped to the
 caller's organisation and to its retention window (older rows are never returned).
 
 Retention by plan: `free` 7 days, `pro` 90, `team` 365, `enterprise` unlimited; unknown plans are treated as 7.

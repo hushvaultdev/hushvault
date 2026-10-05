@@ -69,8 +69,14 @@ export function retentionNote(retention: AuditRetention | null): string | null {
   const window = `${retention.effectiveDays} ${retention.effectiveDays === 1 ? 'day' : 'days'}`
   // Only credit the override when it is the value actually in force — a plan change can leave a
   // stale override that the plan cap clamps, and claiming it would misreport the cause.
+  //
+  // The two branches differ in more than attribution: an organisation's override narrows what the
+  // API *shows*, while the cron sweep deletes by the **plan** window and deliberately ignores the
+  // override — otherwise an admin could permanently destroy the trail of their own actions with
+  // one call. So an override hides older events; it does not delete them. Saying "deleted" here
+  // would be false, and falsely reassuring.
   if (retention.overrideDays !== null && retention.overrideDays === retention.effectiveDays) {
-    return `Events are kept for ${window}, from this organisation’s retention setting. Anything older is deleted.`
+    return `Events older than ${window} are hidden by this organisation’s retention setting. They are still stored until the ${planLabel(retention.plan)} plan’s ${retention.planMaxDays}-day window expires.`
   }
   return `Events are kept for ${window} on the ${planLabel(retention.plan)} plan. Anything older is deleted.`
 }
