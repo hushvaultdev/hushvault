@@ -107,6 +107,10 @@ Watch:
   <https://developers.cloudflare.com/d1/platform/limits/>,
   <https://developers.cloudflare.com/kv/platform/limits/>.
 - The audit log (D1 `audit_log` table, `GET /api/audit`) for unexpected `api_key` actors or off-hours access.
+  Reads are admin-only.
+- Email: `email.not_configured`, `email.send_failed` and `email.budget_exhausted` (section 6).
+  These are the only signal that mail has stopped — the auth endpoints keep answering normally
+  when it has.
 
 ## 4. Routine tasks
 
@@ -115,7 +119,9 @@ Watch:
 | Pending migrations | `pnpm --filter @hushvault/api db:migrations:list:production` |
 | Live logs | `wrangler tail --env production` |
 | Recent deployments | `wrangler deployments list --env production` |
-| Rotate a Worker secret (e.g. JWT_SECRET) | `wrangler secret put JWT_SECRET --env production` (invalidates existing sessions) |
+| Rotate a Worker secret (e.g. JWT_SECRET) | `wrangler secret put JWT_SECRET --env production` (invalidates existing sessions, and re-pushes every synced secret — DEPLOYMENT.md § 3) |
+| Confirm the email binding is live | `wrangler deploy --dry-run --env production` — look for `env.EMAIL` |
+| Is a rotation safe to finish? | `GET /api/security/key-rotation` → `safeToRetireOldKeys` |
 
 ## 5. Incident response
 
@@ -152,3 +158,125 @@ GitHub Environment secret, review Worker deployment history
 ### Bad deploy
 
 `wrangler rollback --env <env>`; see DEPLOYMENT.md for what rollback does not undo.
+
+## 6. Transactional email
+
+Issue #26. Code: `apps/api/src/lib/email.ts` (sender), `email-templates.ts` (bodies),
+`account-security.ts` (budget), `routes/auth.ts` (callers).
+
+### What sends mail
+
+Four messages, and nothing else:
+
+| Trigger | Message | Budget bucket |
+|---|---|---|
+| `POST /api/auth/register` | Verify your email address | `verify` |
+| `POST /api/auth/verify-email/send` (resend) | Verify your email address | `verify` |
+| `POST /api/auth/forgot-password` | Reset your password | `reset` |
+| `POST /api/auth/reset-password` (after success) | Your password was changed | `reset` |
+
+Every send runs in the background after the response is decided, so **a failed send never
+fails the request that triggered it**. One completed reset therefore spends **two** from the
+`reset` bucket: the link, then the notice.
+
+### Configuration
+
+| Setting | Where | Notes |
+|---|---|---|
+| `send_email` binding named `EMAIL` | `wrangler.toml`, per env (non-inheritable) | Live on `[env.dev]`. **Commented out on production** pending domain onboarding (#75) |
+| `MAIL_FROM` | `[vars]`, per env | `no-reply@hushvault.dev`. Must match `allowed_sender_addresses` on the binding |
+| `EMAIL_DAILY_BUDGET` | `[vars]`, optional | Global sends per day **per bucket**. Default 200 |
+| `REQUIRE_VERIFIED_EMAIL` | `[vars]`, optional | When set, API-key creation **and** share-link creation require a verified address (403 `EMAIL_NOT_VERIFIED`). Off by default |
+
+**With no binding, or no `MAIL_FROM`, nothing is sent and every auth endpoint still responds
+normally.** That is deliberate — sign-in, registration and reset must not break because mail is
+misconfigured — but it means a silent misconfiguration looks exactly like working software.
+The only signal is one `email.not_configured` log line per isolate (logged once, not per send).
+
+### Rate limits and budgets
+
+Four layers, outermost first:
+
+- **Per IP** — `auth-forgot` 5/min on forgot-password, `auth-token-submit` 10/min on
+  verify-email and reset-password. Both fail **closed** (503) if the limiter is unavailable.
+- **Per email address** — `forgot-email`, 3/hour, keyed on a hash of the address, so the
+  address never becomes a limiter key.
+- **Per user** — resend is 1/min and 5/hour (`verify-send-min`, `verify-send-hour`).
+- **Global daily, per bucket** — `email-send-verify` and `email-send-reset`, default 200/day
+  each. Two buckets on purpose: a sign-up flood must not be able to exhaust the budget that
+  account recovery depends on.
+
+`spendEmailBudget` returns false both when the budget is spent **and when the Durable Object
+limiter is unavailable**, and the caller then silently skips the send. So "no mail" can mean
+"budget spent" or "limiter down", and the two are not distinguished.
+
+### Error codes
+
+`mapEmailError` collapses provider errors into these; provider detail never leaves the module
+and never reaches a client.
+
+| Code | Means | Action |
+|---|---|---|
+| `EMAIL_NOT_CONFIGURED` | No binding or no `MAIL_FROM` | Config, not an incident. See the table above |
+| `RECIPIENT_SUPPRESSED` | Provider is refusing this address (earlier bounce or complaint) | Remove it from the suppression list in the dashboard, or the user needs a different address |
+| `RATE_LIMITED` | Provider's own limit, not ours | Check the provider quota; ours is below it by design |
+| `SENDER_NOT_VERIFIED` | `MAIL_FROM` is not an allowed sender for the binding | Domain onboarding or `allowed_sender_addresses` mismatch |
+| `SEND_FAILED` | Anything else | Check the logs for the preceding line |
+
+### Log events to search
+
+All code-only: no address, link, token or subject is ever logged.
+
+```
+email.not_configured              # once per isolate; the binding or MAIL_FROM is missing
+email.send_failed                 # carries `code` from the table above
+email.budget_exhausted            # carries `kind`; see the gap below
+```
+
+### Diagnosing "the user did not get the email"
+
+Work down this list; the first three are far more common than a provider problem.
+
+1. **Is the binding live for that environment?** `wrangler deploy --dry-run --env <env>` lists
+   it as `env.EMAIL (unrestricted - senders: ...)`. On production it is currently absent.
+2. **Any `email.not_configured` in the logs?** If so, stop here — nothing was sent.
+3. **Any `email.send_failed`?** The `code` tells you which row of the table applies.
+4. **Budget or limiter?** Check for `email.budget_exhausted`, and check whether the rate
+   limiter is healthy. A spent `verify` bucket does not affect `reset`, and vice versa.
+5. **Did a token get issued at all?** `SELECT purpose, created_at, used_at FROM auth_tokens
+   WHERE user_id = ?`. A row with no mail means the send failed after the token was created;
+   no row means the request was throttled or the address did not match an account.
+6. **Only then suspect delivery.** Ask the recipient to check junk, then get the message source
+   and read `Authentication-Results` (SPF/DKIM/DMARC) and, on Microsoft 365,
+   `X-Forefront-Antispam-Report`. Microsoft has put HushVault verification mail in Junk while
+   Gmail accepted it (#78 § A, open).
+
+**Note what you cannot see from the outside.** `forgot-password` answers the same 202 whether
+the address exists, does not exist, is OAuth-only, is throttled, or the send failed. That is
+deliberate enumeration resistance and it is not negotiable — but it means the endpoint looks
+identical when it is completely broken. This is not hypothetical: the reset path spent the
+*verification* bucket for a time, so a few hundred registrations silently disabled account
+recovery deployment-wide while the endpoint kept returning 202 (fixed in #80). **Alert on the
+log lines, not on the status codes.**
+
+### Suppression list
+
+The provider maintains it; HushVault keeps no copy and has no API for it. A suppressed address
+surfaces only as `RECIPIENT_SUPPRESSED` in the logs — the user sees nothing. Clearing an entry
+is a dashboard action **[unverified: exact click path, confirm in Email Service docs]**.
+
+### Quotas
+
+Not quoted here, on purpose: the daily sending quota for a new Cloudflare Email Service account
+was never confirmed **[unverified]**. Read it in the dashboard and set `EMAIL_DAILY_BUDGET`
+below it, per bucket, remembering that a completed reset costs two.
+
+### Known gaps
+
+- **`email.budget_exhausted` is only logged on the forgot-password path.** The registration
+  send and the password-changed notice skip silently when their bucket is spent. Alerting on
+  this event will therefore miss verification mail drying up. Tracked on #83.
+- **No delivery telemetry.** Nothing records that a message was accepted, bounced or opened, so
+  "sent" means "the binding did not throw". Bounces are invisible except as a later
+  `RECIPIENT_SUPPRESSED`.
+- **Production is not sending.** The binding is commented out until #75 is done.
