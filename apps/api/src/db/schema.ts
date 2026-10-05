@@ -1,4 +1,17 @@
-import { sqliteTable, text, integer, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core'
+// The SQL files in apps/api/migrations are authoritative; this file documents the schema they
+// produce (and types the few Drizzle-typed reads). Nothing here generates SQL — keep it in step
+// with the migrations, which test/schema-drift.test.ts enforces by replaying them and diffing.
+import { sql } from 'drizzle-orm'
+import {
+  sqliteTable,
+  text,
+  integer,
+  index,
+  uniqueIndex,
+  primaryKey,
+  check,
+  type AnySQLiteColumn,
+} from 'drizzle-orm/sqlite-core'
 
 // ─────────────────────────────────────────────
 // Users & Auth
@@ -27,10 +40,35 @@ export const apiKeys = sqliteTable('api_keys', {
   // Soft-revocation audit trail. A revoked key is invalidated by setting
   // expiresAt to "now" (already honoured by the auth middleware); these columns
   // record when and why. revokedReason e.g. "leaked_in_github".
-  revokedAt: text('revoked_at'),
+  //
+  // INTEGER, as 0002 declared it. Most writers bind unix seconds, but the
+  // secret-scanner callback binds an ISO string, which INTEGER affinity keeps
+  // as text — so readers must accept either (see routes/auth.ts). Narrowing
+  // that to one representation needs a backfill, not a type change.
+  revokedAt: integer('revoked_at'),
   revokedReason: text('revoked_reason'),
   createdAt: text('created_at').notNull(),
-}, (t) => [index('api_keys_user_idx').on(t.userId)])
+}, (t) => [
+  index('api_keys_user_idx').on(t.userId),
+  index('api_keys_revoked_idx').on(t.revokedAt),
+])
+
+// Rotating refresh tokens behind the 15-minute access JWTs (migration 0009, issue #77).
+// Only SHA-256(token) is stored; every timestamp is unix seconds, not an ISO string.
+export const refreshTokens = sqliteTable('refresh_tokens', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  familyId: text('family_id').notNull(), // a login; reusing a used token revokes the whole family
+  tokenHash: text('token_hash').notNull().unique(),
+  createdAt: integer('created_at').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+  familyStartedAt: integer('family_started_at').notNull(), // caps how long rotation can extend a login
+  usedAt: integer('used_at'),
+}, (t) => [
+  index('refresh_tokens_user_idx').on(t.userId),
+  index('refresh_tokens_family_idx').on(t.familyId),
+  index('refresh_tokens_expires_idx').on(t.expiresAt),
+])
 
 // ─────────────────────────────────────────────
 // Organisations & Members
@@ -71,17 +109,25 @@ export const projects = sqliteTable('projects', {
   description: text('description'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
-}, (t) => [index('projects_org_idx').on(t.orgId)])
+}, (t) => [
+  index('projects_org_idx').on(t.orgId),
+  uniqueIndex('projects_org_slug_uniq').on(t.orgId, t.slug),
+])
 
 export const environments = sqliteTable('environments', {
   id: text('id').primaryKey(),
   projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   name: text('name').notNull(), // e.g. "production", "staging", "development"
   slug: text('slug').notNull(),
-  parentEnvId: text('parent_env_id'), // null = root env; set for branch inheritance
+  // null = root env; set for branch inheritance. Self-reference, so the type has to be annotated.
+  // Deleting a parent orphans its children rather than cascading their secrets away.
+  parentEnvId: text('parent_env_id').references((): AnySQLiteColumn => environments.id, { onDelete: 'set null' }),
   color: text('color').default('#6366f1'), // UI color hint
   createdAt: text('created_at').notNull(),
-}, (t) => [index('environments_project_idx').on(t.projectId)])
+}, (t) => [
+  index('environments_project_idx').on(t.projectId),
+  uniqueIndex('environments_project_slug_uniq').on(t.projectId, t.slug),
+])
 
 // ─────────────────────────────────────────────
 // Secrets
@@ -92,21 +138,27 @@ export const secrets = sqliteTable('secrets', {
   projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   envId: text('env_id').notNull().references(() => environments.id, { onDelete: 'cascade' }),
   name: text('name').notNull(),                 // e.g. "DATABASE_URL"
-  // Encrypted value stored in KV, key = "secret:{id}"
+  // Encrypted value stored in KV, key = "secret:{id}:{blobRev}"
   // wrappedDek stored here (DEK encrypted with org master key)
   wrappedDek: text('wrapped_dek').notNull(),
   keyVersion: text('key_version').notNull().default('v1'), // for key rotation
   encVersion: integer('enc_version').notNull().default(1), // 2 = AAD-bound ciphertext
+  // Which KV blob holds the current value. 0 = the pre-0014 unversioned
+  // "secret:{id}". Each value change writes a never-written key and then moves
+  // this pointer, so a failed D1 write can only orphan a blob (migration 0014).
+  blobRev: integer('blob_rev').notNull().default(0),
   isComputed: integer('is_computed', { mode: 'boolean' }).notNull().default(false),
   template: text('template'),                   // e.g. "${DB_USER}:${DB_PASS}@host/db"
-  dependencies: text('dependencies'),           // JSON array of secret names
+  dependencies: text('dependencies').default('[]'), // JSON array of secret names
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
-  createdBy: text('created_by').references(() => users.id),
+  createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
 }, (t) => [
   index('secrets_env_idx').on(t.envId),
   index('secrets_project_idx').on(t.projectId),
   index('secrets_name_idx').on(t.name),
+  uniqueIndex('secrets_env_name_uniq').on(t.envId, t.name),
+  index('secrets_key_version_idx').on(t.keyVersion), // rotation scans by key version
 ])
 
 export const secretHistory = sqliteTable('secret_history', {
@@ -115,9 +167,16 @@ export const secretHistory = sqliteTable('secret_history', {
   wrappedDek: text('wrapped_dek').notNull(),
   keyVersion: text('key_version').notNull(),
   encVersion: integer('enc_version').notNull().default(1),
+  // Which blob holds this historical value: null = a pre-0014 copy at
+  // "secrethist:{id}", otherwise the secret's own revision. Nullable and
+  // without a default, unlike secrets.blobRev — the null is load-bearing.
+  blobRev: integer('blob_rev'),
   changedAt: text('changed_at').notNull(),
-  changedBy: text('changed_by').references(() => users.id),
-}, (t) => [index('secret_history_secret_idx').on(t.secretId)])
+  changedBy: text('changed_by').references(() => users.id, { onDelete: 'set null' }),
+}, (t) => [
+  index('secret_history_secret_idx').on(t.secretId),
+  index('secret_history_key_version_idx').on(t.keyVersion),
+])
 
 // ─────────────────────────────────────────────
 // Share Links (Temporary share URLs)
@@ -130,9 +189,16 @@ export const shareLinks = sqliteTable('share_links', {
   expiresAt: text('expires_at').notNull(),
   maxViews: integer('max_views').notNull().default(1),
   viewCount: integer('view_count').notNull().default(0),
-  createdBy: text('created_by').references(() => users.id),
+  createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
   createdAt: text('created_at').notNull(),
-}, (t) => [index('share_links_token_idx').on(t.token)])
+  // Owner recorded at creation (migration 0015), so the audit row survives the creator being
+  // deleted. Nullable only because 0015 could not backfill links whose creator was already
+  // gone; the read path refuses to serve those.
+  orgId: text('org_id').references(() => organisations.id, { onDelete: 'cascade' }),
+}, (t) => [
+  index('share_links_token_idx').on(t.token),
+  index('share_links_org_idx').on(t.orgId, t.expiresAt),
+])
 
 // ─────────────────────────────────────────────
 // Audit Log
@@ -141,7 +207,7 @@ export const shareLinks = sqliteTable('share_links', {
 export const auditLog = sqliteTable('audit_log', {
   id: text('id').primaryKey(),
   orgId: text('org_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
-  actorId: text('actor_id').references(() => users.id),
+  actorId: text('actor_id').references(() => users.id, { onDelete: 'set null' }),
   actorType: text('actor_type', { enum: ['user', 'api_key', 'system'] }).notNull(),
   action: text('action').notNull(), // e.g. "secret.read", "secret.update", "member.invite"
   resourceType: text('resource_type'),          // "secret", "project", "environment"
@@ -152,6 +218,7 @@ export const auditLog = sqliteTable('audit_log', {
 }, (t) => [
   index('audit_log_org_idx').on(t.orgId),
   index('audit_log_timestamp_idx').on(t.timestamp),
+  index('audit_log_org_timestamp_idx').on(t.orgId, t.timestamp), // export + retention sweep
 ])
 
 // ─────────────────────────────────────────────
@@ -185,7 +252,10 @@ export const keyRotations = sqliteTable('key_rotations', {
   startedAt: text('started_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   completedAt: text('completed_at'),
-})
+}, (t) => [
+  // Single-flight: the uniqueness only applies to the one live row, so the index is partial.
+  uniqueIndex('key_rotations_one_running').on(t.status).where(sql`status = 'running'`),
+])
 
 export const keyRotationFailures = sqliteTable('key_rotation_failures', {
   rotationId: text('rotation_id').notNull(),
@@ -226,6 +296,7 @@ export const integrationConnections = sqliteTable('integration_connections', {
   encryptedCredential: text('encrypted_credential').notNull(),
   wrappedDek: text('wrapped_dek').notNull(),
   keyVersion: text('key_version').notNull(),
+  // No onDelete in the SQL, so deleting a creator is blocked by the reference. Issue #81.
   createdBy: text('created_by').references(() => users.id),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -233,6 +304,7 @@ export const integrationConnections = sqliteTable('integration_connections', {
 }, (t) => [
   index('integration_connections_org_idx').on(t.orgId),
   uniqueIndex('integration_connections_label_idx').on(t.orgId, t.provider, t.label),
+  index('integration_connections_key_version_idx').on(t.keyVersion),
 ])
 
 // ─────────────────────────────────────────────
@@ -249,10 +321,14 @@ export const syncTargets = sqliteTable('sync_targets', {
   provider: text('provider').notNull(),
   resourceJson: text('resource_json').notNull().default('{}'),
   nameFilterJson: text('name_filter_json').notNull().default('{}'),
-  deleteRemoved: integer('delete_removed').notNull().default(0),
+  deleteRemoved: integer('delete_removed', { mode: 'boolean' }).notNull().default(false),
   fingerprintSalt: text('fingerprint_salt').notNull(),
   status: text('status', { enum: ['active', 'needs_attention'] }).notNull().default('active'),
   lastRunAt: text('last_run_at'),
+  // Automatic triggers (migration 0012). scheduleMinutes is 15, 60, 360 or 1440; null = no schedule.
+  syncOnChange: integer('sync_on_change', { mode: 'boolean' }).notNull().default(false),
+  scheduleMinutes: integer('schedule_minutes'),
+  // No onDelete in the SQL — issue #81, as above.
   createdBy: text('created_by').references(() => users.id),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
@@ -281,13 +357,64 @@ export const syncRuns = sqliteTable('sync_runs', {
   attempt: integer('attempt').notNull().default(1),
   countsJson: text('counts_json').notNull().default('{}'),
   errorCode: text('error_code'),
-  actorId: text('actor_id'),
+  actorId: text('actor_id'), // no reference: a run may be triggered by cron or a deleted user
   startedAt: text('started_at').notNull(),
   finishedAt: text('finished_at'),
   nextRetryAt: text('next_retry_at'),
   leaseUntil: text('lease_until'),
 }, (t) => [
-  index('sync_runs_target_idx').on(t.targetId, t.startedAt),
-  index('sync_runs_retry_idx').on(t.nextRetryAt),
-  // The single-flight partial unique index (status IN ('queued','running')) exists only in the migration.
+  // History reads page newest-first, so the index is descending — expressible only as raw SQL
+  // here, since the SQLite index builder has no .desc() on columns.
+  index('sync_runs_target_idx').on(t.targetId, sql`${t.startedAt} desc`),
+  index('sync_runs_retry_idx').on(t.nextRetryAt).where(sql`next_retry_at IS NOT NULL`),
+  uniqueIndex('sync_runs_one_active').on(t.targetId).where(sql`status IN ('queued', 'running')`),
+])
+
+// One pending row per target: changes coalesce while it waits for the cron sweep (migration 0012).
+// Carries ids only, never values. org_id is denormalised for the per-org budget, with no reference.
+export const syncOutbox = sqliteTable('sync_outbox', {
+  id: text('id').primaryKey(),
+  targetId: text('target_id').notNull().references(() => syncTargets.id, { onDelete: 'cascade' }),
+  orgId: text('org_id').notNull(),
+  createdAt: text('created_at').notNull(),
+  // Last change seen while this row was pending. A run completes the row only if nothing landed
+  // after it claimed it, otherwise the change would be lost.
+  changedAt: text('changed_at').notNull(),
+  dueAt: text('due_at').notNull(),
+  claimedAt: text('claimed_at'),
+  doneAt: text('done_at'),
+}, (t) => [
+  uniqueIndex('sync_outbox_one_pending').on(t.targetId).where(sql`done_at IS NULL`),
+  index('sync_outbox_due_idx').on(t.dueAt).where(sql`done_at IS NULL`),
+])
+
+// ─────────────────────────────────────────────
+// GitHub Actions OIDC pull (migration 0013, issue #43)
+// ─────────────────────────────────────────────
+
+// A rule grants read-only access to exactly one environment. Matching is on individual OIDC
+// claims, never on the `sub` string, which a repository can customise.
+export const oidcRepoRules = sqliteTable('oidc_repo_rules', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
+  envId: text('env_id').notNull().references(() => environments.id, { onDelete: 'cascade' }),
+  provider: text('provider', { enum: ['github'] }).notNull().default('github'),
+  repository: text('repository').notNull(), // "owner/name", lowercased, exact match
+  repositoryId: text('repository_id'),      // GitHub's immutable id; when set it must match too
+  ref: text('ref'),                         // e.g. "refs/heads/main"
+  environment: text('environment'),         // a GitHub environment name
+  // No onDelete in the SQL — issue #81, as for the other created_by columns.
+  createdBy: text('created_by').references(() => users.id),
+  createdAt: text('created_at').notNull(),
+  lastUsedAt: text('last_used_at'),
+}, (t) => [
+  index('oidc_repo_rules_org_idx').on(t.orgId),
+  index('oidc_repo_rules_lookup_idx').on(t.repository),
+  // One rule per (environment, repository, constraint). COALESCE because NULLs are distinct in a
+  // SQLite unique index, so without it the same grant could be added twice.
+  uniqueIndex('oidc_repo_rules_unique_idx')
+    .on(t.envId, t.repository, sql`COALESCE(${t.ref}, '')`, sql`COALESCE(${t.environment}, '')`),
+  // Exactly one subject constraint. The migration's CHECK is unnamed; SQLite exposes no PRAGMA
+  // for table constraints, so the drift test compares this predicate against the replayed DDL.
+  check('oidc_repo_rules_one_constraint', sql`(ref IS NOT NULL) <> (environment IS NOT NULL)`),
 ])
