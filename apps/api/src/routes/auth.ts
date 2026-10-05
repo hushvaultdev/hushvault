@@ -12,7 +12,7 @@ import type { OAuthIdentity } from '../lib/oauth'
 import {
   clearRefreshCookie,
   issueSession,
-  readRefreshCookie,
+  presentedRefreshToken,
   revokeRefreshFamily,
   rotateSession,
   rotateRefreshToken,
@@ -54,6 +54,60 @@ type MemberRole = 'owner' | 'admin' | 'member' | 'viewer'
 
 export const authRoutes = new Hono<{ Bindings: Env }>()
 
+/** One entry of the org switcher: an organisation the caller belongs to, and their role in it. */
+type OrgMembership = { id: string; name: string; slug: string; plan: string; role: MemberRole }
+
+/**
+ * Every organisation the user is a member of, oldest membership first.
+ *
+ * Sign-in has to pick a starting organisation, and it stays today's deterministic choice: the
+ * earliest membership, i.e. `[0]`. The difference from before (issue #82) is that the choice is
+ * made ONCE, at sign-in, and then carried by the credential — nothing re-derives it per request —
+ * and the full list goes back with the response so the dashboard can offer the switch without a
+ * second round trip.
+ */
+async function listMemberships(env: Env, userId: string): Promise<OrgMembership[]> {
+  const { results } = await env.DB.prepare(
+    'SELECT o.id, o.name, o.slug, o.plan, m.role FROM members m INNER JOIN organisations o ON o.id = m.org_id'
+    + ' WHERE m.user_id = ? ORDER BY m.created_at ASC',
+  ).bind(userId).all<OrgMembership>()
+  return results
+}
+
+/**
+ * An account-level security event (email verified, password reset requested or completed, an
+ * unverified account claimed over OAuth) is about the person, not about one organisation — but
+ * `audit_log` is per-org and every reader of it is an admin of one org.
+ *
+ * It used to be written to the user's EARLIEST membership, which in a multi-org world means the
+ * other orgs the person belongs to never learn that their member's password was reset. So it is
+ * written to every organisation they are a member of instead: each org sees the security events of
+ * its own members, and no org's trail depends on which membership happens to be oldest. These
+ * events are rare (a reset, a verification), so the fan-out is a handful of inserts at most.
+ */
+async function writeAccountAuditLog(env: Env, entry: {
+  userId: string
+  actorType: 'user' | 'system'
+  action: string
+  ip?: string | null
+  userAgent?: string | null
+}): Promise<void> {
+  const { results } = await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ?')
+    .bind(entry.userId).all<{ org_id: string }>()
+  for (const row of results) {
+    await writeAuditLog(env, {
+      orgId: row.org_id,
+      actorId: entry.userId,
+      actorType: entry.actorType,
+      action: entry.action,
+      resourceType: 'user',
+      resourceId: entry.userId,
+      ip: entry.ip ?? null,
+      userAgent: entry.userAgent ?? null,
+    })
+  }
+}
+
 const registerSchema = z.object({
   email: z.string().email().max(254),
   password: z.string().min(12).max(128),
@@ -87,9 +141,10 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
   const userId = createPrefixedId('usr')
   const orgId = createPrefixedId('org')
   const { salt, passwordHash } = await hashPassword(password)
-  const slug = organisationName.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-')
+  const slugBase = organisationName.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48) || `org-${userId.slice(-8)}`
+  const slug = `${slugBase}-${orgId.slice(-6)}`
 
   await db.batch([
     db.prepare('INSERT INTO users (id, email, password_hash, salt, created_at, email_verified) VALUES (?, ?, ?, ?, ?, 0)').bind(
@@ -102,7 +157,7 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
     db.prepare('INSERT INTO organisations (id, name, slug, plan, created_at) VALUES (?, ?, ?, ?, ?)').bind(
       orgId,
       organisationName,
-      `${slug}-${orgId.slice(-6)}`,
+      slug,
       'free',
       new Date().toISOString(),
     ),
@@ -119,7 +174,19 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
   setRefreshCookie(c, session.refreshToken)
   // Verification mail: in the background, so a failed or slow send never fails registration.
   await runBackground(c, sendVerificationEmail(c.env, { userId, email: email.toLowerCase(), orgId }, 'registration'))
-  return c.json({ data: { userId, orgId, token: session.accessToken, expiresIn: session.expiresIn, emailVerified: false, ...(wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}) } }, 201)
+  return c.json({
+    data: {
+      userId,
+      orgId,
+      token: session.accessToken,
+      expiresIn: session.expiresIn,
+      emailVerified: false,
+      // Exactly one org here, by construction; sent in the same shape as login and refresh so the
+      // dashboard's switcher has one code path.
+      orgs: [{ id: orgId, name: organisationName, slug, plan: 'free', role: 'owner' as const }],
+      ...(wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}),
+    },
+  }, 201)
 })
 
 /**
@@ -171,19 +238,18 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema, valida
     return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
   }
 
-  const member = await db.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(user.id).first<{
-    org_id: string
-    role: 'owner' | 'admin' | 'member' | 'viewer'
-  }>()
+  // Sign-in picks the starting org once (the earliest membership) and the session then carries it.
+  const orgs = await listMemberships(c.env, user.id)
+  const current = orgs[0]
 
-  if (!member) {
+  if (!current) {
     return c.json({ error: 'UNAUTHORIZED', message: 'Membership not found' }, 401)
   }
 
-  const session = await issueSession(c.env, { userId: user.id, orgId: member.org_id, role: member.role })
+  const session = await issueSession(c.env, { userId: user.id, orgId: current.id, role: current.role })
   setRefreshCookie(c, session.refreshToken)
   await writeAuditLog(c.env, {
-    orgId: member.org_id,
+    orgId: current.id,
     actorId: user.id,
     actorType: 'user',
     action: 'auth.login',
@@ -197,9 +263,10 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema, valida
       token: session.accessToken,
       expiresIn: session.expiresIn,
       userId: user.id,
-      orgId: member.org_id,
-      role: member.role,
+      orgId: current.id,
+      role: current.role,
       emailVerified: user.email_verified === 1,
+      orgs,
       ...(wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}),
     },
   })
@@ -223,11 +290,15 @@ authRoutes.post('/api-keys', requireAuth, requireHuman, requireVerifiedEmailIfEn
   const { rawKey, keyHash } = await createApiKey()
   const id = createPrefixedId('key')
 
+  // The key is bound to the org the creator is acting in right now, and acts only there for the
+  // rest of its life (issue #82). requireHuman above means auth.orgId came from a JWT, i.e. from
+  // a sign-in or an explicit switch — never from a membership lookup.
   await db.prepare(
-    'INSERT INTO api_keys (id, user_id, key_hash, name, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO api_keys (id, user_id, org_id, key_hash, name, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
   ).bind(
     id,
     auth.userId,
+    auth.orgId,
     keyHash,
     name,
     expiresAt ?? null,
@@ -245,17 +316,18 @@ authRoutes.post('/api-keys', requireAuth, requireHuman, requireVerifiedEmailIfEn
     userAgent: c.req.header('user-agent'),
   })
 
-  return c.json({ data: { id, apiKey: rawKey, name, expiresAt: expiresAt ?? null } }, 201)
+  return c.json({ data: { id, apiKey: rawKey, name, orgId: auth.orgId, expiresAt: expiresAt ?? null } }, 201)
 })
 
 // GET /api/auth/api-keys — the caller's own keys; never key_hash or raw keys
 authRoutes.get('/api-keys', requireAuth, async (c) => {
   const auth = c.get('auth')
   const { results } = await c.env.DB.prepare(
-    'SELECT id, name, created_at, last_used_at, expires_at, revoked_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC',
+    'SELECT id, name, org_id, created_at, last_used_at, expires_at, revoked_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC',
   ).bind(auth.userId).all<{
     id: string
     name: string
+    org_id: string | null
     created_at: string
     last_used_at: string | null
     expires_at: string | null
@@ -265,6 +337,9 @@ authRoutes.get('/api-keys', requireAuth, async (c) => {
   const data = results.map((row) => ({
     id: row.id,
     name: row.name,
+    // Which org this key acts in. NULL means it predates migration 0018 (or its owner had no
+    // membership when that ran): the middleware refuses it, so a client can show "re-create".
+    orgId: row.org_id,
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     expiresAt: row.expires_at,
@@ -283,6 +358,16 @@ authRoutes.delete('/api-keys/:id', requireAuth, requireHuman, async (c) => {
   const { id } = c.req.param()
   const auth = c.get('auth')
   const db = c.env.DB
+  // Read the key's own org BEFORE deleting it: an audit row's org comes from the resource, not from
+  // the actor (principle 3 of the plan). Deleting a key that belongs to org B while the session is
+  // acting in org A used to file the revocation in A's trail, where nobody responsible for B's
+  // credentials would ever see it. A pre-0018 key has no org and falls back to the actor's, which
+  // is what the old behaviour was for every key.
+  const existing = await db.prepare('SELECT org_id FROM api_keys WHERE id = ? AND user_id = ? LIMIT 1')
+    .bind(id, auth.userId).first<{ org_id: string | null }>()
+  if (!existing) {
+    return c.json({ error: 'NOT_FOUND', message: 'API key not found' }, 404)
+  }
   const result = await db.prepare('DELETE FROM api_keys WHERE id = ? AND user_id = ?').bind(id, auth.userId).run()
 
   if (!result.success || !result.meta.changes) {
@@ -290,7 +375,7 @@ authRoutes.delete('/api-keys/:id', requireAuth, requireHuman, async (c) => {
   }
 
   await writeAuditLog(c.env, {
-    orgId: auth.orgId,
+    orgId: existing.org_id ?? auth.orgId,
     actorId: auth.userId,
     actorType: auth.actorType,
     action: 'auth.api_key.revoke',
@@ -333,19 +418,13 @@ authRoutes.post('/verify-email', tokenSubmitRateLimit, zValidator('json', tokenS
     return c.json({ error: 'INVALID_TOKEN', message: 'This link is invalid or has expired' }, 400)
   }
   await c.env.DB.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').bind(consumed.userId).run()
-  const member = await c.env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(consumed.userId).first<{ org_id: string }>()
-  if (member) {
-    await writeAuditLog(c.env, {
-      orgId: member.org_id,
-      actorId: consumed.userId,
-      actorType: 'user',
-      action: 'auth.email.verified',
-      resourceType: 'user',
-      resourceId: consumed.userId,
-      ip: getRequestIp(c),
-      userAgent: c.req.header('user-agent'),
-    })
-  }
+  await writeAccountAuditLog(c.env, {
+    userId: consumed.userId,
+    actorType: 'user',
+    action: 'auth.email.verified',
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
   return c.json({ data: { verified: true } })
 })
 
@@ -365,22 +444,12 @@ async function processPasswordResetRequest(env: Env, email: string): Promise<voi
   // duplicates it, which is what kept the other two send paths silent.
   if (!(await spendEmailBudget(env, 'reset', 'forgot_password'))) return
 
-  const member = await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(user.id).first<{ org_id: string }>()
   const { token } = await issueToken(env, { userId: user.id, purpose: 'reset_password', email: user.email })
   const link = buildTokenLink(env, '/reset-password', token)
   if (!link) return
   const message = resetPasswordMessage(user.email, link, user.password_hash === '')
   await sendEmail(env, message)
-  if (member) {
-    await writeAuditLog(env, {
-      orgId: member.org_id,
-      actorId: user.id,
-      actorType: 'system',
-      action: 'auth.password_reset.requested',
-      resourceType: 'user',
-      resourceId: user.id,
-    })
-  }
+  await writeAccountAuditLog(env, { userId: user.id, actorType: 'system', action: 'auth.password_reset.requested' })
   if ((crypto.getRandomValues(new Uint8Array(1))[0] ?? 255) < 3) await purgeExpiredTokens(env) // opportunistic cleanup; no cron for this
 }
 
@@ -416,19 +485,13 @@ authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', rese
     c.env.DB.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(consumed.userId),
   ])
 
-  const member = await c.env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(consumed.userId).first<{ org_id: string }>()
-  if (member) {
-    await writeAuditLog(c.env, {
-      orgId: member.org_id,
-      actorId: consumed.userId,
-      actorType: 'user',
-      action: 'auth.password_reset.completed',
-      resourceType: 'user',
-      resourceId: consumed.userId,
-      ip: getRequestIp(c),
-      userAgent: c.req.header('user-agent'),
-    })
-  }
+  await writeAccountAuditLog(c.env, {
+    userId: consumed.userId,
+    actorType: 'user',
+    action: 'auth.password_reset.completed',
+    ip: getRequestIp(c),
+    userAgent: c.req.header('user-agent'),
+  })
   // Heads-up mail to the owner of the address (best effort, within the daily budget).
   await runBackground(c, (async () => {
     if (await spendEmailBudget(c.env, 'reset', 'password_changed')) await sendEmail(c.env, passwordChangedMessage(consumed.email))
@@ -474,20 +537,13 @@ async function completeOAuthLogin(
         db.prepare('DELETE FROM auth_tokens WHERE user_id = ?').bind(byEmail.id),
         db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(byEmail.id),
       ])
-      const member = await db.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
-        .bind(byEmail.id).first<{ org_id: string }>()
-      if (member) {
-        await writeAuditLog(c.env, {
-          orgId: member.org_id,
-          actorId: byEmail.id,
-          actorType: 'user',
-          action: 'auth.oauth.account_takeover',
-          resourceType: 'user',
-          resourceId: byEmail.id,
-          ip: getRequestIp(c),
-          userAgent: c.req.header('user-agent'),
-        })
-      }
+      await writeAccountAuditLog(c.env, {
+        userId: byEmail.id,
+        actorType: 'user',
+        action: 'auth.oauth.account_takeover',
+        ip: getRequestIp(c),
+        userAgent: c.req.header('user-agent'),
+      })
       linkedExistingUnverified = true
       userId = byEmail.id
     } else
@@ -501,13 +557,15 @@ async function completeOAuthLogin(
   let role: MemberRole
 
   if (userId) {
-    const member = await db.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
-      .bind(userId).first<{ org_id: string; role: MemberRole }>()
-    if (!member) {
+    // Same deterministic default as login: the earliest membership, chosen once here. The callback
+    // is a redirect, so it carries only the chosen org; the dashboard reads GET /api/orgs for the
+    // rest of the switcher.
+    const current = (await listMemberships(c.env, userId))[0]
+    if (!current) {
       return c.redirect(`${webBase}/auth/callback#error=${encodeURIComponent('membership_missing')}`, 302)
     }
-    orgId = member.org_id
-    role = member.role
+    orgId = current.id
+    role = current.role
   } else {
     const newUserId = createPrefixedId('usr')
     orgId = createPrefixedId('org')
@@ -548,20 +606,6 @@ async function completeOAuthLogin(
 
 const refreshSchema = z.object({ refreshToken: z.string().min(16).max(256).optional() })
 
-/**
- * The refresh token comes from the request body (CLI) or the HttpOnly cookie (browser). Cookie use must
- * carry the custom client header: a cross-site form post cannot set it and a cross-origin fetch with it
- * needs a CORS preflight, so cookie-borne requests cannot be forged by other sites.
- */
-type Presented = { token: string } | { missing: 'no_client_header' | 'no_cookie' }
-
-function presentedRefreshToken(c: Context<{ Bindings: Env }>, bodyToken: string | undefined): Presented {
-  if (bodyToken) return { token: bodyToken }
-  if (!c.req.header('x-hushvault-client')) return { missing: 'no_client_header' }
-  const cookie = readRefreshCookie(c)
-  return cookie ? { token: cookie } : { missing: 'no_cookie' }
-}
-
 /** Why a refresh failed. A fixed vocabulary, safe to return: it describes the caller's own request, never other users. */
 function refreshFailure(c: Context<{ Bindings: Env }>, reason: string, status: 401 | 409 = 401) {
   console.error(JSON.stringify({ level: 'warn', event: 'auth.refresh_failed', reason }))
@@ -588,13 +632,34 @@ authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.d
     return invalid(rotated.reason)
   }
 
-  // Role and org are re-read here, so a membership change reaches the session within one access TTL.
-  const member = await c.env.DB.prepare('SELECT org_id, role FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
-    .bind(rotated.userId).first<{ org_id: string; role: 'owner' | 'admin' | 'member' | 'viewer' }>()
-  const user = await c.env.DB.prepare('SELECT email_verified FROM users WHERE id = ? LIMIT 1').bind(rotated.userId).first<{ email_verified: number }>()
-  if (!member || !user) return invalid('no_membership')
+  // The ORG comes from the family (refresh_tokens.org_id), never from the user's memberships: a
+  // refresh used to re-resolve the earliest membership, so a user working in org B was silently
+  // moved to org A — with org A's role — within 15 minutes of joining a second org (issue #82).
+  // Only the ROLE is re-read, for exactly that org, so a demotion still reaches the session inside
+  // one access lifetime.
+  const familyOrgId = rotated.family.orgId
+  if (!familyOrgId) {
+    // Minted before migration 0018 (a sign-in in the window between the migration and this
+    // deploy). There is no org recorded and guessing one is the bug being fixed, so the family
+    // dies and the holder signs in once more.
+    await revokeRefreshFamily(c.env, presented.token)
+    return invalid('org_unresolved')
+  }
 
-  const session = await rotateSession(c.env, { userId: rotated.userId, orgId: member.org_id, role: member.role, family: rotated.family, consume: rotated.tokenId })
+  const member = await c.env.DB.prepare('SELECT role FROM members WHERE user_id = ? AND org_id = ? LIMIT 1')
+    .bind(rotated.userId, familyOrgId).first<{ role: 'owner' | 'admin' | 'member' | 'viewer' }>()
+  const user = await c.env.DB.prepare('SELECT email_verified FROM users WHERE id = ? LIMIT 1').bind(rotated.userId).first<{ email_verified: number }>()
+  if (!member || !user) {
+    // Removed from the org this session belongs to (or the user is gone). Fail closed with a code
+    // of its own: the dashboard sends the person back to org selection instead of showing them an
+    // empty project list, and nothing here falls back to another org they may still belong to.
+    await revokeRefreshFamily(c.env, presented.token)
+    clearRefreshCookie(c)
+    console.error(JSON.stringify({ level: 'warn', event: 'auth.refresh_failed', reason: 'membership_revoked' }))
+    return c.json({ error: 'MEMBERSHIP_REVOKED', message: 'Your membership of this organisation has ended. Please sign in again.', reason: 'membership_revoked' }, 401)
+  }
+
+  const session = await rotateSession(c.env, { userId: rotated.userId, role: member.role, family: rotated.family, consume: rotated.tokenId })
   if (!session) return refreshFailure(c, 'rotation_conflict', 409)
   if (viaCookie) setRefreshCookie(c, session.refreshToken)
   return c.json({
@@ -602,9 +667,10 @@ authRoutes.post('/refresh', refreshRateLimit, zValidator('json', refreshSchema.d
       token: session.accessToken,
       expiresIn: session.expiresIn,
       userId: rotated.userId,
-      orgId: member.org_id,
+      orgId: familyOrgId,
       role: member.role,
       emailVerified: user.email_verified === 1,
+      orgs: await listMemberships(c.env, rotated.userId),
       ...(!viaCookie && wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}),
     },
   })

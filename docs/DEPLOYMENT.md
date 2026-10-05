@@ -217,6 +217,52 @@ database with a D1-capable token, like `0006`.
 
 ## Migrations
 
+**Migration `0018_multi_org.sql`** (multi-org foundation, issue #82) is **additive and applied in the
+usual order — before the new code is deployed.** It adds `api_keys.org_id` and
+`refresh_tokens.org_id` (both nullable), the `org_invites` table, and four indexes. It drops,
+renames and rebuilds nothing, and no statement in the currently deployed Worker names any of them,
+so the old code keeps working unchanged against the migrated database. `0017` is still the only
+migration that reverses the order; this one is not an exception to that rule.
+
+What an operator needs to know:
+
+1. **Order.** `pnpm --filter @hushvault/api db:migrate:dev` (then `:production`), *then* deploy. The
+   reverse order also works but leaves a longer NULL window (see 3).
+2. **Backfill.** The migration fills both new columns from the row owner's single membership
+   (`members ... ORDER BY created_at ASC LIMIT 1`). That expression is correct here and nowhere else:
+   before this change nothing creates a second membership, so every user has at most one. This is the
+   last use of it in the repo.
+3. **The NULL window.** Between applying the migration and the deploy going live, the old code still
+   inserts `api_keys` and `refresh_tokens` rows without an org. Those rows fail closed under the new
+   code and are **not** repaired by anything:
+   - a refresh family with no org → `401` with `reason: "org_unresolved"`, the family is revoked and
+     the cookie cleared. **Everyone who signed in during that window signs in once more.** Nothing
+     else is lost. Keep the window short (deploy right after migrating) and it is a handful of users.
+   - an API key created during that window → `401 KEY_ORG_UNRESOLVED` on every request. It must be
+     **re-created** (`POST /api/auth/api-keys`); there is no way to repair it, because there is no
+     record of which org it was meant for. Tell CI owners before migrating if keys are being minted.
+4. **An API key whose backfill found no membership.** Its `org_id` stays `NULL` and the key is dead
+   with `401 KEY_ORG_UNRESOLVED`. This is a key belonging to a user with no `members` row at all — an
+   account whose membership was deleted without the key being revoked. Such a key was *already*
+   unusable before this change (the old lookup also returned nothing and answered `401`), so nothing
+   that worked stops working. To find them before migrating:
+
+   ```sql
+   SELECT k.id, k.user_id, k.name FROM api_keys k
+    WHERE k.revoked_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM members m WHERE m.user_id = k.user_id);
+   ```
+5. **No reverse migration.** Rolling the code back while `0018` is applied is safe (the old code
+   ignores the new columns), but any key created by the new code names an org the old code will not
+   read — it falls back to the owner's earliest membership, which is the behaviour being removed. Roll
+   forward.
+
+The `org_invites` table ships here, unused, because issue #82 Lane B builds the invite endpoints on it
+and one migration for the whole change beats a second `ALTER` later. Its one OPEN invite per address
+per org is a **partial** unique index (`WHERE accepted_at IS NULL AND revoked_at IS NULL`), so
+accepting or revoking frees the address — a plain unique constraint would have to be loosened by a
+table rebuild, which `.claude/rules/database-schema.md` shows is not safely available.
+
 **Migration `0017_drop_secret_history.sql` must be applied *after* the new code is deployed —
 it is the first migration that reverses the usual order.** Everything else here is additive and
 is applied first; this one removes a table the previously deployed Worker still queries. Apply it
@@ -254,7 +300,9 @@ backoff just does not persist).
 Migrations run *before* the new code is deployed: keep each one backward compatible
 with the code that is currently running (add first; remove or rename in a later
 release). A migration that *removes* something is the exception and must be applied
-after the deploy, called out above — `0017` is the only one so far. `0001`-`0003` and `0005` use plain `ALTER TABLE`; that is fine because
+after the deploy, called out above — `0017` is the only one so far. An additive
+migration whose new column the old code leaves NULL (`0015`, `0018`) still needs the
+new code to say what a NULL means, and the answer must be "refuse", not "fall back". `0001`-`0003` and `0005` use plain `ALTER TABLE`; that is fine because
 wrangler tracks applied migrations in `d1_migrations` and never re-runs one. Do not
 edit applied files; add a new `NNNN_*.sql`. `wrangler d1 migrations apply` captures a
 backup before applying and skips the confirmation prompt when non-interactive
