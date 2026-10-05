@@ -401,7 +401,9 @@ old organisation. This matters — if only the access token were re-minted, the 
 would silently put the session back in the old organisation. The refresh token presented here is not what
 authenticates the request, so the revoke is scoped to the caller's own families.
 
-Audited `org.switch` against the target organisation.
+Audited twice: `org.switch_in` against the target organisation and `org.switch_out` against the one being
+left (skipped when they are the same), because an audit log is read per organisation and a session leaving
+is otherwise invisible to the admins of the org it left. Both rows name the target org as the resource.
 
 Errors: `403 NOT_A_MEMBER` (`You are not a member of that organisation`) — also the answer for an organisation
 id that does not exist, because membership is the only question asked; `403 FORBIDDEN` for an API key.
@@ -793,12 +795,12 @@ Errors: `401 UNAUTHORIZED` (`Missing signature headers`, `Unknown signing key`, 
 Written by the API today: `auth.login`, `auth.login.github`, `auth.login.google`, `auth.api_key.create`,
 `auth.api_key.revoke`, `auth.oauth.account_takeover`, `auth.email_verification.sent`, `auth.email.verified`,
 `auth.password_reset.requested`, `auth.password_reset.completed`, `notify.api_key_revoked`, `org.create`,
-`org.switch`, `project.create`, `project.update`, `project.delete`,
+`org.switch_in`, `org.switch_out`, `project.create`, `project.update`, `project.delete`,
 `environment.create`, `secret.read`, `secret.read_bulk`, `secret.create`, `secret.update`, `secret.delete`,
 `share.create`. Not audited: registration, listing endpoints, share views.
 
 An audit row's organisation comes from the **resource**, not from the actor's current session: a key
-revocation is filed against the key's organisation, `org.create` / `org.switch` against the organisation
+revocation is filed against the key's organisation, `org.create` / `org.switch_in` / `org.switch_out` against the organisation
 acted on. The account-level events — `auth.email.verified`, `auth.password_reset.requested`,
 `auth.password_reset.completed`, `auth.oauth.account_takeover` — are about the person rather than one
 organisation, so they are written once per organisation the user is a member of. Each org's admins therefore

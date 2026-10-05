@@ -133,22 +133,19 @@ describe('the org endpoints the dashboard calls', () => {
     expect(session?.role).toBe('member')
   })
 
-  it('creates an organisation, and retries the other spelling if the first is refused', async () => {
-    const calls = stubApi((call) => {
-      const body = call.body as Record<string, unknown>
-      if (body['name'] !== undefined) return { status: 400, body: { error: 'VALIDATION_ERROR', message: 'name is not allowed' } }
-      return { body: { data: { id: 'org_new', name: 'Acme', role: 'owner' } } }
-    })
+  // POST /api/orgs takes `name` (the API landed after this client was written; register's
+  // `organisationName` spelling is not accepted here and is not retried).
+  it('creates an organisation with the one field name the API takes', async () => {
+    const calls = stubApi(() => ({ body: { data: { id: 'org_new', name: 'Acme', role: 'owner' } } }))
     const created = await createOrg('Acme')
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(1)
     expect(calls[0]?.body).toEqual({ name: 'Acme' })
-    expect(calls[1]?.body).toEqual({ organisationName: 'Acme' })
     expect(created?.id).toBe('org_new')
   })
 
-  it('does not retry a refusal that is not about the field name', async () => {
-    const calls = stubApi(() => ({ status: 429, body: { error: 'RATE_LIMITED', message: 'slow down' } }))
-    await expect(createOrg('Acme')).rejects.toBeInstanceOf(ApiError)
+  it('surfaces a refusal instead of guessing another field name', async () => {
+    const calls = stubApi(() => ({ status: 400, body: { error: 'VALIDATION_ERROR', message: 'name is too short' } }))
+    await expect(createOrg('A')).rejects.toBeInstanceOf(ApiError)
     expect(calls).toHaveLength(1)
   })
 

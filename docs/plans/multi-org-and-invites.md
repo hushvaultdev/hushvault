@@ -115,6 +115,37 @@ invites, not after:
 
 ## Lane B — invites and members (API), after Lane A lands
 
+**Pinned by Lane C's implementation (2026-10-05).** The dashboard is built and merged, so these
+are no longer open choices — Lane B matches them or Lane C breaks:
+
+- **The invitation link is `{WEB_APP_URL}/invites/accept#token=<token>`.** The token goes in the
+  **fragment**, like `/verify-email` and `/reset-password` already do, so it never reaches a server
+  log or a `Referer` header. The page also accepts `?token=` as a fallback and an optional
+  non-secret `email` hint.
+- **`INVITE_EMAIL_MISMATCH` carries the invited address** (`details.invitedEmail`). This leaks
+  nothing: whoever holds the emailed token already has the address, and without it the wrong-account
+  case can only say "this was sent to another address", which does not tell the person which
+  account to sign in as. It must NOT carry the org's name — a non-member learns nothing else.
+- **Request bodies:** `POST /api/orgs` takes `{ name }` (not register's `organisationName`),
+  `POST /api/orgs/:id/invites` takes `{ email, role }`, `PATCH .../members/:userId` takes
+  `{ role }`, `POST /api/invites/accept` takes `{ token }`.
+- **Responses** keep the house envelope `{ data: … }`. The accept response carries `orgId`,
+  `orgName` and `role` so the dashboard can offer to switch straight into the org; without `orgId`
+  it falls back to the org picker. A created invite may carry `acceptUrl`, shown once; if it does
+  not, the email is the only path, which the UI handles.
+- **Member rows** must carry `userId` (or `user_id`), `email` and `role`; a row without an
+  identifier is dropped by the client rather than rendered unusable.
+- **`MEMBERSHIP_REVOKED` means two different things and the status code is what distinguishes
+  them.** On a normal request it is `403` and the dashboard sends the person to the org picker
+  (they still hold a session). On `POST /api/auth/refresh` it is `401` with the family revoked and
+  the cookie cleared — there is no credential left, so the only destination is sign-in. Lane A
+  implemented the second; do not "fix" the dashboard to route a 401 to the picker.
+- **A missing endpoint must stay distinguishable from a missing row.** The unmounted-route 404 body
+  is Hono's `app.notFound` (`{ "error": "Not found" }`), while a route's own 404 is
+  `{ "error": "NOT_FOUND", … }`. The dashboard uses exactly that difference to degrade to "one
+  organisation, switching unavailable" instead of showing an error. Do not change the
+  `app.notFound` body to SCREAMING_SNAKE.
+
 - `POST /api/orgs/:id/invites` (admin) — create; emails a single-use link. The token is random
   (`crypto.getRandomValues`), returned once, stored only as a SHA-256 hash, and expires in 7 days.
 - `GET /api/orgs/:id/invites` (admin) — open invites; never the token.

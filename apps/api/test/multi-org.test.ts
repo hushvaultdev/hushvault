@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { call, createTestEnv, seedApiKey, seedProject, seedUser, type Role, type TestEnv } from './helpers/env'
 import { createPrefixedId } from '../src/lib/auth'
+import { issueToken } from '../src/lib/auth-tokens'
 
 const PASSWORD = 'correct horse battery staple'
 const WEB = { 'x-hushvault-client': 'web' }
@@ -232,6 +233,50 @@ describe('a refresh family is bound to one org for its whole life', () => {
   })
 })
 
+// An account-level security event (a reset, a verification) is about the person, not one org, so
+// it is filed in every org they belong to. The cost of that fan-out is what is asserted here:
+// orgs are self-service, so the number of rows is caller-influenced and must not become a number
+// of D1 round trips on an auth path.
+describe('an account-level event reaches every org, in one write', () => {
+  /** A verify-email token for the user, minted directly: this is about the audit fan-out, not the mail. */
+  async function verifyEmailToken(env: TestEnv, userId: string, email: string): Promise<string> {
+    const { token } = await issueToken(env, { userId, purpose: 'verify_email', email })
+    return token
+  }
+
+  it('files a row per membership and sends them as a single batch', async () => {
+    const env = createTestEnv()
+    const user = await seedUser(env, { role: 'owner' })
+    for (let i = 0; i < 6; i += 1) {
+      await addMembership(env, { userId: user.userId, orgId: await seedOrg(env, `Org ${i}`), role: 'member' })
+    }
+    const token = await verifyEmailToken(env, user.userId, user.email)
+
+    let batches = 0
+    const realBatch = env.DB.batch.bind(env.DB)
+    env.DB.batch = ((statements: Parameters<typeof realBatch>[0]) => { batches += 1; return realBatch(statements) }) as typeof env.DB.batch
+
+    expect((await call(env, 'POST', '/api/auth/verify-email', { json: { token } })).status).toBe(200)
+
+    const { results } = await env.DB.prepare("SELECT org_id FROM audit_log WHERE action = 'auth.email.verified'").all<{ org_id: string }>()
+    expect(results).toHaveLength(7)
+    expect(new Set(results.map((r) => r.org_id)).size).toBe(7)
+    // One batch for the seven rows. Seven `.run()` calls would be seven subrequests, and nothing
+    // caps how many orgs a person can belong to.
+    expect(batches).toBe(1)
+  })
+
+  it('writes nothing for a user with no membership at all', async () => {
+    const env = createTestEnv()
+    const user = await seedUser(env, { role: 'owner' })
+    await env.DB.prepare('DELETE FROM members WHERE user_id = ?').bind(user.userId).run()
+    const token = await verifyEmailToken(env, user.userId, user.email)
+
+    expect((await call(env, 'POST', '/api/auth/verify-email', { json: { token } })).status).toBe(200)
+    expect(await env.DB.prepare("SELECT 1 AS ok FROM audit_log WHERE action = 'auth.email.verified' LIMIT 1").first()).toBeNull()
+  })
+})
+
 describe('GET /api/orgs', () => {
   it('lists every org the caller belongs to and marks the one the token acts in', async () => {
     const env = createTestEnv()
@@ -346,7 +391,10 @@ describe('POST /api/orgs/:id/switch', () => {
     expect(after.body.data.orgId).toBe(orgB)
     expect((await call(env, 'POST', '/api/auth/refresh', { headers: { ...WEB, cookie: cookieOf(login) } })).status).toBe(401)
 
-    expect(await auditRows(env, 'org.switch')).toEqual([{ org_id: orgB, action: 'org.switch', resource_id: orgB }])
+    // Both orgs get a row: the one being entered, and the one being left — whose admins would
+    // otherwise see a session simply stop acting there.
+    expect(await auditRows(env, 'org.switch_in')).toEqual([{ org_id: orgB, action: 'org.switch_in', resource_id: orgB }])
+    expect(await auditRows(env, 'org.switch_out')).toEqual([{ org_id: user.orgId, action: 'org.switch_out', resource_id: orgB }])
   })
 
   it('403 NOT_A_MEMBER for an org the caller does not belong to, and the session is untouched', async () => {
@@ -356,7 +404,8 @@ describe('POST /api/orgs/:id/switch', () => {
     const res = await call(env, 'POST', `/api/orgs/${stranger.orgId}/switch`, { token: user.token, headers: WEB })
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: 'NOT_A_MEMBER', message: 'You are not a member of that organisation' })
-    expect(await auditRows(env, 'org.switch')).toEqual([])
+    expect(await auditRows(env, 'org.switch_in')).toEqual([])
+    expect(await auditRows(env, 'org.switch_out')).toEqual([])
     // A non-existent org id is the same answer: membership is the only question asked.
     expect((await call(env, 'POST', '/api/orgs/org_nope/switch', { token: user.token, headers: WEB })).status).toBe(403)
   })

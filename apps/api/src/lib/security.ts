@@ -26,7 +26,7 @@ export function assertSecretSize(value: string): void {
   }
 }
 
-export async function writeAuditLog(env: Env, entry: {
+export type AuditEntry = {
   orgId: string
   actorId?: string | null
   actorType: 'user' | 'api_key' | 'system'
@@ -35,8 +35,16 @@ export async function writeAuditLog(env: Env, entry: {
   resourceId?: string | null
   ip?: string | null
   userAgent?: string | null
-}): Promise<void> {
-  await env.DB.prepare(
+}
+
+/**
+ * The audit insert as a statement, for a caller that must write several rows in one D1 call
+ * (an account-level event fans out to every org the person belongs to — issue #82). Use
+ * `writeAuditLog` for the single-row case; this exists so that fan-out does not become one
+ * subrequest per row on an auth path.
+ */
+export function auditLogStatement(env: Env, entry: AuditEntry) {
+  return env.DB.prepare(
     'INSERT INTO audit_log (id, org_id, actor_id, actor_type, action, resource_type, resource_id, ip, user_agent, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).bind(
     `audit_${crypto.randomUUID().replace(/-/g, '')}`,
@@ -50,7 +58,11 @@ export async function writeAuditLog(env: Env, entry: {
     entry.ip ?? null,
     entry.userAgent ?? null,
     new Date().toISOString(),
-  ).run()
+  )
+}
+
+export async function writeAuditLog(env: Env, entry: AuditEntry): Promise<void> {
+  await auditLogStatement(env, entry).run()
 }
 
 /**

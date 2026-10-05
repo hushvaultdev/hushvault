@@ -42,7 +42,7 @@ import {
   tokenSubmitRateLimit,
 } from '../middleware/auth'
 import { consumeIdentityLimit, identityKey } from '../middleware/rate-limit'
-import { getRequestIp, writeAuditLog } from '../lib/security'
+import { auditLogStatement, getRequestIp, writeAuditLog } from '../lib/security'
 import { consumeToken, issueToken, purgeExpiredTokens } from '../lib/auth-tokens'
 import { revokeApiKeysStatement, spendEmailBudget } from '../lib/account-security'
 import { sendEmail } from '../lib/email'
@@ -75,6 +75,13 @@ async function listMemberships(env: Env, userId: string): Promise<OrgMembership[
 }
 
 /**
+ * How many organisations one account-level event fans out to. A person in more orgs than this
+ * keeps the oldest memberships' rows; the bound exists so that one request cannot grow without
+ * limit (orgs are self-service), not because a higher number would be wrong.
+ */
+const ACCOUNT_AUDIT_ORG_LIMIT = 50
+
+/**
  * An account-level security event (email verified, password reset requested or completed, an
  * unverified account claimed over OAuth) is about the person, not about one organisation — but
  * `audit_log` is per-org and every reader of it is an admin of one org.
@@ -92,20 +99,22 @@ async function writeAccountAuditLog(env: Env, entry: {
   ip?: string | null
   userAgent?: string | null
 }): Promise<void> {
-  const { results } = await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ?')
-    .bind(entry.userId).all<{ org_id: string }>()
-  for (const row of results) {
-    await writeAuditLog(env, {
-      orgId: row.org_id,
-      actorId: entry.userId,
-      actorType: entry.actorType,
-      action: entry.action,
-      resourceType: 'user',
-      resourceId: entry.userId,
-      ip: entry.ip ?? null,
-      userAgent: entry.userAgent ?? null,
-    })
-  }
+  const { results } = await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT ?')
+    .bind(entry.userId, ACCOUNT_AUDIT_ORG_LIMIT).all<{ org_id: string }>()
+  if (results.length === 0) return
+  // One D1 call, not one per org: nothing caps how many organisations a person can belong to, and
+  // this runs on the password-reset and email-verification paths, where a per-org round trip would
+  // turn a membership count into a subrequest count and could exhaust the request's budget.
+  await env.DB.batch(results.map((row) => auditLogStatement(env, {
+    orgId: row.org_id,
+    actorId: entry.userId,
+    actorType: entry.actorType,
+    action: entry.action,
+    resourceType: 'user',
+    resourceId: entry.userId,
+    ip: entry.ip ?? null,
+    userAgent: entry.userAgent ?? null,
+  })))
 }
 
 const registerSchema = z.object({

@@ -10,7 +10,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
-import { getRequestIp, writeAuditLog } from '../lib/security'
+import { auditLogStatement, getRequestIp, writeAuditLog } from '../lib/security'
 import {
   issueSession,
   presentedRefreshToken,
@@ -132,16 +132,33 @@ orgRoutes.post('/:id/switch', orgSwitchRateLimit, requireAuth, requireHuman, zVa
   const viaCookie = !bodyToken
   if (viaCookie) setRefreshCookie(c, session.refreshToken)
 
-  await writeAuditLog(c.env, {
+  // Two rows, because an audit log is read per org and a switch is an event in both: the org being
+  // left records that this session stopped acting there, which is otherwise invisible to its
+  // admins, and the org being entered records the arrival. The source row is skipped when the
+  // caller is already acting in the target org (a no-op switch the dashboard can send on reload).
+  const auditRows = [auditLogStatement(c.env, {
     orgId: id,
     actorId: auth.userId,
     actorType: auth.actorType,
-    action: 'org.switch',
+    action: 'org.switch_in',
     resourceType: 'organisation',
     resourceId: id,
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),
-  })
+  })]
+  if (auth.orgId !== id) {
+    auditRows.push(auditLogStatement(c.env, {
+      orgId: auth.orgId,
+      actorId: auth.userId,
+      actorType: auth.actorType,
+      action: 'org.switch_out',
+      resourceType: 'organisation',
+      resourceId: id,
+      ip: getRequestIp(c),
+      userAgent: c.req.header('user-agent'),
+    }))
+  }
+  await c.env.DB.batch(auditRows)
 
   return c.json({
     data: {

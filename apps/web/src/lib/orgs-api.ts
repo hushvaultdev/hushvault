@@ -1,4 +1,4 @@
-import { ApiError, apiFetch } from './api'
+import { apiFetch } from './api'
 import type { Role, Session } from './types'
 
 // Typed client for the multi-org endpoints (docs/plans/multi-org-and-invites.md, Lanes A and B).
@@ -216,20 +216,10 @@ export async function fetchOrgs(): Promise<OrgList> {
 }
 
 export async function createOrg(name: string): Promise<OrgSummary | null> {
-  // `name` is the field the plan implies; `organisationName` is what POST /api/auth/register
-  // calls the same thing. Some schemas in this API are strict, so the two cannot be sent
-  // together — a validation refusal of the first spelling is retried with the second rather than
-  // shown to the user as "could not create".
-  let payload: unknown
-  try {
-    payload = await apiFetch<unknown>(ORGS, { method: 'POST', body: { name } })
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 400 && err.code === 'VALIDATION_ERROR') {
-      payload = await apiFetch<unknown>(ORGS, { method: 'POST', body: { organisationName: name } })
-    } else {
-      throw err
-    }
-  }
+  // `{ name }` is settled: POST /api/orgs takes `name` (POST /api/auth/register calls the same
+  // thing `organisationName`, which is why this was written tolerantly before the API landed).
+  // Both spellings are documented in docs/API.md; do not re-add a retry for the other one.
+  const payload = await apiFetch<unknown>(ORGS, { method: 'POST', body: { name } })
   const container = asRow(payload)
   const row = container ? (asRow(container['org']) ?? container) : null
   const id = row ? text(row, 'id', 'orgId', 'org_id') : null
