@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { Env } from '../index'
 import { consumeRateLimit, type RateLimitResult, type WindowState } from '../lib/rate-limiter-do'
+import { logEvent } from '../lib/security'
 
 type RateLimitOptions = {
   scope: string
@@ -46,6 +47,43 @@ function consumeInMemory(env: object, key: string, now: number, limit: number, w
   )
 }
 
+/**
+ * Throttled emit for the limiter's own failure paths (issue #83).
+ *
+ * This is the hottest code in the Worker: it runs on every API request. A Durable Object outage
+ * fails EVERY call, so logging one line per request would turn a limiter outage into a logging
+ * outage — Workers Logs head-samples at the dashboard's rate and would drop the very lines an
+ * alert matches on, and the volume is unbounded in the one situation where it is already high.
+ *
+ * So: the FIRST occurrence in an isolate emits immediately (issue #83 wants the first one, not a
+ * spike), then at most one line per event name per minute per isolate, each carrying
+ * `occurrences` — the number suppressed since the previous line, inclusive. That keeps the line
+ * rate bounded by the number of live isolates rather than by request volume, while `occurrences`
+ * still preserves the magnitude for a rate alert. State is per-isolate module memory: no I/O, no
+ * D1, no KV — the fallback path must not depend on anything that can also be down.
+ */
+const DEGRADED_LOG_WINDOW_MS = 60_000
+const degradedState = new Map<string, { count: number; loggedAt: number }>()
+
+function logDegraded(event: string, scope: string): void {
+  const now = Date.now()
+  const state = degradedState.get(event) ?? { count: 0, loggedAt: 0 }
+  state.count += 1
+  if (state.loggedAt !== 0 && now - state.loggedAt < DEGRADED_LOG_WINDOW_MS) {
+    degradedState.set(event, state)
+    return
+  }
+  // `scope` is the scope of the request that happened to emit this line; the counter spans
+  // every scope, because the backend is shared and an outage is not scope-specific.
+  logEvent(event, { scope, occurrences: state.count, windowMs: DEGRADED_LOG_WINDOW_MS })
+  degradedState.set(event, { count: 0, loggedAt: now })
+}
+
+/** Test seam: drop the per-isolate throttle state so a case starts from "first occurrence". */
+export function resetRateLimitDegradedState(): void {
+  degradedState.clear()
+}
+
 // Fixed-window per-IP limiter backed by a SQLite Durable Object (one object per
 // scope:identity, so counting is atomic and strongly consistent). Each scope keeps
 // its own counter so route-specific and global limits stack. All responses carry
@@ -67,15 +105,23 @@ export function createRateLimitMiddleware(options: RateLimitOptions): Middleware
       }
     } catch {
       if (options.failClosed) {
+        // Visible to the caller as a 503 and countable in the 5xx rate, but an operator still
+        // needs to know it was the limiter and not the route that failed.
+        logDegraded('rate_limit.unavailable', options.scope)
         return c.json({ error: 'SERVICE_UNAVAILABLE', message: 'Service temporarily unavailable. Please try again shortly.' }, 503)
       }
       // The Durable Object is unreachable and this scope would rather serve than refuse.
       // Degrade to the per-isolate counter instead of dropping the limit entirely: it is
       // weak (not shared across isolates or colos) but finite, so an outage of the limiter
       // does not hand an attacker an unmetered secret-read endpoint.
+      logDegraded('rate_limit.degraded', options.scope)
       try {
         result = consumeInMemory(c.env, key, Date.now(), options.limit, options.windowMs)
       } catch {
+        // Both backends failed: this request is NOT rate limited at all. Strictly worse than
+        // the degraded case and it gets its own name, because the response is a normal 200 and
+        // nothing else distinguishes it.
+        logDegraded('rate_limit.disabled', options.scope)
         return next()
       }
     }
@@ -118,6 +164,10 @@ export async function consumeIdentityLimit(env: Env, input: IdentityLimit): Prom
       : consumeInMemory(env, key, Date.now(), input.limit, input.windowMs)
     return { allowed: result.allowed, remaining: result.remaining }
   } catch {
+    // Every caller here treats `unavailable` as a silent decision of its own (skip the mail,
+    // allow the refetch), so without this line a limiter outage is invisible on these paths
+    // too. Throttled the same way: these run on request paths, not on the cron.
+    logDegraded('rate_limit.unavailable', input.scope)
     return { unavailable: true }
   }
 }

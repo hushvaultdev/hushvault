@@ -2,12 +2,12 @@ import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
-import { loadKeyRing, encryptSecretWithRing, decryptSecretWithRing } from '../crypto/envelope'
+import { KeyRingError, loadKeyRing, encryptSecretWithRing, decryptSecretWithRing } from '../crypto/envelope'
 import { loadWriteRing } from '../lib/key-rotation'
 import { createPrefixedId } from '../lib/auth'
 import { enqueueSyncForEnvironment } from '../integrations/sync-scheduler'
 import { requireAuth, requireRole, secretReadRateLimit, secretWriteRateLimit } from '../middleware/auth'
-import { MAX_SECRET_VALUE_BYTES, getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
+import { MAX_SECRET_VALUE_BYTES, getRequestIp, logEvent, logKeyRingError, writeAuditLog } from '../lib/security'
 import { KV_DELETE_CHUNK, allSecretBlobKeys, historyBlobKey, secretBlobKey } from '../lib/secret-blobs'
 import { validationHook } from '../lib/validation'
 
@@ -103,6 +103,18 @@ secretRoutes.get('/:name', secretReadRateLimit, async (c) => {
     )
   } catch (err) {
     logKeyRingError(err)
+    // logKeyRingError only speaks for KeyRingError, so every other cause — a corrupt blob, a
+    // row still on enc_version 1 under ENFORCE_AAD, an AAD mismatch — produced no log at all on
+    // this path while resolve-environment.ts logged the same failure (issue #83). DECRYPTION_FAILED
+    // should be zero, so it must be alertable from wherever it happens. Error name and ids only:
+    // never the blob, the wrapped DEK, the key version's material or the secret's name.
+    if (!(err instanceof KeyRingError)) {
+      logEvent('secret.decrypt_failed', {
+        secretId: secret.id,
+        environmentId: secret.env_id,
+        reason: err instanceof Error ? err.name : 'UnknownError',
+      })
+    }
     return c.json({ error: 'DECRYPTION_FAILED', message: 'Could not decrypt secret' }, 500)
   }
 

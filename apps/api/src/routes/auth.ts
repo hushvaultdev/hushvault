@@ -42,7 +42,7 @@ import {
   tokenSubmitRateLimit,
 } from '../middleware/auth'
 import { consumeIdentityLimit, identityKey } from '../middleware/rate-limit'
-import { getRequestIp, logEvent, writeAuditLog } from '../lib/security'
+import { getRequestIp, writeAuditLog } from '../lib/security'
 import { consumeToken, issueToken, purgeExpiredTokens } from '../lib/auth-tokens'
 import { revokeApiKeysStatement, spendEmailBudget } from '../lib/account-security'
 import { sendEmail } from '../lib/email'
@@ -118,13 +118,21 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
   const session = await issueSession(c.env, { userId, orgId, role: 'owner' })
   setRefreshCookie(c, session.refreshToken)
   // Verification mail: in the background, so a failed or slow send never fails registration.
-  await runBackground(c, sendVerificationEmail(c.env, { userId, email: email.toLowerCase(), orgId }))
+  await runBackground(c, sendVerificationEmail(c.env, { userId, email: email.toLowerCase(), orgId }, 'registration'))
   return c.json({ data: { userId, orgId, token: session.accessToken, expiresIn: session.expiresIn, emailVerified: false, ...(wantsBodyRefresh(c) ? { refreshToken: session.refreshToken } : {}) } }, 201)
 })
 
-/** Issue a verify_email token and mail it. Respects the global daily budget; never throws to the caller. */
-async function sendVerificationEmail(env: Env, user: { userId: string; email: string; orgId: string }): Promise<void> {
-  if (!(await spendEmailBudget(env, 'verify'))) return
+/**
+ * Issue a verify_email token and mail it. Respects the global daily budget; never throws to the
+ * caller. A skipped send is logged by spendEmailBudget, with `purpose` saying which caller it
+ * was — registration and a user-triggered resend are the same mail but very different incidents.
+ */
+async function sendVerificationEmail(
+  env: Env,
+  user: { userId: string; email: string; orgId: string },
+  purpose: 'registration' | 'verify_resend',
+): Promise<void> {
+  if (!(await spendEmailBudget(env, 'verify', purpose))) return
   const { token } = await issueToken(env, { userId: user.userId, purpose: 'verify_email', email: user.email })
   const link = buildTokenLink(env, '/verify-email', token)
   if (!link) return
@@ -311,7 +319,7 @@ authRoutes.post('/verify-email/send', requireAuth, async (c) => {
     if (!perMinute.allowed || !('allowed' in perHour) || !perHour.allowed) {
       return c.json({ error: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests. Please wait a moment and try again.' }, 429)
     }
-    await runBackground(c, sendVerificationEmail(c.env, { userId: auth.userId, email: user.email, orgId: auth.orgId }))
+    await runBackground(c, sendVerificationEmail(c.env, { userId: auth.userId, email: user.email, orgId: auth.orgId }, 'verify_resend'))
   }
   return c.json({ data: { ok: true } }, 202)
 })
@@ -353,10 +361,9 @@ async function processPasswordResetRequest(env: Env, email: string): Promise<voi
   // 'reset', not 'verify': the two buckets exist so that a sign-up flood cannot exhaust the
   // budget that account recovery depends on. Spending the verify bucket here undid that, and
   // the failure is invisible — forgot-password still answers 202 and sends nothing.
-  if (!(await spendEmailBudget(env, 'reset'))) {
-    logEvent('email.budget_exhausted', { kind: 'reset' })
-    return
-  }
+  // spendEmailBudget emits the line (exhausted vs limiter-unavailable); the call site no longer
+  // duplicates it, which is what kept the other two send paths silent.
+  if (!(await spendEmailBudget(env, 'reset', 'forgot_password'))) return
 
   const member = await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').bind(user.id).first<{ org_id: string }>()
   const { token } = await issueToken(env, { userId: user.id, purpose: 'reset_password', email: user.email })
@@ -424,7 +431,7 @@ authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', rese
   }
   // Heads-up mail to the owner of the address (best effort, within the daily budget).
   await runBackground(c, (async () => {
-    if (await spendEmailBudget(c.env, 'reset')) await sendEmail(c.env, passwordChangedMessage(consumed.email))
+    if (await spendEmailBudget(c.env, 'reset', 'password_changed')) await sendEmail(c.env, passwordChangedMessage(consumed.email))
   })())
   return c.json({ data: { reset: true } })
 })

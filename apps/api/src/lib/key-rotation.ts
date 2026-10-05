@@ -19,6 +19,7 @@ import {
   verifyKeyCheck,
   type KeyRing,
 } from '../crypto/envelope'
+import { logEvent } from './security'
 import { clearSystemState, readSystemState, writeSystemState } from './system-state'
 
 export const DEFAULT_BATCH_SIZE = 100
@@ -59,6 +60,7 @@ type RotationRow = {
   skipped: number
   failed: number
   last_error_code: string | null
+  updated_at: string
 }
 
 export type TickResult =
@@ -87,8 +89,37 @@ function batchSizeFrom(env: Env, override?: number): number {
   return Math.min(Math.floor(raw), MAX_BATCH_SIZE)
 }
 
-function logEvent(event: string, fields: Record<string, string | number | null> = {}): void {
-  console.log(JSON.stringify({ level: 'info', event, ...fields }))
+/**
+ * A rotation that is `running` but whose `updated_at` has not moved for this long is not
+ * progressing: the cron runs every minute and every path that touches a running job (a driven
+ * batch, a phase change, `holdOnError`) writes `updated_at`. Ten minutes is the threshold issue
+ * #83 asks to alert on, and it is well clear of the 90-second lease, so a single slow or
+ * contended tick cannot trip it.
+ */
+export const ROTATION_STALE_MS = 10 * 60_000
+
+/**
+ * Emit when a `running` rotation has gone quiet. Re-emits on every tick while it is stuck, which
+ * is deliberate: the alert condition is "this line is present", and a job can wedge long after
+ * whatever caused it scrolled out of the log window.
+ */
+function noteIfStalled(running: RotationRow | null, nowIso: string): void {
+  if (!running) return
+  const updated = Date.parse(running.updated_at ?? '')
+  // An unparseable or future timestamp is not evidence of a stall; say nothing rather than
+  // page someone over a clock.
+  if (!Number.isFinite(updated)) return
+  const staleMs = Date.parse(nowIso) - updated
+  if (staleMs < ROTATION_STALE_MS) return
+  console.error(JSON.stringify({
+    level: 'error',
+    event: 'key_rotation.stalled',
+    staleMs,
+    phase: running.phase,
+    from: running.from_version,
+    to: running.to_version,
+    lastErrorCode: running.last_error_code ?? null,
+  }))
 }
 
 /** Deployment-wide event fanned out to every organisation's audit log (actor: system). */
@@ -132,13 +163,24 @@ export async function rotationTick(env: Env, options: TickOptions = {}): Promise
   try {
     ring = loadKeyRing(env)
   } catch (err) {
-    return { state: 'error', code: err instanceof KeyRingError ? err.code : 'KEY_INVALID' }
+    // The tick cannot do anything at all without a ring, and it returned this every minute
+    // forever with nothing in the logs (issue #83). Code and nothing else — a KeyRingError's
+    // code names the problem, never the key.
+    const code = err instanceof KeyRingError ? err.code : 'KEY_INVALID'
+    console.error(JSON.stringify({ level: 'error', event: 'key_rotation.key_unavailable', code }))
+    return { state: 'error', code }
   }
 
   try {
     const active = await env.DB.prepare("SELECT version, check_value FROM encryption_keys WHERE status = 'active' LIMIT 1")
       .first<{ version: string; check_value: string }>()
     const running = await env.DB.prepare("SELECT * FROM key_rotations WHERE status = 'running' LIMIT 1").first<RotationRow>()
+
+    // Emitted before anything else is decided, and from the row as it was READ, so a job nothing
+    // is driving reports every tick instead of once. Checked here rather than in `drive` because
+    // the paths that skip `drive` (no active key, a version mismatch, a held lease) are exactly
+    // the ones that can leave a job wedged.
+    noteIfStalled(running, nowIso)
 
     if (!active) return await bootstrap(env, ring, nowIso)
 
@@ -363,15 +405,23 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
     let rewrapped = 0
     let skipped = 0
     let failed = 0
+    // Per-code tallies for the quarantine log line. KEY_VERSION_UNAVAILABLE means a key is
+    // missing from the deployment and the row could still be saved by restoring it;
+    // UNWRAP_FAILED means the wrapped DEK did not unwrap under a key the ring does have, which
+    // is data damage. Same quarantine, completely different incident.
+    let keyVersionUnavailable = 0
+    let unwrapFailed = 0
     for (let start = 0; start < rows.length; start += WRITE_CHUNK) {
       const chunk = rows.slice(start, start + WRITE_CHUNK)
       const writes: ReturnType<D1Database['prepare']>[] = []
       const failures: ReturnType<D1Database['prepare']>[] = []
       let chunkFailed = 0
       for (const row of chunk) {
-        const quarantine = (code: string) => {
+        const quarantine = (code: 'KEY_VERSION_UNAVAILABLE' | 'UNWRAP_FAILED') => {
           failed += 1
           chunkFailed += 1
+          if (code === 'KEY_VERSION_UNAVAILABLE') keyVersionUnavailable += 1
+          else unwrapFailed += 1
           failures.push(
             env.DB.prepare('INSERT OR IGNORE INTO key_rotation_failures (rotation_id, table_name, row_id, error_code) VALUES (?, ?, ?, ?)')
               .bind(job.id, table, row.id, code),
@@ -423,6 +473,23 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
     await env.DB.prepare("UPDATE key_rotations SET rewrapped = rewrapped + ?, skipped = skipped + ?, last_error_code = NULL, updated_at = ? WHERE id = ? AND status = 'running'")
       .bind(rewrapped, skipped, nowIso, job.id).run()
 
+    // A quarantined row is a row that will be undecryptable the moment an operator retires the
+    // old key. The rows themselves were only visible through the status endpoint, so nothing
+    // emitted at the moment it happened (issue #83). Logged per tick, as it happens, as well as
+    // once at the end — a long rotation can quarantine rows hours before it finishes.
+    if (failed > 0) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'key_rotation.rows_quarantined',
+        table,
+        quarantined: failed,
+        keyVersionUnavailable,
+        unwrapFailed,
+        from: job.from_version,
+        to: job.to_version,
+      }))
+    }
+
     if (rows.length === limit) {
       logEvent('key_rotation.progress', { rewrapped, skipped, failed })
       return { state: 'progress', rewrapped, skipped, failed }
@@ -456,6 +523,21 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
     if (Number(done.meta.changes) === 1) {
       await auditAllOrgs(env, status === 'completed' ? 'key.rotation.completed' : 'key.rotation.completed_with_errors', job.to_version, nowIso)
       logEvent('key_rotation.finished', { status, failed: failedTotal })
+      // The one line that must be alerted on even if every other rotation line is ignored. The
+      // status endpoint already reported unresolvedRows / safeToRetireOldKeys (#80), but nothing
+      // emitted when a rotation ENDED in that state, so the signal only existed for someone who
+      // thought to go and look. Same field names as the endpoint, deliberately, so an operator
+      // reading the alert and the endpoint is reading one vocabulary.
+      if (failedTotal > 0) {
+        console.error(JSON.stringify({
+          level: 'error',
+          event: 'key_rotation.unresolved_rows',
+          unresolvedRows: failedTotal,
+          safeToRetireOldKeys: false,
+          from: job.from_version,
+          to: job.to_version,
+        }))
+      }
     }
     return { state: 'completed', failed: failedTotal }
   } finally {

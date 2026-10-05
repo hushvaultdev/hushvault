@@ -15,7 +15,7 @@ import { secretScannerRouter } from './routes/secret-scanner'
 import { securityHeaders } from './middleware/security-headers'
 import { globalApiRateLimit } from './middleware/auth'
 import { RateLimiter } from './lib/rate-limiter-do'
-import { SecretTooLargeError, redactPath } from './lib/security'
+import { SecretTooLargeError, logEvent, redactPath } from './lib/security'
 import { housekeepingTick } from './lib/housekeeping'
 import { rotationTick } from './lib/key-rotation'
 import { syncTick } from './integrations/sync-scheduler'
@@ -176,13 +176,30 @@ export { app }
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Both ticks swallow their own failures: an unhandled rejection in one waitUntil
-    // promise must never abort the other.
-    ctx.waitUntil(rotationTick(env).then(() => undefined, () => undefined))
-    // Automatic sync triggers (M4): outbox, schedules, retries. Independent of rotation; never throws.
-    ctx.waitUntil(syncTick(env).then(() => undefined, () => undefined))
-    // Retention and purge deletes (audit log, expired share links, used auth tokens). Nothing
-    // else removes these rows, so without this they grow until D1's storage limit stops writes.
-    ctx.waitUntil(housekeepingTick(env).then(() => undefined, () => undefined))
+    // Each tick's failure is caught on its OWN promise before Promise.all can see it, so an
+    // unhandled rejection in one still cannot abort the others — the original invariant. They
+    // are then joined only so the heartbeat below can report all three outcomes in one line.
+    ctx.waitUntil((async () => {
+      const [rotation, sync, housekeeping] = await Promise.all([
+        // Automatic sync triggers (M4): outbox, schedules, retries. Independent of rotation.
+        rotationTick(env).then((r) => r, () => null),
+        syncTick(env).then(() => 'ok' as const, () => 'threw' as const),
+        // Retention and purge deletes (audit log, expired share links, used auth tokens). Nothing
+        // else removes these rows, so without this they grow until D1's storage limit stops writes.
+        housekeepingTick(env).then(() => 'ok' as const, () => 'threw' as const),
+      ])
+      // The cron's heartbeat (issue #83). A `scheduled` handler that stops firing — a removed
+      // trigger, a deploy that dropped it, a Cloudflare incident — produces no signal of any
+      // kind, so the ONLY way to see it is to alert on the absence of this line. It is also the
+      // first place a thrown tick becomes visible: all three were swallowed outright before.
+      logEvent('cron.tick', {
+        rotation: rotation ? rotation.state : 'threw',
+        // `state: 'error'` carries the code that says which control is broken; the other states
+        // have no code and report null rather than inventing one.
+        rotationCode: rotation && 'code' in rotation ? rotation.code : null,
+        sync,
+        housekeeping,
+      })
+    })())
   },
 }

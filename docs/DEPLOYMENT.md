@@ -188,7 +188,11 @@ Push to `dev`. If your build token cannot run D1 migrations (see above), first r
 curl -i https://<dev-api-host>/health
 ```
 
-`/health` runs `SELECT 1` against D1 and returns 503 when the DB is unreachable.
+`/health` probes **both** stores a secret read needs and returns 503 when either is down:
+`SELECT 1` against D1, and a read of the never-written key `health:probe` against KV (a read, so
+it cannot consume KV's daily write quota). The `checks` object says which one failed — a missing
+KV binding shows as `checks.kv: "unconfigured"`, which is worth checking on a first deploy.
+See docs/OPERATIONS.md § 3 for what it does and does not prove.
 The first deploy of each env runs the Durable Object migration `v1`
 (`new_sqlite_classes = ["RateLimiter"]`); new DO classes must be SQLite-backed
 (<https://developers.cloudflare.com/changelog/post/2026-07-09-restrict-new-kv-backed-namespaces/>).
