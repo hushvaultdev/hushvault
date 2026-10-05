@@ -10,7 +10,8 @@
 // blobs, which nothing collected and nothing could even enumerate. Issue #84 added a fifth,
 // one-way one: the pre-0014 `secrethist:` copies, which dropping `secret_history` turned from
 // reachable storage into blobs nothing in D1 names and nothing can decrypt. It drains to zero
-// and stays there.
+// and stays there. Issue #82 added a sixth, for closed `org_invites` rows: every invitation an
+// organisation ever sends leaves one, and nothing on the request path removes it.
 //
 // Two rules shape this file:
 //   - Bounded per tick. The cron shares one subrequest and CPU budget with rotation and sync, so
@@ -30,6 +31,8 @@ export const AUDIT_SWEEP_ORGS_PER_TICK = 20
 export const AUDIT_SWEEP_ROWS_PER_TICK = 500
 /** Expired or exhausted share links removed per tick. */
 export const SHARE_PURGE_PER_TICK = 200
+/** Closed organisation invitations removed per tick (issue #82 Lane B). */
+export const INVITE_PURGE_PER_TICK = 200
 
 /** KV keys listed per tick. One list call; the cursor resumes on the next tick. */
 export const ORPHAN_SCAN_KEYS_PER_TICK = 200
@@ -69,6 +72,8 @@ export type HousekeepingResult = {
   auditRowsDeleted: number
   shareLinksDeleted: number
   authTokensDeleted: number
+  /** Expired or revoked organisation invitations removed (issue #82 Lane B). */
+  orgInvitesDeleted: number
   /** Blobs listed from KV and checked against D1 this tick. */
   orphanBlobsScanned: number
   /** Of those, the ones no live row references. Most will be inside the grace period. */
@@ -119,6 +124,32 @@ async function purgeShareLinks(env: Env, now: Date): Promise<number> {
        SELECT id FROM share_links WHERE expires_at <= ? OR view_count >= max_views LIMIT ?
      )`,
   ).bind(now.toISOString(), SHARE_PURGE_PER_TICK).run()
+  return Number(result.meta.changes ?? 0)
+}
+
+/**
+ * Organisation invitations that can never be accepted again (issue #82 Lane B).
+ *
+ * One predicate covers every closed state, because `expires_at` is set at creation and never
+ * moved: seven days after an invitation is written it is past its expiry whether it was accepted,
+ * revoked or simply ignored. Revoked rows go sooner, since revoking is an admin's way of saying
+ * "forget this one" and the partial unique index has already freed the address.
+ *
+ * The retained window is what the refusals ride on, and it is not an accident of the bound: while
+ * a row survives, a token holder re-clicking a link is told `INVITE_ACCEPTED` or `INVITE_REVOKED`
+ * rather than `INVITE_NOT_FOUND`, and a row only disappears once the token it names is dead on
+ * expiry anyway. Nothing is lost by collecting it: the trail lives in `audit_log`
+ * (`org.invite.create` / `.sent` / `.revoke` / `.accept`), which has its own retention.
+ *
+ * Bounded like the sweeps around it, and by primary key out of a bounded SELECT rather than
+ * `DELETE ... LIMIT`, which SQLite only supports with a compile option D1 does not guarantee.
+ */
+async function purgeOrgInvites(env: Env, now: Date): Promise<number> {
+  const result = await env.DB.prepare(
+    `DELETE FROM org_invites WHERE id IN (
+       SELECT id FROM org_invites WHERE expires_at <= ? OR revoked_at IS NOT NULL LIMIT ?
+     )`,
+  ).bind(now.toISOString(), INVITE_PURGE_PER_TICK).run()
   return Number(result.meta.changes ?? 0)
 }
 
@@ -358,6 +389,7 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
     auditRowsDeleted: 0,
     shareLinksDeleted: 0,
     authTokensDeleted: 0,
+    orgInvitesDeleted: 0,
     orphanBlobsScanned: 0,
     orphanBlobsUnreferenced: 0,
     orphanBlobsDeleted: 0,
@@ -368,6 +400,7 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
     ['audit', async () => { result.auditRowsDeleted = await sweepAuditLog(env, now) }],
     ['share', async () => { result.shareLinksDeleted = await purgeShareLinks(env, now) }],
     ['tokens', async () => { result.authTokensDeleted = await purgeAuthTokens(env, now) }],
+    ['org_invites', async () => { result.orgInvitesDeleted = await purgeOrgInvites(env, now) }],
     ['orphan_blobs', async () => { Object.assign(result, await sweepOrphanBlobs(env, now)) }],
     ['legacy_history_blobs', async () => { result.legacyHistoryBlobsDeleted = await purgeLegacyHistoryBlobs(env) }],
   ] as const) {
@@ -392,11 +425,12 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
   if (result.legacyHistoryBlobsDeleted) {
     logEvent('housekeeping.legacy_history_blobs', { deleted: result.legacyHistoryBlobsDeleted })
   }
-  if (result.auditRowsDeleted || result.shareLinksDeleted || result.authTokensDeleted) {
+  if (result.auditRowsDeleted || result.shareLinksDeleted || result.authTokensDeleted || result.orgInvitesDeleted) {
     logEvent('housekeeping.swept', {
       auditRowsDeleted: result.auditRowsDeleted,
       shareLinksDeleted: result.shareLinksDeleted,
       authTokensDeleted: result.authTokensDeleted,
+      orgInvitesDeleted: result.orgInvitesDeleted,
     })
   }
   return result

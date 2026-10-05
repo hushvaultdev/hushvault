@@ -22,9 +22,22 @@ export function ciTokenMayReach(method: string, pathname: string, envId: string)
   return method === 'GET' && pathname === `/api/environments/${envId}/resolved`
 }
 
+/**
+ * The caller's membership of the organisation named in the request PATH (`:id`), as resolved by
+ * `requireOrgRole`. Separate from `auth`, which is the organisation the credential acts in: the
+ * two are the same for every dashboard request, and must never be assumed to be.
+ */
+export type OrgScope = {
+  /** The organisation from the path. */
+  orgId: string
+  /** The caller's role IN THAT organisation, read from `members` on this request. */
+  role: AuthContext['role']
+}
+
 declare module 'hono' {
   interface ContextVariableMap {
     auth: AuthContext
+    orgScope: OrgScope
   }
 }
 
@@ -184,6 +197,53 @@ export const integrationPreviewRateLimit = createRateLimitMiddleware({
 })
 
 /**
+ * Membership of the organisation in the `:id` PATH parameter, re-read from `members` on this
+ * request, with the role it grants put on the context as `orgScope`. For the members and
+ * invitations endpoints (issue #82 Lane B), which name their organisation in the path rather than
+ * taking it from the credential. Run after `requireAuth`.
+ *
+ * Two things it must get right, and both are about what a refusal TELLS the caller.
+ *
+ * 1. The role comes from the membership of the ORGANISATION IN THE PATH, never from `auth.role`
+ *    (which belongs to the credential's organisation). Reading it here is also what makes a
+ *    demotion take effect at once instead of within an access token's lifetime — the same reason
+ *    `requireCurrentAdmin` re-reads, except keyed on the path.
+ *
+ * 2. A caller with no membership gets `404 NOT_FOUND`, the SAME answer as an organisation id that
+ *    does not exist. Probing `/api/orgs/<guess>/members` therefore cannot be used to discover
+ *    which organisations exist, who is in them, or whether an id is real.
+ *
+ *    The one exception is not an exception to that rule: when the credential presented ITSELF
+ *    names this organisation (`auth.orgId === :id`) and the membership is gone, the answer is
+ *    `403 MEMBERSHIP_REVOKED`. That tells the caller nothing they did not already hold — their
+ *    own token says which organisation it acts in — and it is the code the dashboard needs in
+ *    order to send someone whose membership ended to the organisation picker rather than show
+ *    them an error on a page they can no longer load.
+ */
+export function requireOrgRole(minimum: AuthContext['role']): MiddlewareHandler<{ Bindings: Env }> {
+  return async (c, next) => {
+    const auth = c.get('auth')
+    const orgId = c.req.param('id')
+    if (!orgId) {
+      return c.json({ error: 'NOT_FOUND', message: 'Organisation not found' }, 404)
+    }
+    const member = await c.env.DB.prepare('SELECT role FROM members WHERE org_id = ? AND user_id = ? LIMIT 1')
+      .bind(orgId, auth.userId).first<{ role: AuthContext['role'] }>()
+    if (!member) {
+      if (auth.orgId === orgId) {
+        return c.json({ error: 'MEMBERSHIP_REVOKED', message: 'Your membership of this organisation has ended' }, 403)
+      }
+      return c.json({ error: 'NOT_FOUND', message: 'Organisation not found' }, 404)
+    }
+    if (ROLE_RANK[member.role] === undefined || ROLE_RANK[member.role] < ROLE_RANK[minimum]) {
+      return c.json({ error: 'FORBIDDEN', message: 'You do not have permission to perform this action' }, 403)
+    }
+    c.set('orgScope', { orgId, role: member.role })
+    return next()
+  }
+}
+
+/**
  * Humans only, with the caller's CURRENT membership re-read: the JWT role claim can be up to its lifetime stale, so
  * a demoted or removed admin must lose access to credential- and CI-access management immediately.
  */
@@ -307,6 +367,57 @@ export const orgSwitchRateLimit = createRateLimitMiddleware({
   limit: 60,
   windowMs: 60_000,
   failClosed: true,
+})
+
+/**
+ * Keyed on the organisation in the request PATH, as `requireOrgRole` resolved it — so these
+ * limiters must run AFTER it. `auth.orgId` is only the fallback, for a route that has no `:id`.
+ * Taking the id straight off the request instead would let a caller mint a fresh bucket per
+ * made-up org id; `orgScope` is only ever set for an organisation they are a member of.
+ */
+const byPathOrganisation = (c: Parameters<NonNullable<Parameters<typeof createRateLimitMiddleware>[0]['keyFn']>>[0]): string | undefined => {
+  const orgId = c.get('orgScope')?.orgId ?? c.get('auth')?.orgId
+  return orgId ? `org:${orgId}` : undefined
+}
+
+/**
+ * Creating an invitation sends mail to an address the caller chose, which makes it the one
+ * authenticated endpoint that can be pointed at a stranger's inbox. Capped per organisation, not
+ * per IP: the thing to bound is "how much mail can one organisation send", which an attacker with
+ * a stolen admin session must not be able to raise by changing IP. Fails closed — a 503 here costs
+ * an admin a retry, while an unmetered one costs somebody else a mail-bomb.
+ */
+export const inviteCreateRateLimit = createRateLimitMiddleware({
+  scope: 'invite-create',
+  limit: 20,
+  windowMs: 60_000,
+  failClosed: true,
+  keyFn: byPathOrganisation,
+})
+
+/**
+ * Accepting an invitation. Per IP and fail-closed: the tokens carry 256 bits, so this is not what
+ * stops guessing — it caps the database work an unauthenticated-ish flood can cause, the same
+ * reasoning as `auth-token-submit`.
+ */
+export const inviteAcceptRateLimit = createRateLimitMiddleware({
+  scope: 'invite-accept',
+  limit: 10,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
+/**
+ * Role changes and removals. Per organisation, because each one writes to `members`, revokes
+ * credentials and files an audit row for THAT organisation, and because a stolen admin session
+ * must not be able to churn a whole member list faster than anyone can read the audit trail.
+ */
+export const memberWriteRateLimit = createRateLimitMiddleware({
+  scope: 'member-write',
+  limit: 30,
+  windowMs: 60_000,
+  failClosed: true,
+  keyFn: byPathOrganisation,
 })
 
 // Token submissions (verify / reset): the tokens have 256 bits, so this only caps abuse of the DB.

@@ -66,3 +66,42 @@ export function passwordChangedMessage(to: string): EmailMessage {
   ])
   return { to, subject: 'Your HushVault password was changed', text, html }
 }
+
+/**
+ * An invitation to an organisation (issue #82 Lane B).
+ *
+ * The organisation's name is in here because the message goes to the address an admin of that
+ * organisation chose to invite — that is the whole point of the mail. It is deliberately NOT in
+ * the `INVITE_EMAIL_MISMATCH` refusal, which anyone holding a forwarded link can trigger: the
+ * mail tells the invited address which organisation, the API tells a stranger nothing.
+ *
+ * Nothing else is included. Not who invited them (an internal address is not the recipient's
+ * business, and would turn the mail into a directory lookup), and no secret material beyond the
+ * single-use token the link carries in its fragment.
+ */
+export function orgInviteMessage(to: string, link: string, orgName: string): EmailMessage {
+  const { text, html } = layout(
+    `You have been invited to ${orgName}`,
+    [
+      `You have been invited to join the HushVault organisation "${orgName}". The link works once and expires in 7 days.`,
+      'An invitation belongs to an email address, so it can only be accepted while signed in to a HushVault account'
+      + ' on this address, with the address confirmed. You can create that account from the link.',
+      'If you were not expecting this, ignore this email. Nothing is added to any account until the invitation is accepted.',
+    ],
+    { url: link, label: 'Accept invitation' },
+  )
+  return { to, subject: `Join ${orgName} on HushVault`, text, html }
+}
+
+/**
+ * The invitation link: `buildTokenLink`'s fragment form, plus the non-secret `email` hint the
+ * accept page reads (orgs-helpers.parseInviteLink). The hint is what lets a signed-out visitor be
+ * told WHICH address to sign in with before the API has been asked anything — without it the page
+ * can only say "sign in with the invited address" and not name it. It rides in the fragment with
+ * the token, so it reaches no server log and no `Referer` header either, and it is an address the
+ * recipient already owns.
+ */
+export function buildInviteLink(env: LinkEnv, token: string, email: string): string | null {
+  const base = buildTokenLink(env, '/invites/accept', token)
+  return base === null ? null : `${base}&email=${encodeURIComponent(email)}`
+}
