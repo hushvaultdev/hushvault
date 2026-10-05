@@ -4,6 +4,7 @@
 // failed runs and `needs_attention` targets rather than exceptions.
 import type { SyncTrigger } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
+import { logEvent } from '../lib/security'
 import { MAX_SYNC_ATTEMPTS, loadSyncTarget, runSync } from './sync-engine'
 
 /** Changes inside this window coalesce into one run. The cron sweeps every minute, so latency is about 30-90 s. */
@@ -22,6 +23,10 @@ export const RELEASE_BACKOFF_MS = 60_000
 export const MAX_RUNS_PER_TICK = 5
 const SELECT_LIMIT = 25
 const OUTBOX_RETENTION_MS = 24 * 3_600_000
+/** An outbox row still pending this long past its due time is a backlog, not debounce latency (issue #83). */
+export const OUTBOX_OVERDUE_MS = 15 * 60_000
+/** How far back `sync.backlog` counts permanently abandoned runs, so the number is current rather than all-time. */
+const ABANDONED_WINDOW_MS = 24 * 3_600_000
 
 export type SyncTickResult = { changeRuns: number; scheduleRuns: number; retryRuns: number; deferred: number; failures: number }
 
@@ -200,6 +205,11 @@ async function retryFailed(env: Env, now: Date, tally: SyncTickResult, budget: B
     if (budget.left <= 0) return
     if (row.attempt >= MAX_SYNC_ATTEMPTS) {
       await env.DB.prepare('UPDATE sync_runs SET next_retry_at = NULL WHERE id = ?').bind(row.id).run()
+      // This target has stopped syncing and nothing will try again by itself. Clearing
+      // next_retry_at is what makes it permanent, and it was the only record of the decision:
+      // the row simply stops being selected (issue #83). Emitted exactly once per run, for the
+      // same reason — after this write the row is no longer a retry candidate.
+      logEvent('sync.gave_up', { targetId: row.target_id, attempt: row.attempt, maxAttempts: MAX_SYNC_ATTEMPTS })
       continue
     }
     if ((await autoRunsLastHour(env, row.org_id, now)) >= MAX_AUTO_RUNS_PER_ORG_PER_HOUR) {
@@ -212,6 +222,36 @@ async function retryFailed(env: Env, now: Date, tally: SyncTickResult, budget: B
     if (outcome === 'ran') tally.retryRuns += 1
     else if (outcome === 'failed') tally.failures += 1
   }
+}
+
+/**
+ * The three ways sync can be stopped without a single run failing in this tick (issue #83):
+ * rows queued and never drained, targets parked in `needs_attention` where nothing retries by
+ * itself, and runs that burned through MAX_SYNC_ATTEMPTS and had their retry marker cleared.
+ *
+ * One statement with scalar subqueries, not three round trips: it runs on every minute tick, and
+ * the point of the tick is to spend its subrequest budget on actual sync work. Emitted only when
+ * something is wrong, so the healthy steady state stays silent and the event is alertable on
+ * presence alone.
+ */
+async function reportBacklog(env: Env, now: Date): Promise<void> {
+  const row = await env.DB.prepare(
+    `SELECT
+       (SELECT count(*) FROM sync_outbox WHERE done_at IS NULL AND due_at < ?1) AS overdue,
+       (SELECT count(*) FROM sync_targets WHERE deleted_at IS NULL AND status = 'needs_attention') AS needs_attention,
+       (SELECT count(*) FROM sync_runs WHERE status IN ('failed', 'partial') AND attempt >= ?2
+          AND next_retry_at IS NULL AND started_at >= ?3) AS abandoned`,
+  ).bind(
+    new Date(now.getTime() - OUTBOX_OVERDUE_MS).toISOString(),
+    MAX_SYNC_ATTEMPTS,
+    new Date(now.getTime() - ABANDONED_WINDOW_MS).toISOString(),
+  ).first<{ overdue: number; needs_attention: number; abandoned: number }>()
+  if (!row) return
+  const overdue = Number(row.overdue ?? 0)
+  const needsAttention = Number(row.needs_attention ?? 0)
+  const abandoned = Number(row.abandoned ?? 0)
+  if (overdue + needsAttention + abandoned === 0) return
+  logEvent('sync.backlog', { overdue, needsAttention, abandoned, overdueAfterMs: OUTBOX_OVERDUE_MS })
 }
 
 /** One sweep. Called from the minute cron; safe to call concurrently (claims and single flight). */
@@ -231,9 +271,16 @@ export async function syncTick(env: Env, now: Date = new Date()): Promise<SyncTi
   } catch {
     // housekeeping only
   }
-  // Deferred work is expected steady state for a capped organisation: not worth a log line every minute.
-  if (tally.changeRuns + tally.scheduleRuns + tally.retryRuns + tally.failures > 0) {
-    console.error(JSON.stringify({ level: 'info', event: 'sync.tick', ...tally }))
+  try {
+    await reportBacklog(env, now)
+  } catch {
+    // Best effort: a failed count must never change what the tick did. The step failures above
+    // and the absence of `sync.tick` are the backstops.
   }
+  // UNCONDITIONAL, and that is the point (issue #83). This used to fire only when something
+  // happened, which made "sync is working and idle" and "the cron stopped firing" produce the
+  // same empty log — and a scheduled handler that stops running emits nothing it could be
+  // alerted on. One line a minute is the price of being able to alert on its ABSENCE.
+  logEvent('sync.tick', { ...tally })
   return tally
 }

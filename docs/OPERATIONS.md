@@ -110,9 +110,27 @@ deliberately. Logs must never contain secret values; the app does not log them.
 
 Watch:
 
-- `/health` returning non-200 (503 means D1 unreachable). CI smoke-tests it after
-  each deploy; add an external uptime check against `https://api.hushvault.dev/health`
-  (no monitor is configured by this repo).
+- `/health` returning non-200. CI smoke-tests it after each deploy; add an external uptime check
+  against `https://api.hushvault.dev/health` (no monitor is configured by this repo). The body
+  reports each dependency separately — read `checks`, not `status`:
+
+  ```json
+  { "status": "ok", "version": "0.0.1", "checks": { "db": "ok", "kv": "ok" } }
+  ```
+
+  `checks.db` is a `SELECT 1` against D1. `checks.kv` is a **read** of `health:probe`, a key
+  HushVault never writes: the probe expects `null`, and only a rejected read counts as a failure.
+  It is a read and not a write on purpose — the free plan caps KV writes and deletes per day, so
+  a probe that wrote once a minute would exhaust the quota it exists to detect. Each is `ok`,
+  `down` or (KV only) `unconfigured`, meaning the binding is missing from the deploy. `reason`
+  keeps its old single-string value (`database` when D1 is the failure) for anything already
+  matching on it. Either dependency down is a 503.
+
+  **`checks.kv: "ok"` does not prove KV writes work.** Cloudflare caches KV reads, misses
+  included, so a healthy answer can come from the edge; and a write-quota failure is only visible
+  to the request that writes. The probe proves the binding resolves and KV is reachable, which is
+  what makes "every secret is unreadable" visible at all — it used to leave health green.
+  `housekeeping.orphan_blobs` and `secret.decrypt_failed` are the signals for write-side trouble.
 - Error-rate and 5xx spikes, especially `DECRYPTION_FAILED` (possible wrong or
   rotated master key) and 429 spikes (abuse or a misbehaving client).
 - Failed CI deploy runs on `main`/`dev`.
@@ -138,6 +156,68 @@ Watch:
   D1 writes are failing *after* their KV write succeeded (the create and update paths write KV
   first), which is worth investigating on its own. A blob is only deleted once it has been
   proved unreferenced twice an hour apart, so a backlog is expected to lag, not to grow.
+
+### Alert conditions
+
+Every event HushVault emits that means "a control just stopped working", and what to alert on.
+All of them are structured JSON lines in Workers Logs with an `event` field; none of them ever
+carries a secret value, a key, a DEK, a token or an address. **No alert destination is wired up
+yet** (issue #83) — this table is what to configure, and it is also the list of names a query
+can be built from today.
+
+The **Alert on** column distinguishes three shapes, and the difference matters:
+
+- **Presence** — one line means something is wrong. Fire on the first occurrence.
+- **Rate** — occasional lines are normal; a sustained rate is not.
+- **Absence** — the line appearing is the *healthy* state. A cron that stops firing emits nothing
+  at all, so a heartbeat and an absence alert are the only way to see it. **An absence alert
+  cannot be added later from the log alone** — if nothing is watching for the gap, there is no
+  gap to find.
+
+| Event | Means | Alert on |
+|---|---|---|
+| `cron.tick` | The scheduled handler ran. Carries each tick's outcome: `rotation` (its `TickResult.state`), `rotationCode`, `sync`, `housekeeping` | **Absence** for 10 min — the only signal that the cron itself has stopped. Also **presence** of `rotation: "error"` or any `"threw"` |
+| `sync.tick` | The sync sweep ran. Emitted every tick, including when it did nothing | **Absence** for 10 min. Zero counts are the healthy steady state, so the counts are not an alert |
+| `health.degraded` | `/health` answered 503. Carries `db`, `kv`, `reason` | **Presence**. Pair it with an external check on `/health`, which catches the case where the Worker cannot answer at all |
+| `key_rotation.unresolved_rows` | A rotation **finished** with rows nothing could re-wrap. Carries `unresolvedRows` and `safeToRetireOldKeys: false` | **Presence**, highest severity. Retiring the old key now makes those rows permanently undecryptable. Confirm against `GET /api/security/key-rotation` and leave both keys in the ring |
+| `key_rotation.rows_quarantined` | A tick quarantined rows. Carries `quarantined`, `keyVersionUnavailable`, `unwrapFailed`, `table` | **Presence**. `keyVersionUnavailable` may be recoverable by restoring the missing key; `unwrapFailed` is data damage |
+| `key_rotation.stalled` | A `key_rotations` row is `running` with `updated_at` older than 10 min. Carries `staleMs`, `phase`, `lastErrorCode` | **Presence**. Re-emitted every tick while stuck, so it cannot be missed by a short log window |
+| `key_rotation.key_unavailable` | The tick could not build a key ring at all — usually a mistyped `ENCRYPTION_ACTIVE_KEY_VERSION`. Carries `code` | **Presence**. No rotation can run; writes keep using the last proven version, so it is not an outage |
+| `key_rotation.tick_failed` | The tick threw. Most often migration 0006 is not applied. Carries `errorName` | **Presence** |
+| `key_rotation.key_check_failed` | A key does not match the data it is supposed to protect. Carries `keyVersion` | **Presence**. Do not deploy further; the wrong key material is in play |
+| `key_rotation.activation_refused` | A rotation refused to start because a key is missing or its check value no longer verifies. Carries `code`, `keyVersion` | **Presence** |
+| `key_rotation.waiting_for_key` | A running rotation is held waiting for a key. Carries `code` | **Presence**. Emitted once per distinct code, so `key_rotation.stalled` is the one that keeps firing |
+| `key_rotation.bootstrap_failed` | No `active` row in `encryption_keys` and the key does not match the data. Carries `code`, `retryAfterMs` | **Presence**. Expect ~4/hour, not 60: the attempt backs off 15 min (see above) |
+| `sync.backlog` | Sync is stopped without any run failing this tick. Carries `overdue` (outbox rows past due by >15 min), `needsAttention` (targets parked; nothing retries them by itself), `abandoned` (runs that spent `MAX_SYNC_ATTEMPTS` in the last 24 h) | **Presence** of `needsAttention` or `abandoned`. **Rate** on `overdue` — a brief backlog is normal after a burst of changes; one that does not drain over several ticks is not |
+| `sync.gave_up` | A run exhausted `MAX_SYNC_ATTEMPTS` and its retry marker was cleared. That target has stopped syncing permanently. Carries `targetId`, `attempt` | **Presence**. Emitted once per run — `sync.backlog`'s `abandoned` is the standing count |
+| `sync.tick_step_failed` | One sweep step threw. Carries `step` | **Rate**. A single occurrence is tolerable; a sustained rate means the sweep is not running |
+| `sync.enqueue_failed` | A secret change could not be queued for sync | **Rate** |
+| `secret.decrypt_failed` | A single-secret read could not decrypt. Carries `secretId`, `environmentId`, `reason` | **Presence**. Should be zero — alert on the first one, not on a spike |
+| `resolve.decrypt_failed` | An environment resolve could not decrypt. Carries `environmentId`, `reason`. One row on `enc_version 1` under `ENFORCE_AAD` makes the whole environment unreadable | **Presence**, as above |
+| `email.budget_exhausted` | A daily send bucket is spent and a message was skipped. Carries `kind` (`verify`/`reset`), `purpose`, `limit` | **Presence**. `kind: "reset"` means account recovery is off |
+| `email.budget_unavailable` | The rate limiter backing the budget failed, so the send was skipped and the cap is **not being enforced**. Carries `kind`, `purpose` | **Presence** |
+| `email.not_configured` | No `EMAIL` binding or no `MAIL_FROM`; nothing is being sent | **Presence**. Once per isolate (section 6) |
+| `email.send_failed` | The provider rejected a message. Carries `code` (section 6) | **Rate**, plus **presence** for `SENDER_NOT_VERIFIED` |
+| `rate_limit.degraded` | A fail-open scope fell back to the per-isolate counter because the Durable Object errored. The limit is now weak — not shared across isolates or colos. Carries `scope`, `occurrences`, `windowMs` | **Presence**. Throttled: the first occurrence in an isolate emits at once, then at most one line per minute per isolate, with `occurrences` carrying the suppressed count. Use `occurrences` for magnitude, never the line count |
+| `rate_limit.unavailable` | A fail-closed scope returned 503, or an identity limit could not be consumed. Carries `scope`, `occurrences` | **Presence**, same throttle |
+| `rate_limit.disabled` | Both the Durable Object **and** the in-isolate fallback failed: the request was not rate limited at all. Carries `scope`, `occurrences` | **Presence**, highest severity of the three. Should never fire |
+| `share.unattributed_refused` | A share link was refused for having no attributable creator | **Rate** |
+| `housekeeping.step_failed` | A retention or purge step threw. Carries `step`, `reason` | **Rate**. Sustained failure grows D1 until writes stop |
+| `housekeeping.orphan_blobs` | The KV reconciliation pass found blobs. Carries `scanned`, `unreferenced`, `deleted` | **Rate** on `unreferenced` growing while `deleted` does not keep up (see above) |
+
+Not covered by any of these, because the data to alert on is not recorded: see
+"What is still not observable" at the end of this section.
+
+### What is still not observable
+
+- **D1 and KV quota exhaustion.** Both fail queries and writes mid-day once a free-plan daily
+  limit is hit. Neither appears in `/health` (the KV probe is a read, and a read is not what
+  fails), and the failures surface only as whatever error the calling path happens to return.
+  Watch Cloudflare's own usage dashboard; there is no log line to match on.
+- **Per-organisation sync staleness.** `sync.backlog` counts rows deployment-wide. Telling one
+  organisation's stopped sync from another's needs the counts broken out per org, which the
+  current tick does not compute.
+- **Delivery of email.** "Sent" means the binding did not throw (section 6).
 
 ## 4. Routine tasks
 
@@ -257,8 +337,23 @@ All code-only: no address, link, token or subject is ever logged.
 ```
 email.not_configured              # once per isolate; the binding or MAIL_FROM is missing
 email.send_failed                 # carries `code` from the table above
-email.budget_exhausted            # carries `kind`; see the gap below
+email.budget_exhausted            # the daily bucket is spent; carries `kind`, `purpose`, `limit`
+email.budget_unavailable          # the limiter behind the budget failed; carries `kind`, `purpose`
 ```
+
+`email.budget_exhausted` and `email.budget_unavailable` are emitted by `spendEmailBudget` itself,
+so **every** send path is covered — `purpose` says which one was skipped:
+
+| `purpose` | `kind` | Skipped send |
+|---|---|---|
+| `registration` | `verify` | Verification mail on sign-up |
+| `verify_resend` | `verify` | `POST /api/auth/verify-email/send` |
+| `forgot_password` | `reset` | The password reset link |
+| `password_changed` | `reset` | The heads-up notice after a reset completes |
+
+The two events are separate because the remedy is: `budget_exhausted` means the cap did its job
+(raise `EMAIL_DAILY_BUDGET`, or find what is burning it), while `budget_unavailable` means the
+rate limiter is broken and the cap **is not being enforced at all**.
 
 ### Diagnosing "the user did not get the email"
 
@@ -268,8 +363,9 @@ Work down this list; the first three are far more common than a provider problem
    it as `env.EMAIL (unrestricted - senders: ...)`. On production it is currently absent.
 2. **Any `email.not_configured` in the logs?** If so, stop here — nothing was sent.
 3. **Any `email.send_failed`?** The `code` tells you which row of the table applies.
-4. **Budget or limiter?** Check for `email.budget_exhausted`, and check whether the rate
-   limiter is healthy. A spent `verify` bucket does not affect `reset`, and vice versa.
+4. **Budget or limiter?** Check for `email.budget_exhausted` (and `email.budget_unavailable`,
+   which means the limiter itself failed). `purpose` names the exact send that was skipped.
+   A spent `verify` bucket does not affect `reset`, and vice versa.
 5. **Did a token get issued at all?** `SELECT purpose, created_at, used_at FROM auth_tokens
    WHERE user_id = ?`. A row with no mail means the send failed after the token was created;
    no row means the request was throttled or the address did not match an account.
@@ -300,9 +396,10 @@ below it, per bucket, remembering that a completed reset costs two.
 
 ### Known gaps
 
-- **`email.budget_exhausted` is only logged on the forgot-password path.** The registration
-  send and the password-changed notice skip silently when their bucket is spent. Alerting on
-  this event will therefore miss verification mail drying up. Tracked on #83.
+- ~~**`email.budget_exhausted` is only logged on the forgot-password path.**~~ **Fixed (#83).**
+  The line moved into `spendEmailBudget`, the one place that can decide to skip a send, so
+  registration mail and the password-changed notice are no longer silent and any future caller is
+  covered by construction. `purpose` identifies the path; see the table above.
 - **No delivery telemetry.** Nothing records that a message was accepted, bounced or opened, so
   "sent" means "the binding did not throw". Bounces are invisible except as a later
   `RECIPIENT_SUPPRESSED`.

@@ -646,9 +646,18 @@ Errors: `401 UNAUTHORIZED` (`Missing signature headers`, `Unknown signing key`, 
 
 ## Health
 
-- `GET /health` (no auth, not under `/api`, so the global limiter does not apply): `200`
-  `{ "status": "ok", "version": "0.0.1" }`, or `503 { "status": "degraded", "reason": "database" }` if D1 is
-  unreachable. Note: this is not the `{data}` envelope.
+- `GET /health` (no auth, not under `/api`, so the global limiter does not apply):
+  `200 { "status": "ok", "version": "0.0.1", "checks": { "db": "ok", "kv": "ok" } }`, or
+  `503 { "status": "degraded", "version": "0.0.1", "reason": "kv", "checks": { "db": "ok", "kv": "down" } }`
+  if either dependency is down. Note: this is not the `{data}` envelope.
+  - `checks.db` — `"ok"` or `"down"`. A `SELECT 1` against D1.
+  - `checks.kv` — `"ok"`, `"down"`, or `"unconfigured"` when the binding is absent. A read of
+    `health:probe`, a key HushVault never writes; the probe expects it to be missing and only a
+    failed read is a fault. It is a read, not a write, so the check cannot consume KV's daily
+    write quota. A green `kv` proves the binding resolves and KV is reachable, **not** that
+    writes succeed — see docs/OPERATIONS.md § 3.
+  - `reason` — `"database"` when D1 is the failure, otherwise `"kv"`. Kept for compatibility;
+    read `checks` instead.
 - `GET /`: `200 { "name": "HushVault API", "version": "0.0.1", "status": "ok" }`.
 - `GET /.well-known/security.txt`: plain-text security contact.
 
