@@ -16,20 +16,144 @@ Envelope encryption separates key material from encrypted data:
 |-----------|-----------|-----|
 | Secret encryption | AES-256-GCM | Authenticated encryption, prevents ciphertext tampering |
 | DEK wrapping | AES-256-GCM | Same algorithm, KEK as key |
-| Key derivation (password) | PBKDF2-SHA256, 100,000 iterations | WebCrypto compatible; Argon2 not viable in Workers. **Below current guidance — see the note below.** |
-
-> **PBKDF2 iteration count: a known deviation.** OWASP's Password Storage Cheat Sheet currently
-> recommends **600,000** iterations for PBKDF2-HMAC-SHA256; this deployment uses 100,000, which is
-> one sixth of that. The reason is the Workers CPU-time limit, and that reason has been asserted
-> rather than measured — 600,000 iterations of PBKDF2-SHA256 is on the order of a few hundred
-> milliseconds of CPU, which may well fit the paid-plan budget for a login. It is stated here
-> because it will be the first finding of any security questionnaire, and it should be either
-> measured and raised or deliberately accepted, not left implicit.
-> Source: <https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html>
+| Key derivation (password) | PBKDF2-SHA256, 100K iterations | WebCrypto compatible; Argon2 not viable in Workers. Below OWASP's 600K — see [PBKDF2 iteration count](#pbkdf2-iteration-count-measured) |
 | IV/nonce | Random, `crypto.getRandomValues()` | Must be unique per encryption operation |
 | Key size | 256 bits | Maximum AES strength |
 | IV size | 96 bits (12 bytes) | Required for GCM mode |
 | Auth tag | 128 bits | Default, maximum for GCM |
+
+## PBKDF2 iteration count (measured)
+
+Status legend: **[verified]** = measured here, or quoted from Cloudflare's docs with the URL;
+**[unverified]** = not confirmed in this environment, check before relying on it.
+Tracked in [issue #89](https://github.com/hushvaultdev/hushvault/issues/89).
+
+`hashPassword()` in `apps/api/src/lib/auth.ts` derives password hashes with PBKDF2-HMAC-SHA256,
+**100,000 iterations**, 256-bit output, 16-byte random salt per user. OWASP's Password Storage
+Cheat Sheet recommends **600,000** for PBKDF2-HMAC-SHA256 — verified at source in issue #89
+(<https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html>); that domain
+is egress-blocked from the dev container, so it was **[unverified]** at the time of this
+measurement and the 600,000 figure is taken from the issue.
+
+The reason given for 100,000 has always been the Workers CPU-time limit. That reason is now
+measured rather than asserted.
+
+### What it costs
+
+Harness: `apps/api/scripts/bench-pbkdf2.mjs` plus `pbkdf2-bench.worker.js` /
+`pbkdf2-bench.wrangler.toml` (same directory). It is not part of the test suite and nothing is
+deployed; run it from `apps/api/` with `pnpm bench:pbkdf2` (add `--help` notes in the script
+header for options). Timings only — the harness derives from throwaway random bytes and never
+prints password, salt or key material.
+
+Median of 7 runs, 3 derivations per run, measured 2026-10-05. **[verified]** by running the
+harness:
+
+| Iterations | `workerd` via local `wrangler dev` | bare Node.js 22 (**not** Workers) |
+|-----------:|----------------------------------:|---------------------------------:|
+| 100,000 (today) | 52.6 ms | 45.5 ms |
+| 300,000 | 135.0 ms | 138.7 ms |
+| 600,000 (OWASP) | 277.6 ms | 295.5 ms |
+| 1,000,000 | 454.1 ms | 465.1 ms |
+
+Method: wall clock measured from outside the Worker over HTTP with the request overhead
+(median of a 1-iteration request, ~7 ms) subtracted and divided by the number of derivations.
+`performance.now()` inside the local Worker agreed to within 1 ms at every iteration count.
+Cost is linear in the iteration count, as expected. A second full run on the same machine gave
+47.2 / 135.6 / 279.0 / 446.8 ms — repeatable to about 10%.
+
+Environment caveats, all **[unverified]** against the edge:
+
+- This is **local `workerd`** on a dev container CPU, not a deployed Worker on Cloudflare's
+  network. Cloudflare's own machines may be faster or slower.
+- Local `wrangler dev` reports no CPU accounting, so these are wall-clock numbers for a
+  CPU-bound operation, not the `cpuMs` Cloudflare would bill. For a pure-CPU loop with no I/O
+  the two should be close, but that equality is not verified here.
+- The local runtime is slightly older than the deployed one: `wrangler` 4.92.0 (pinned in
+  `apps/api/package.json`) bundles `workerd` 1.20260515.1, which refuses compatibility dates
+  after 2026-05-22, so the bench config uses that date instead of the API's 2026-09-29.
+
+Getting the real number means deploying the harness Worker to the `dev` environment and reading
+`cpuMs` from `wrangler tail` or Workers Logs. That is a deploy, so it is deliberately not done
+here.
+
+### What the limit actually is
+
+Cloudflare's documented CPU time per request
+(<https://developers.cloudflare.com/workers/platform/limits/#cpu-time>):
+
+| Limit | Workers Free | Workers Paid |
+|-------|--------------|--------------|
+| CPU time per HTTP request | 10 ms | 5 min (default: 30 seconds) |
+
+> "CPU time measures how long the CPU spends executing your Worker code. Waiting on network
+> requests (such as `fetch()` calls, KV reads, or database queries) does **not** count toward
+> CPU time."
+
+The default is configurable on the Paid plan via a `[limits]` block — up to 300,000 ms
+(<https://developers.cloudflare.com/workers/wrangler/configuration/#limits>):
+
+```toml
+[limits]
+cpu_ms = 300_000
+```
+
+Two notes on that block: "Limits are only supported for the Standard Usage Model" and "Limits are
+only enforced when deployed to Cloudflare's network, not in local development". `apps/api/wrangler.toml`
+has no `[limits]` block today, so the API Worker runs on the plan default.
+
+### Conclusion
+
+Against the Paid plan's 30-second default, 600,000 iterations at ~278 ms is **under 1% of the
+per-request CPU budget** — it fits with about 100x of headroom, and no `[limits]` block is needed.
+Even 1,000,000 iterations fits. The CPU-time limit is therefore **not** a valid reason to stay at
+100,000 on a Paid plan.
+
+Against the Free plan's 10 ms, nothing usable fits: 100,000 iterations already overruns it by 5x,
+so password login on a Free-plan account was never within the documented limit. Which plan the
+deployed account is on is **[unverified]** from this container — if logins work today on
+`api-beta.hushvault.dev`, it is Paid (Durable Objects, which the rate limiter uses, are available
+on both plans, so the `RATE_LIMITER` binding does not prove it either way).
+
+Billing, at $0.02 per million CPU-ms on the Standard model
+(<https://developers.cloudflare.com/workers/platform/pricing/>): a 600,000-iteration login costs
+roughly 278 CPU-ms, about $0.0000056 — and the 30M included CPU-ms per month covers ~108,000
+logins at that cost before any overage. Negligible at HushVault's scale.
+
+**Recommendation: raise to 600,000**, with two conditions attached, because the cost is paid by
+an unauthenticated endpoint:
+
+1. Confirm the account is on Workers Paid first (see above).
+2. Land the per-account login throttling tracked in
+   [#77](https://github.com/hushvaultdev/hushvault/issues/77) first or alongside. `POST /auth/login`
+   derives a hash for **every** attempt, including unknown emails and OAuth-only users (that is
+   deliberate — it keeps response time from revealing whether an email is registered). Raising the
+   count multiplies the CPU an unauthenticated caller can burn per request by 6x, and the existing
+   limiters are per IP.
+
+This is a change to how passwords are stored; it is the repo owner's decision and is not applied
+by the measurement work.
+
+### Migration path if the count is raised
+
+Raising the constant in place would invalidate every existing password, because the stored hash is
+not reproducible at a different iteration count. The migration is a per-row count plus a lazy
+re-derivation:
+
+1. Migration adds `users.pbkdf2_iterations INTEGER NOT NULL DEFAULT 100000` (new column, so the
+   migration is not re-runnable — `wrangler d1 migrations apply` tracks that; see
+   `.claude/rules/database-schema.md`). New rows are written with the new constant.
+2. `hashPassword()` takes the iteration count as a parameter instead of hard-coding it;
+   `verifyPassword()` verifies with the count stored on the user's row, so old hashes keep working.
+3. On a **successful** login where the stored count is below the current target, re-derive the hash
+   from the password already in hand at the new count and write back the new hash, salt and count
+   in one statement. Only successful logins upgrade, so a wrong password never triggers the extra
+   derivation. The upgrade adds one more derivation (~278 ms CPU) to that one login.
+4. Users who never log in again keep their 100,000-iteration hash; a residual count by
+   `pbkdf2_iterations` shows how many are left. Nothing forces them off it short of a password
+   reset, which derives fresh at the current count anyway.
+5. The same per-row count makes any future raise a configuration change rather than another
+   migration.
 
 ## Code Location
 

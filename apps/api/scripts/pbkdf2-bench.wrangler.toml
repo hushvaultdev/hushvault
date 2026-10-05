@@ -1,0 +1,16 @@
+# Wrangler config used ONLY by scripts/bench-pbkdf2.mjs, to run the PBKDF2
+# benchmark Worker under a local `wrangler dev` (workerd). Deliberately separate
+# from apps/api/wrangler.toml: no bindings, no routes, nothing deployable.
+# Issue #89.
+#
+# compatibility_date is NOT the API's 2026-09-29: wrangler 4.92.0 (pinned in
+# apps/api/package.json) bundles workerd 1.20260515.1, whose newest supported
+# date is 2026-05-22, and a local dev server refuses to start past it. PBKDF2
+# cost is a property of the crypto implementation, not of the compatibility
+# date, so this does not affect the measurement — but it does mean the local
+# runtime binary is a few months older than the deployed one.
+
+name = "hushvault-pbkdf2-bench"
+main = "pbkdf2-bench.worker.js"
+compatibility_date = "2026-05-22"
+workers_dev = false
