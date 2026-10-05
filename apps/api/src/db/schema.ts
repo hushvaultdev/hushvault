@@ -47,10 +47,15 @@ export const apiKeys = sqliteTable('api_keys', {
   // that to one representation needs a backfill, not a type change.
   revokedAt: integer('revoked_at'),
   revokedReason: text('revoked_reason'),
+  // The organisation this key acts in (migration 0018, issue #82). Nullable only because SQLite
+  // cannot add a NOT NULL column to a populated table: the middleware treats NULL as unusable
+  // (401 KEY_ORG_UNRESOLVED) rather than falling back to the owner's earliest membership.
+  orgId: text('org_id').references(() => organisations.id, { onDelete: 'cascade' }),
   createdAt: text('created_at').notNull(),
 }, (t) => [
   index('api_keys_user_idx').on(t.userId),
   index('api_keys_revoked_idx').on(t.revokedAt),
+  index('api_keys_org_idx').on(t.orgId),
 ])
 
 // Rotating refresh tokens behind the 15-minute access JWTs (migration 0009, issue #77).
@@ -64,10 +69,16 @@ export const refreshTokens = sqliteTable('refresh_tokens', {
   expiresAt: integer('expires_at').notNull(),
   familyStartedAt: integer('family_started_at').notNull(), // caps how long rotation can extend a login
   usedAt: integer('used_at'),
+  // The organisation this family is bound to (migration 0018, issue #82). Copied from the
+  // predecessor row by every rotation, so a refresh can never move a session to another org;
+  // switching org revokes the family and starts a new one. NULL = minted before 0018: the
+  // refresh fails closed and the family is revoked rather than guessing an org.
+  orgId: text('org_id').references(() => organisations.id, { onDelete: 'cascade' }),
 }, (t) => [
   index('refresh_tokens_user_idx').on(t.userId),
   index('refresh_tokens_family_idx').on(t.familyId),
   index('refresh_tokens_expires_idx').on(t.expiresAt),
+  index('refresh_tokens_org_idx').on(t.orgId),
 ])
 
 // ─────────────────────────────────────────────
@@ -95,6 +106,32 @@ export const members = sqliteTable('members', {
 }, (t) => [
   index('members_org_idx').on(t.orgId),
   index('members_user_idx').on(t.userId),
+])
+
+// Invitations to join an organisation (migration 0018, issue #82). The table ships with Lane A so
+// there is one migration for the whole change; the endpoints that write it are Lane B.
+// Only base64url(SHA-256(token)) is stored, never the emailed token. `email` is written lower-cased.
+export const orgInvites = sqliteTable('org_invites', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id').notNull().references(() => organisations.id, { onDelete: 'cascade' }),
+  email: text('email').notNull(),
+  role: text('role', { enum: ['owner', 'admin', 'member', 'viewer'] }).notNull().default('member'),
+  tokenHash: text('token_hash').notNull().unique(),
+  // SET NULL, not blocked and not cascading: offboarding the admin who invited someone must
+  // neither be refused nor delete the record that the invite happened.
+  invitedBy: text('invited_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: text('created_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  acceptedAt: text('accepted_at'),
+  acceptedBy: text('accepted_by').references(() => users.id, { onDelete: 'set null' }),
+  revokedAt: text('revoked_at'),
+  revokedBy: text('revoked_by').references(() => users.id, { onDelete: 'set null' }),
+}, (t) => [
+  // One OPEN invite per address per org. Partial, so accepting or revoking frees the address
+  // again — a plain unique (org_id, email) would be permanent and need a table rebuild to loosen.
+  uniqueIndex('org_invites_open_idx').on(t.orgId, t.email).where(sql`accepted_at IS NULL AND revoked_at IS NULL`),
+  index('org_invites_org_idx').on(t.orgId),
+  index('org_invites_expires_idx').on(t.expiresAt),
 ])
 
 // ─────────────────────────────────────────────

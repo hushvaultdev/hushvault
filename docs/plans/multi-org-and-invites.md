@@ -7,6 +7,11 @@
 This is the contract the implementation lanes work to. Where a lane finds the contract wrong,
 it changes this file in the same commit rather than diverging from it silently.
 
+**Lane status.** Lane A (foundation, API) is implemented: migration `0018_multi_org.sql`,
+`GET/POST /api/orgs`, `POST /api/orgs/:id/switch`, and all five first-membership resolutions
+removed. Lanes B and C are not started. Every change Lane A made to this file is marked inline
+with *(Lane A)*.
+
 ---
 
 ## The problem being fixed, precisely
@@ -57,8 +62,9 @@ invites, not after:
   `accepted_at`, `accepted_by`, `revoked_at`, `revoked_by`. Unique on
   (`org_id`, `email`) **where** `accepted_at IS NULL AND revoked_at IS NULL`, as a partial unique
   index, so one open invite per address per org and no rebuild to change it later.
-- Index `members_user_idx` on `members(user_id)` if not already present: the org list is now a
-  per-request query.
+- ~~Index `members_user_idx` on `members(user_id)` if not already present~~ — **already created by
+  `0000_init.sql`.** Lane A left it out rather than re-stating it; the org list query is already indexed.
+  (Corrected during Lane A.)
 
 **Org context.**
 
@@ -66,12 +72,22 @@ invites, not after:
   which one the current token acts in. This is what the switcher reads.
 - `POST /api/orgs` — create an org; the caller becomes `owner`. Rate-limited like other
   account-level writes; audited `org.create` against the new org.
-- `POST /api/orgs/:id/switch` — verifies membership, then issues a new access token and rotates
-  the refresh cookie into a family bound to the new org. Audited `org.switch` against the target
-  org. A non-member gets 403 `NOT_A_MEMBER` (never 404-by-org-guess).
+- `POST /api/orgs/:id/switch` — verifies membership, then issues a new access token and **revokes the
+  family the caller came in on, starting a new family bound to the new org**. Audited `org.switch`
+  against the target org. A non-member gets 403 `NOT_A_MEMBER` (never 404-by-org-guess).
+  *(Lane A made this wording precise. "Rotates the cookie into a family bound to the new org" could be
+  read as changing an existing family's org. It must not be: a family's org is immutable for its whole
+  life — the rotating INSERT copies `org_id` from the row it consumes — which is what makes "a refresh
+  cannot change org" a property of the schema rather than of a route remembering to pass the right
+  value. Revoking the old family also means no sibling token survives pointing at the old org.
+  Consequence for Lane C: switching invalidates the previous refresh cookie, so a tab that was
+  mid-refresh when another tab switched gets a 401, not a 409.)*
+  Signed-in people only: an API key is bound to one org for life and gets 403.
 - Login / register / OAuth / claim all keep today's deterministic default (earliest membership),
   but the choice becomes explicit: the response carries `orgs` so the dashboard can offer the
-  switch without a second round trip.
+  switch without a second round trip. *(Lane A: login, register and refresh carry `orgs`. The OAuth
+  callback cannot — it is a 302 whose session rides in a URL fragment — so the dashboard reads
+  `GET /api/orgs` after an OAuth sign-in. Lane C should not expect `orgs` in the fragment.)*
 
 **The three resolutions.**
 
@@ -80,7 +96,22 @@ invites, not after:
   `KEY_ORG_UNRESOLVED` (distinct from a bad key, so an operator can tell them apart).
 - `routes/auth.ts`: refresh reads `refresh_tokens.org_id` for the family and re-reads the role
   for that org. Membership gone → 401 `MEMBERSHIP_REVOKED`, family revoked, cookie cleared.
-- `routes/secret-scanner.ts`: the revocation audit row takes its org from the key being revoked.
+- `routes/secret-scanner.ts`: the revocation audit row takes its org from the key being revoked. The
+  revocation itself is unconditional and happens first: containing the leak must not depend on an org
+  being resolvable. A key with no org is still revoked, and logs `secret_scanner.revoked_without_org`
+  rather than filing the row somewhere wrong.
+
+**Two more first-membership uses Lane A found and fixed, not in the original list.**
+
+- `routes/auth.ts` also resolved earliest-membership to place four *account-level* audit rows
+  (`auth.email.verified`, `auth.password_reset.requested`, `auth.password_reset.completed`,
+  `auth.oauth.account_takeover`). These events are about the person, not one org, so "earliest
+  membership" meant the other orgs a person belongs to would never learn that their member's password
+  was reset. They are now written once per org the user is a member of: each org's admins see the
+  security events of their own members. Rare events, so the fan-out is a few inserts.
+- `DELETE /api/auth/api-keys/:id` audited against the *actor's current* org. Deleting a key belonging
+  to org B while acting in org A filed the revocation in A's trail, where nobody responsible for B's
+  credentials would see it. It now reads the key's own org first (principle 3).
 
 ## Lane B — invites and members (API), after Lane A lands
 
@@ -95,6 +126,16 @@ invites, not after:
 - `GET /api/orgs/:id/members`, `PATCH .../members/:userId` (role), `DELETE .../members/:userId`.
   Refuse removing or demoting the last `owner` (`LAST_OWNER`); a member removing themselves is
   allowed unless they are that last owner. Every one audited against the org.
+- **Removing a member must also delete that org's credentials for them, in the same `batch()` as the
+  membership delete** (added by Lane A, which built the fail-closed paths these rely on):
+  `DELETE FROM refresh_tokens WHERE user_id = ? AND org_id = ?` and
+  `UPDATE api_keys SET revoked_at = …, revoked_reason = 'membership_removed' WHERE user_id = ? AND org_id = ?`.
+  Without it, removal is only *eventually* effective: Lane A makes a refresh fail closed with
+  `MEMBERSHIP_REVOKED` and an API key fail closed with `KEY_ORG_UNRESOLVED`, so nothing is authorised
+  after removal — but the rows linger, the access token already issued stays valid for up to its 15
+  minutes, and an operator reading `api_keys` cannot tell which keys are dead. Revoking at removal
+  time makes it immediate and legible, and is the only part of principle 2 that Lane A could not close
+  from its own side.
 - Invite email: a new template beside the existing ones, no secret material in it beyond the
   single-use token, and it honours the per-kind email budget (`kind: 'invite'`).
 

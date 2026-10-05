@@ -94,11 +94,47 @@ Recipient opens URL:
   4. Decrypts locally with shareKey
 ```
 
+## Tenancy: how a request's organisation is decided
+
+Everything below `organisations` is org-scoped — projects, environments, secrets, share links,
+integration connections, sync targets, the audit log. So "which organisation is this request acting
+in?" is the question the whole authorisation model rests on, and there is exactly one answer shape:
+
+> **A credential names the organisation it acts in. Nothing re-derives one from the actor's
+> memberships.**
+
+| Credential | Where its org comes from | When membership is re-checked |
+|---|---|---|
+| Access JWT (15 min) | the `orgId` claim, set at sign-in or at an explicit switch | role re-read per request by `requireCurrentAdmin`; otherwise at the next refresh |
+| Refresh-token family | `refresh_tokens.org_id`, copied from the consumed row by every rotation | every refresh: role re-read for that org, and a lost membership is `401 MEMBERSHIP_REVOKED` |
+| API key (`hv_live_…`) | `api_keys.org_id`, recorded when the key was created | every request: `members WHERE user_id = ? AND org_id = ?` |
+| CI token (GitHub OIDC) | the `oidc_repo_rules` row it was issued for | every request: the rule is re-read, and deleting it kills the token |
+| Share link (unauthenticated) | `share_links.org_id`, recorded at creation | n/a — the link is the credential |
+
+Three consequences worth stating plainly:
+
+- **An org boundary is never crossed by a fallback.** Where the org cannot be established the answer
+  is `401`/`403` with a code of its own (`KEY_ORG_UNRESOLVED`, `MEMBERSHIP_REVOKED`, `NOT_A_MEMBER`),
+  never another org the actor happens to belong to. Before issue #82 three call sites answered the
+  question with the actor's *earliest* membership, which is correct only while nobody has two.
+- **A rotation cannot change org.** A refresh family's org is immutable for the family's life (the
+  rotating INSERT selects `org_id` from its predecessor). Switching org revokes the family and starts
+  a new one, which is why `POST /api/orgs/:id/switch` rotates the cookie rather than only re-minting
+  an access token.
+- **An audit row's org comes from the resource, not the actor.** A revoked key is filed against the
+  key's org; `org.create`/`org.switch` against the org acted on. Account-level security events
+  (password reset, email verified, OAuth account claim) belong to the person, so they are written once
+  per org the user is a member of — each org's admins see the events of their own members.
+
+Choosing a *starting* org at sign-in is the one place a default is applied: login, register and the
+OAuth callback use the earliest membership. That choice is made once and then carried, and the
+response ships the caller's full org list so the dashboard can offer a switch immediately.
+
 ## API Routes
 
 See [API.md](API.md) for the complete, code-derived reference (methods, roles, bodies, errors, rate limits).
-Mounted prefixes: `/api/auth`, `/api/projects`, `/api/environments`, `/api/secrets`, `/api/share`,
-`/api/audit`, `/api/integrations/secret-scanner`, and `/health`.
+Mounted prefixes: `/api/auth`, `/api/orgs`, `/api/projects`, `/api/environments`, `/api/secrets`,
+`/api/share`, `/api/audit`, `/api/integrations/secret-scanner`, and `/health`.
 
 ## Data Flow: CLI `hushvault run -- npm dev`
 

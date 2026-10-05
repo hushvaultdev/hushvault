@@ -27,13 +27,19 @@ describe('register / login', () => {
       json: { email: 'Ann@x.com', password: PASSWORD, organisationName: 'Ann Org' },
     })
     expect(reg.status).toBe(201)
-    expect(Object.keys(reg.body.data).sort()).toEqual(['emailVerified', 'expiresIn', 'orgId', 'token', 'userId'])
+    // `orgs` since issue #82: the org is chosen explicitly at sign-in and the full list rides along
+    // so the dashboard's switcher needs no second round trip.
+    expect(Object.keys(reg.body.data).sort()).toEqual(['emailVerified', 'expiresIn', 'orgId', 'orgs', 'token', 'userId'])
     expect(reg.body.data.expiresIn).toBe(900)
+    expect(reg.body.data.orgs).toEqual([
+      { id: reg.body.data.orgId, name: 'Ann Org', slug: expect.stringContaining('ann-org-'), plan: 'free', role: 'owner' },
+    ])
     expect((await userRow(env, 'ann@x.com'))?.['email_verified']).toBe(0)
 
     const login = await call(env, 'POST', '/api/auth/login', { json: { email: 'ann@x.com', password: PASSWORD } })
     expect(login.status).toBe(200)
     expect(login.body.data).toMatchObject({ userId: reg.body.data.userId, orgId: reg.body.data.orgId, role: 'owner' })
+    expect(login.body.data.orgs).toEqual(reg.body.data.orgs)
     expect(typeof login.body.data.token).toBe('string')
   })
 
@@ -209,7 +215,10 @@ describe('API keys', () => {
     const res = await call(env, 'GET', '/api/auth/api-keys', { token: a.token })
     expect(res.status).toBe(200)
     expect(res.body.data).toHaveLength(1)
-    expect(Object.keys(res.body.data[0]).sort()).toEqual(['createdAt', 'expiresAt', 'id', 'lastUsedAt', 'name', 'revokedAt'])
+    // `orgId` since issue #82: a key acts in the org it was created in, and the owner needs to see
+    // which one that is (a NULL there means the key predates migration 0018 and no longer works).
+    expect(Object.keys(res.body.data[0]).sort()).toEqual(['createdAt', 'expiresAt', 'id', 'lastUsedAt', 'name', 'orgId', 'revokedAt'])
+    expect(res.body.data[0].orgId).toBe(a.orgId)
     const text = JSON.stringify(res.body)
     expect(text).not.toContain(created.body.data.apiKey)
     expect(text).not.toContain('key_hash')

@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Env } from '../index'
 import { hashApiKey } from '../lib/auth'
 import { notifyKeyRevoked } from '../lib/notify'
-import { getRequestIp, writeAuditLog } from '../lib/security'
+import { getRequestIp, logEvent, writeAuditLog } from '../lib/security'
 import { getScannerPublicKey } from '../lib/github-scanner-keys'
 
 export const secretScannerRouter = new Hono<{ Bindings: Env }>()
@@ -166,11 +166,11 @@ secretScannerRouter.post('/github', async (c) => {
     // Hash the leaked token and look it up; we never store/log the raw token.
     const keyHash = await hashApiKey(match.token)
     const apiKey = await db
-      .prepare('SELECT id, user_id, revoked_at FROM api_keys WHERE key_hash = ? LIMIT 1')
+      .prepare('SELECT id, user_id, org_id, revoked_at FROM api_keys WHERE key_hash = ? LIMIT 1')
       .bind(keyHash)
       // revoked_at is an INTEGER column that most writers fill with unix seconds and this one
       // with an ISO string, so a read can return either; only its presence matters here.
-      .first<{ id: string; user_id: string; revoked_at: number | string | null }>()
+      .first<{ id: string; user_id: string; org_id: string | null; revoked_at: number | string | null }>()
 
     if (!apiKey) {
       // Not one of ours (or already rotated out) — report as a false positive.
@@ -185,23 +185,22 @@ secretScannerRouter.post('/github', async (c) => {
       continue
     }
 
-    // Resolve the owning org via the user's membership for audit + notification.
-    const member = await db
-      .prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
-      .bind(apiKey.user_id)
-      .first<{ org_id: string }>()
-
     // Revoke using the existing expiry mechanism (auth middleware rejects expired
     // keys), and stamp the soft-revocation audit columns. The `revoked_at IS NULL`
     // guard keeps this a no-op if a concurrent callback already revoked the key.
+    // Unconditional, and done before anything else: revocation is what contains the leak, so it
+    // must not depend on the org being resolvable.
     await db
       .prepare('UPDATE api_keys SET expires_at = ?, revoked_at = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL')
       .bind(now, now, 'leaked_in_github', apiKey.id)
       .run()
 
-    if (member) {
+    // The audit row and the alert go to the org the KEY belongs to (api_keys.org_id, migration
+    // 0018) — the resource, not the holder's earliest membership, which would have filed a leaked
+    // org-B key under org A and alerted the wrong team (issue #82, principle 3).
+    if (apiKey.org_id) {
       await writeAuditLog(c.env, {
-        orgId: member.org_id,
+        orgId: apiKey.org_id,
         actorId: null,
         actorType: 'system',
         action: 'auth.api_key.revoke',
@@ -212,11 +211,16 @@ secretScannerRouter.post('/github', async (c) => {
       })
 
       await notifyKeyRevoked(c.env, {
-        orgId: member.org_id,
+        orgId: apiKey.org_id,
         apiKeyId: apiKey.id,
         reason: 'leaked_in_github',
         source: typeof match.url === 'string' ? match.url : null,
       })
+    } else {
+      // A pre-0018 key whose owner had no membership to backfill from. It is revoked, but there is
+      // no organisation to file it against and no team to alert. That silence is exactly the thing
+      // an operator needs told, so it gets a line (key id only — never the token or the URL).
+      logEvent('secret_scanner.revoked_without_org', { apiKeyId: apiKey.id })
     }
 
     results.push({ token_raw: match.token, token_type: match.type, label: 'true_positive' })

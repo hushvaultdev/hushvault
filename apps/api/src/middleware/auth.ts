@@ -84,9 +84,9 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
   }
 
   const apiKeyHash = await hashApiKey(token)
-  const apiKey = await c.env.DB.prepare('SELECT user_id, key_hash, expires_at, last_used_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1')
+  const apiKey = await c.env.DB.prepare('SELECT user_id, org_id, key_hash, expires_at, last_used_at FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1')
     .bind(apiKeyHash)
-    .first<{ user_id: string; key_hash: string; expires_at: string | null; last_used_at: string | null }>()
+    .first<{ user_id: string; org_id: string | null; key_hash: string; expires_at: string | null; last_used_at: string | null }>()
 
   if (!apiKey) {
     return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
@@ -96,17 +96,25 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
     return c.json({ error: 'UNAUTHORIZED', message: 'API key expired' }, 401)
   }
 
-  const member = await c.env.DB.prepare(
-    'SELECT m.org_id, m.role FROM members m WHERE m.user_id = ? ORDER BY m.created_at ASC LIMIT 1',
-  ).bind(apiKey.user_id).first<{ org_id: string; role: AuthContext['role'] }>()
+  // The key acts in the organisation it was CREATED in (api_keys.org_id, migration 0018), and the
+  // membership for exactly that org decides its role. It used to be the owner's earliest
+  // membership, which meant a key made in org B acted in org A the moment its owner joined two
+  // orgs — issue #82. Nothing here falls back to a membership lookup: a key with no org (one
+  // minted by the pre-0018 code, or whose owner had no membership when 0018 backfilled) and a key
+  // whose membership is gone are both dead, and say so distinctly from a bad key so an operator
+  // can tell "re-create this key" from "this key is not ours".
+  const member = apiKey.org_id
+    ? await c.env.DB.prepare('SELECT role FROM members WHERE user_id = ? AND org_id = ? LIMIT 1')
+      .bind(apiKey.user_id, apiKey.org_id).first<{ role: AuthContext['role'] }>()
+    : null
 
-  if (!member) {
-    return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
+  if (!apiKey.org_id || !member) {
+    return c.json({ error: 'KEY_ORG_UNRESOLVED', message: 'This API key has no usable organisation. Create a new key.' }, 401)
   }
 
   c.set('auth', {
     userId: apiKey.user_id,
-    orgId: member.org_id,
+    orgId: apiKey.org_id,
     role: member.role,
     actorType: 'api_key',
   })
@@ -279,6 +287,23 @@ export const forgotPasswordRateLimit = createRateLimitMiddleware({
 // Refresh/logout: one call per page load per tab, so higher than the credential endpoints.
 export const refreshRateLimit = createRateLimitMiddleware({
   scope: 'auth-refresh',
+  limit: 60,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
+// Creating an organisation is an account-level write that inserts two rows and an audit row, so it
+// is capped like register. Switching is a session rotation a person does by hand, so it is capped
+// like refresh — loosely, because hitting it would just lock someone out of their own workspace.
+export const orgCreateRateLimit = createRateLimitMiddleware({
+  scope: 'org-create',
+  limit: 5,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
+export const orgSwitchRateLimit = createRateLimitMiddleware({
+  scope: 'org-switch',
   limit: 60,
   windowMs: 60_000,
   failClosed: true,

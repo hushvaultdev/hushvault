@@ -6,7 +6,7 @@ describe('migrations', () => {
     const env = createTestEnv()
     const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all<{ name: string }>()
     const tables = results.map((r) => r.name)
-    for (const t of ['users', 'api_keys', 'organisations', 'members', 'projects', 'environments', 'secrets', 'share_links', 'audit_log', 'encryption_keys', 'key_rotations', 'key_rotation_failures', 'auth_tokens', 'refresh_tokens']) {
+    for (const t of ['users', 'api_keys', 'organisations', 'members', 'projects', 'environments', 'secrets', 'share_links', 'audit_log', 'encryption_keys', 'key_rotations', 'key_rotation_failures', 'auth_tokens', 'refresh_tokens', 'org_invites']) {
       expect(tables).toContain(t)
     }
     // 0017 dropped it (issue #84); 0000 still creates it, so this asserts the drop actually ran.
@@ -127,6 +127,90 @@ describe('migrations', () => {
     env.DB.sqlite.exec(sql.split('ALTER TABLE key_rotations DROP COLUMN')[0]!)
     expect(await env.DB.prepare("SELECT phase FROM key_rotations WHERE id = 'r1'").first<{ phase: string }>())
       .toEqual({ phase: 'connections' })
+  })
+
+  it('0018 adds the credential org columns and keeps them nullable for the old code', async () => {
+    const env = createTestEnv()
+    const info = async (t: string) =>
+      (await env.DB.prepare(`PRAGMA table_info(${t})`).all<{ name: string; notnull: number; dflt_value: string | null }>()).results
+    const apiKeyOrg = (await info('api_keys')).find((c) => c.name === 'org_id')
+    const refreshOrg = (await info('refresh_tokens')).find((c) => c.name === 'org_id')
+    // Nullable with no default: SQLite cannot add NOT NULL to a populated table, and the
+    // previously deployed code still INSERTs without naming the column while 0018 is live. The
+    // CODE is what refuses a NULL (KEY_ORG_UNRESOLVED / a revoked refresh family), not the schema.
+    expect(apiKeyOrg).toMatchObject({ notnull: 0, dflt_value: null })
+    expect(refreshOrg).toMatchObject({ notnull: 0, dflt_value: null })
+
+    const now = new Date().toISOString()
+    await env.DB.prepare('INSERT INTO organisations (id, name, slug, created_at) VALUES (?, ?, ?, ?)').bind('o1', 'O', 'o', now).run()
+    await env.DB.prepare('INSERT INTO users (id, email, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)').bind('u1', 'u@x', 'h', 's', now).run()
+    // An insert in exactly the shape the pre-0018 Worker writes still succeeds (backward compatible).
+    await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, name, created_at) VALUES (?, ?, ?, ?, ?)')
+      .bind('key_old', 'u1', 'hash-old', 'legacy', now).run()
+    expect(await env.DB.prepare("SELECT org_id FROM api_keys WHERE id = 'key_old'").first<{ org_id: string | null }>())
+      .toEqual({ org_id: null })
+
+    // Deleting the organisation takes its credentials with it, which neither table did before.
+    await env.DB.prepare('INSERT INTO api_keys (id, user_id, org_id, key_hash, name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind('key_new', 'u1', 'o1', 'hash-new', 'current', now).run()
+    await env.DB.prepare('INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, created_at, expires_at, family_started_at, org_id) VALUES (?, ?, ?, ?, 1, 2, 1, ?)')
+      .bind('rt1', 'u1', 'f1', 'rt-hash', 'o1').run()
+    await env.DB.prepare("DELETE FROM organisations WHERE id = 'o1'").run()
+    expect(await env.DB.prepare("SELECT id FROM api_keys WHERE id = 'key_new'").first()).toBeNull()
+    expect(await env.DB.prepare("SELECT id FROM refresh_tokens WHERE id = 'rt1'").first()).toBeNull()
+    expect(await env.DB.prepare("SELECT id FROM api_keys WHERE id = 'key_old'").first()).toEqual({ id: 'key_old' })
+  })
+
+  it('0018 allows one OPEN invite per address per org, and frees the address on accept or revoke', async () => {
+    const env = createTestEnv()
+    const now = new Date().toISOString()
+    const later = new Date(Date.now() + 7 * 86_400_000).toISOString()
+    const cols = (await env.DB.prepare('PRAGMA table_info(org_invites)').all<{ name: string }>()).results.map((r) => r.name)
+    expect(cols).toEqual([
+      'id', 'org_id', 'email', 'role', 'token_hash', 'invited_by',
+      'created_at', 'expires_at', 'accepted_at', 'accepted_by', 'revoked_at', 'revoked_by',
+    ])
+
+    await env.DB.prepare('INSERT INTO organisations (id, name, slug, created_at) VALUES (?, ?, ?, ?)').bind('o1', 'O', 'o', now).run()
+    await env.DB.prepare('INSERT INTO organisations (id, name, slug, created_at) VALUES (?, ?, ?, ?)').bind('o2', 'P', 'p', now).run()
+    await env.DB.prepare('INSERT INTO users (id, email, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)').bind('u1', 'a@x', 'h', 's', now).run()
+    const invite = (id: string, orgId: string, email: string, hash: string) =>
+      env.DB.prepare('INSERT INTO org_invites (id, org_id, email, role, token_hash, invited_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(id, orgId, email, 'member', hash, 'u1', now, later)
+
+    await invite('inv_1', 'o1', 'ann@x.test', 'h1').run()
+    // A second OPEN invite to the same address in the same org is the thing the partial unique
+    // index exists to refuse — otherwise an admin re-inviting produces two live tokens.
+    await expect(invite('inv_2', 'o1', 'ann@x.test', 'h2').run()).rejects.toThrow(/UNIQUE/i)
+    // Another org, same address: fine. An invite is to an address IN an org.
+    await invite('inv_3', 'o2', 'ann@x.test', 'h3').run()
+    // The token hash is globally unique, so a token can never name two invites.
+    await expect(invite('inv_4', 'o2', 'bob@x.test', 'h1').run()).rejects.toThrow(/UNIQUE/i)
+
+    // Accepting frees the address: a member who later leaves can be invited again.
+    await env.DB.prepare("UPDATE org_invites SET accepted_at = ?, accepted_by = 'u1' WHERE id = 'inv_1'").bind(now).run()
+    await invite('inv_5', 'o1', 'ann@x.test', 'h5').run()
+    await expect(invite('inv_6', 'o1', 'ann@x.test', 'h6').run()).rejects.toThrow(/UNIQUE/i)
+
+    // So does revoking.
+    await env.DB.prepare("UPDATE org_invites SET revoked_at = ?, revoked_by = 'u1' WHERE id = 'inv_5'").bind(now).run()
+    await invite('inv_7', 'o1', 'ann@x.test', 'h7').run()
+
+    // The role CHECK matches members', and the default is the least-privileged useful role.
+    await expect(
+      env.DB.prepare('INSERT INTO org_invites (id, org_id, email, role, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind('inv_bad', 'o2', 'c@x.test', 'superuser', 'h8', now, later).run(),
+    ).rejects.toThrow(/CHECK/i)
+    await env.DB.prepare('INSERT INTO org_invites (id, org_id, email, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind('inv_default', 'o2', 'd@x.test', 'h9', now, later).run()
+    expect(await env.DB.prepare("SELECT role FROM org_invites WHERE id = 'inv_default'").first()).toEqual({ role: 'member' })
+
+    // Offboarding the inviting admin keeps the invite and blanks the reference; deleting the org
+    // takes its invites with it.
+    await env.DB.prepare("DELETE FROM users WHERE id = 'u1'").run()
+    expect(await env.DB.prepare("SELECT invited_by FROM org_invites WHERE id = 'inv_7'").first()).toEqual({ invited_by: null })
+    await env.DB.prepare("DELETE FROM organisations WHERE id = 'o1'").run()
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM org_invites WHERE org_id = 'o1'").first<{ n: number }>()).toEqual({ n: 0 })
   })
 
   it('0006 is safe to apply twice and enforces a single running rotation', async () => {

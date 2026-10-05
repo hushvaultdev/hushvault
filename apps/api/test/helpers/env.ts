@@ -154,13 +154,24 @@ export async function seedUser(
   return { userId, orgId, email, role, token }
 }
 
-/** Insert an API key for a user; returns the raw key to use as a Bearer token. */
-export async function seedApiKey(env: TestEnv, userId: string) {
+/**
+ * Insert an API key for a user; returns the raw key to use as a Bearer token.
+ *
+ * A key names the org it acts in (migration 0018). `orgId` defaults to the user's earliest
+ * membership, which is what the production create endpoint would have recorded for a single-org
+ * user; pass it explicitly to seed a key in a specific org. Pass `null` to seed a pre-0018 key
+ * with no org at all.
+ */
+export async function seedApiKey(env: TestEnv, userId: string, orgId?: string | null) {
   const { rawKey, keyHash } = await createApiKey()
   const id = createPrefixedId('key')
-  await env.DB.prepare('INSERT INTO api_keys (id, user_id, key_hash, name, created_at) VALUES (?, ?, ?, ?, ?)')
-    .bind(id, userId, keyHash, 'test key', new Date().toISOString()).run()
-  return { id, rawKey }
+  const resolved = orgId === undefined
+    ? (await env.DB.prepare('SELECT org_id FROM members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1')
+      .bind(userId).first<{ org_id: string }>())?.org_id ?? null
+    : orgId
+  await env.DB.prepare('INSERT INTO api_keys (id, user_id, org_id, key_hash, name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(id, userId, resolved, keyHash, 'test key', new Date().toISOString()).run()
+  return { id, rawKey, orgId: resolved }
 }
 
 export async function seedProject(env: TestEnv, orgId: string, name = 'Proj') {

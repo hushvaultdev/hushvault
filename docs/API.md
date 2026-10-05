@@ -62,12 +62,17 @@ Send `Authorization: Bearer <token>` where the token is either:
    The `role` and `orgId` are baked in at issue time and re-read at each refresh, so a membership change reaches
    the session within one access lifetime. Renew it with a refresh token (see
    [Sessions and refresh tokens](#sessions-and-refresh-tokens)).
-2. **An API key** (`hv_live_...`) from `POST /api/auth/api-keys`. Only a SHA-256 hash is stored. The key acts as
-   its owner, with the org and role of the owner's earliest membership, looked up on each request. Revoked or
-   expired keys get `401`.
+2. **An API key** (`hv_live_...`) from `POST /api/auth/api-keys`. Only a SHA-256 hash is stored. The key acts
+   as its owner **in the organisation it was created in** (`api_keys.org_id`), with the role that owner has in
+   *that* organisation, re-read on each request. Nothing is derived from the owner's other memberships, so a key
+   never follows its owner into another org. Revoked or expired keys get `401`.
 
 Missing/invalid credentials: `401 UNAUTHORIZED` (`Authentication required`, `Invalid credentials`, or
-`API key expired`). Endpoints without "Auth" below need no token.
+`API key expired`). A key that is otherwise valid but has no usable organisation — its `org_id` is `NULL`
+(created before migration `0018`), or its owner is no longer a member of that organisation — gets
+`401 KEY_ORG_UNRESOLVED` (`This API key has no usable organisation. Create a new key.`). It is deliberately
+distinct from `Invalid credentials` so an operator can tell "re-create this key" from "this key is not ours".
+Endpoints without "Auth" below need no token.
 
 ## Roles
 
@@ -96,12 +101,16 @@ every integrations and CI-access route. Audit-retention changes also re-read the
 membership per request, so a just-demoted admin loses the lever immediately rather than at the
 end of their token's lifetime.
 
+A user may belong to several organisations, with a different role in each. A credential names the
+organisation it acts in and never re-derives one: see [Organisations](#organisations). Registration creates the
+user as `owner` of a new organisation, and `POST /api/orgs` creates further ones. There are still **no
+endpoints for inviting members or changing roles** (issue #82 Lane B), so the only way into a second
+organisation today is to create it — but a credential's organisation is now fixed rather than inferred, which
+is what makes a second membership safe to add.
+
 Notes: viewers can read plaintext secret values — this is deliberate, and worth knowing before
 granting the role. Audit reads are admin-only: the trail carries every member's IP, user agent
-and secret-read history, and the export can stream 50,000 rows per call. Registration creates the
-user as `owner` of a new organisation, and there are **no endpoints for inviting members or
-changing roles**, so in practice every organisation has exactly one member and the roles below
-`owner` are not reachable yet.
+and secret-read history, and the export can stream 50,000 rows per call.
 
 ## Rate limits
 
@@ -122,6 +131,8 @@ A window is aligned to the clock, so a caller can obtain up to 2× the limit acr
 | `auth-refresh` | `POST /api/auth/{refresh,logout}` | IP | 60 | 503 |
 | `auth-forgot` | `POST /api/auth/forgot-password`, verification resend | IP | 5 | 503 |
 | `auth-token-submit` | `POST /api/auth/{verify-email,reset-password}` | IP | 10 | 503 |
+| `org-create` | `POST /api/orgs` | IP | 5 | 503 |
+| `org-switch` | `POST /api/orgs/:id/switch` | IP | 60 | 503 |
 | `auth-oidc` | `POST /api/auth/github-oidc` | IP | 30 | 503 |
 | `secret-read` | `GET /api/secrets`, `GET /api/secrets/:name`, `GET /api/environments/:id/resolved` | IP | 120 | degrades to a per-isolate counter |
 | `secret-write` | `POST/PATCH/DELETE /api/secrets` | IP | 60 | degrades to a per-isolate counter |
@@ -159,8 +170,10 @@ No auth. Scope `auth-register`.
 
 Body: `email` (email, max 254), `password` (12-128 chars), `organisationName` (2-120 chars).
 
-`201` `{ "data": { "userId", "orgId", "token" } }`. The user is created as `owner` of a new organisation on the
-`free` plan, with `email_verified = 0`; a verification email is sent in the background (see
+`201` `{ "data": { "userId", "orgId", "token", "expiresIn", "emailVerified", "orgs" } }` (plus `refreshToken`
+for `X-HushVault-Client: cli`). `orgs` is the same list as [`GET /api/orgs`](#get-apiorgs) — one entry here, by
+construction — so the dashboard's org switcher needs no second round trip. The user is created as `owner` of a
+new organisation on the `free` plan, with `email_verified = 0`; a verification email is sent in the background (see
 [Email verification and password reset](#email-verification-and-password-reset)). Errors: `409 CONFLICT`
 (`Email is already registered`), `400` validation.
 
@@ -173,7 +186,10 @@ curl -X POST "$HUSHVAULT_API_URL/api/auth/register" -H 'Content-Type: applicatio
 
 No auth. Scope `auth-login`. Body: `email`, `password` (1-128).
 
-`200` `{ "data": { "token", "expiresIn", "userId", "orgId", "role", "emailVerified" } }` (plus `refreshToken` for `X-HushVault-Client: cli`). Uses the user's earliest membership. Errors:
+`200` `{ "data": { "token", "expiresIn", "userId", "orgId", "role", "emailVerified", "orgs" } }` (plus
+`refreshToken` for `X-HushVault-Client: cli`). The starting organisation is the caller's **earliest
+membership**, chosen once here; the session then carries it and nothing re-derives it. `orgs` lists every
+organisation the caller belongs to, so the dashboard can offer a switch immediately. Errors:
 `401 UNAUTHORIZED` (`Invalid credentials`; also returned for unknown emails and OAuth-only accounts, with the
 same PBKDF2 cost to avoid timing leaks; `Membership not found` if the user has no membership).
 
@@ -186,7 +202,9 @@ curl -X POST "$HUSHVAULT_API_URL/api/auth/login" -H 'Content-Type: application/j
 
 Auth (any role). Body: `name` (2-80), `expiresAt` (optional ISO-8601 datetime, must be in the future).
 
-`201` `{ "data": { "id", "apiKey", "name", "expiresAt" } }`. `apiKey` is shown exactly once. Errors:
+`201` `{ "data": { "id", "apiKey", "name", "orgId", "expiresAt" } }`. `apiKey` is shown exactly once. The key
+is bound to `orgId` — the organisation the creating session is acting in — for the rest of its life. To get a
+key for another organisation, [switch](#post-apiorgsidswitch) first and create it there. Errors:
 `400 VALIDATION_ERROR` (`expiresAt must be in the future`).
 
 ```bash
@@ -198,14 +216,17 @@ curl -X POST "$HUSHVAULT_API_URL/api/auth/api-keys" -H "Authorization: Bearer $T
 
 Auth (any role). Lists the caller's own keys, newest first; never returns raw keys or hashes.
 
-`200` `{ "data": [ { "id", "name", "createdAt", "lastUsedAt", "expiresAt", "revokedAt" } ] }` (camelCase,
-ISO strings or `null`).
+`200` `{ "data": [ { "id", "name", "orgId", "createdAt", "lastUsedAt", "expiresAt", "revokedAt" } ] }`
+(camelCase, ISO strings or `null`). The list is the caller's own keys across **every** organisation they have
+one in, not only the current one — they are the caller's own credentials, and a key whose `orgId` is `null`
+(pre-`0018`) no longer authenticates and has to be findable in order to be replaced.
 
 ### DELETE /api/auth/api-keys/:id
 
 Auth (any role). Deletes one of the caller's own keys. `200` `{ "data": { "revoked": true } }`. `404 NOT_FOUND`
 (`API key not found`) if it does not exist or belongs to someone else. (The row is deleted; keys revoked by
-the secret scanner are soft-revoked instead.)
+the secret scanner are soft-revoked instead.) The `auth.api_key.revoke` audit row is written against the
+**key's** organisation, not the caller's current one.
 
 ### OAuth sign-in (GitHub and Google)
 
@@ -250,15 +271,31 @@ the header `X-HushVault-Client: cli` and receives it as `refreshToken` in the re
 single use and rotate: each refresh returns a new one in the same family. Idle lifetime 30 days, absolute 90 days.
 Presenting an already-used token (older than a 10 s race window) is treated as theft and revokes the whole family.
 
+A family is **bound to one organisation** (`refresh_tokens.org_id`) for its whole life: a rotation copies the
+organisation from the token it consumes, so a refresh can never move a session to a different org. Changing
+organisation is [`POST /api/orgs/:id/switch`](#post-apiorgsidswitch), which revokes the old family and starts a
+new one. Only the **role** is re-read on refresh, for that organisation, so a demotion still reaches the
+session within one access lifetime (15 min).
+
 | Endpoint | Auth | Notes |
 |----------|------|-------|
-| `POST /api/auth/refresh` | cookie + `X-HushVault-Client` header, or body `{ refreshToken }` | `200` same shape as login. `401 INVALID_REFRESH` (cookie cleared), `409 REFRESH_RACE` (another tab rotated first; retry with the new cookie). Limited to 60/min per IP. |
+| `POST /api/auth/refresh` | cookie + `X-HushVault-Client` header, or body `{ refreshToken }` | `200` same shape as login (including `orgs`). `401 INVALID_REFRESH` (cookie cleared), `401 MEMBERSHIP_REVOKED`, `409 REFRESH_RACE` (another tab rotated first; retry with the new cookie). Limited to 60/min per IP. |
 | `POST /api/auth/logout` | cookie or body | Revokes the token's family and clears the cookie. Always `200`. |
 | `POST /api/auth/logout-all` | Bearer (user JWT) | Ends every session of the user, including live access tokens. |
 
 The cookie is only honoured with the `X-HushVault-Client` header, which a cross-site form cannot set and a
 cross-origin fetch cannot send without a CORS preflight. A password reset, an OAuth account claim and
 `logout-all` invalidate every earlier refresh token. API keys are unchanged (long-lived, for CI).
+
+Two fail-closed refresh outcomes carry the organisation story, and neither ever falls back to another org the
+caller may still belong to:
+
+- `401 MEMBERSHIP_REVOKED` — the caller is no longer a member of the organisation this family is bound to. The
+  family is revoked and the cookie cleared. It is a distinct code so the dashboard can send the person back to
+  org selection rather than show them an empty project list.
+- `401 INVALID_REFRESH` with `reason: "org_unresolved"` — the family has no organisation recorded, i.e. it was
+  minted before migration `0018`. The family is revoked; signing in again is the whole fix. Only sessions
+  started in the window between applying `0018` and deploying this code can be in this state.
 
 ### GitHub Actions OIDC (CI reads, no stored token)
 
@@ -305,6 +342,80 @@ Configuration: `MAIL_FROM`, the `EMAIL` send_email binding (Cloudflare Email Ser
 and the flows still return their normal responses), `EMAIL_DAILY_BUDGET` (global sends per day, default 200) and
 `REQUIRE_VERIFIED_EMAIL` (when set, API-key creation and share-link creation both require a verified email).
 
+
+## Organisations
+
+Prefix `/api/orgs`. A user can belong to several organisations with a different role in each. The rule the
+whole section rests on: **an organisation is chosen explicitly and then carried by the credential.** An access
+token names its org, a refresh-token family is bound to one for its whole life, and an API key names the org it
+was created in. Nothing re-derives an organisation from the caller's memberships, so no request can quietly act
+in the wrong one.
+
+### GET /api/orgs
+
+Auth (any role, API keys included). Every organisation the caller is a member of, oldest membership first.
+
+`200`
+```json
+{
+  "data": [
+    { "id": "org_...", "name": "Acme", "slug": "acme-ab12cd", "plan": "free", "role": "owner", "current": true },
+    { "id": "org_...", "name": "Beta", "slug": "beta-ef34gh", "plan": "free", "role": "viewer", "current": false }
+  ],
+  "currentOrgId": "org_..."
+}
+```
+
+`current` / `currentOrgId` is the organisation the credential presented on *this* request acts in. This is what
+the dashboard's switcher reads.
+
+### POST /api/orgs
+
+Auth, **signed-in person only** (an API key gets `403 FORBIDDEN`: a credential is bound to one organisation and
+has no use for another). Scope `org-create`. Honours `REQUIRE_VERIFIED_EMAIL`.
+
+Body: `name` (2-120 chars).
+
+`201` `{ "data": { "id", "name", "slug", "plan": "free", "role": "owner" } }`. The caller becomes `owner`. The
+slug is derived from the name with the new id's suffix appended, so two organisations of the same name do not
+collide. Audited `org.create` against the new organisation.
+
+The caller's session is **not** moved into the new organisation — that is an explicit call to switch.
+
+Errors: `400 VALIDATION_ERROR`, `403 FORBIDDEN` (API key, or `EMAIL_NOT_VERIFIED` when enforced).
+
+### POST /api/orgs/:id/switch
+
+Auth, **signed-in person only** (`403 FORBIDDEN` for an API key). Scope `org-switch`.
+
+Body: `refreshToken` (optional; CLI only — a browser's refresh token comes from the `__Host-hv_refresh` cookie,
+which requires the `X-HushVault-Client` header as everywhere else).
+
+`200` `{ "data": { "token", "expiresIn", "userId", "orgId", "role", "orgs" } }` (plus `refreshToken` for
+`X-HushVault-Client: cli` when the token was presented in the body). `role` is read from the membership in the
+**target** organisation, never inherited from the current session.
+
+Both halves of the session move: a new access token for the target organisation **and a new refresh-token
+family bound to it**. The family the caller came in on is revoked, so no token of it survives pointing at the
+old organisation. This matters — if only the access token were re-minted, the next refresh (within 15 minutes)
+would silently put the session back in the old organisation. The refresh token presented here is not what
+authenticates the request, so the revoke is scoped to the caller's own families.
+
+Audited `org.switch` against the target organisation.
+
+Errors: `403 NOT_A_MEMBER` (`You are not a member of that organisation`) — also the answer for an organisation
+id that does not exist, because membership is the only question asked; `403 FORBIDDEN` for an API key.
+
+```bash
+curl -X POST "$HUSHVAULT_API_URL/api/orgs/$ORG_ID/switch" \
+  -H "Authorization: Bearer $TOKEN" -H 'X-HushVault-Client: cli' \
+  -H 'Content-Type: application/json' -d "{\"refreshToken\":\"$REFRESH\"}"
+```
+
+> Members and invitations (`/api/orgs/:id/members`, `/api/orgs/:id/invites`, `POST /api/invites/accept`) are
+> issue #82 Lane B and are not implemented yet. The `org_invites` table ships with migration `0018`.
+
+---
 
 ## Projects
 
@@ -681,9 +792,18 @@ Errors: `401 UNAUTHORIZED` (`Missing signature headers`, `Unknown signing key`, 
 
 Written by the API today: `auth.login`, `auth.login.github`, `auth.login.google`, `auth.api_key.create`,
 `auth.api_key.revoke`, `auth.oauth.account_takeover`, `auth.email_verification.sent`, `auth.email.verified`,
-`auth.password_reset.requested`, `auth.password_reset.completed`, `notify.api_key_revoked`, `project.create`, `project.update`, `project.delete`,
+`auth.password_reset.requested`, `auth.password_reset.completed`, `notify.api_key_revoked`, `org.create`,
+`org.switch`, `project.create`, `project.update`, `project.delete`,
 `environment.create`, `secret.read`, `secret.read_bulk`, `secret.create`, `secret.update`, `secret.delete`,
 `share.create`. Not audited: registration, listing endpoints, share views.
+
+An audit row's organisation comes from the **resource**, not from the actor's current session: a key
+revocation is filed against the key's organisation, `org.create` / `org.switch` against the organisation
+acted on. The account-level events — `auth.email.verified`, `auth.password_reset.requested`,
+`auth.password_reset.completed`, `auth.oauth.account_takeover` — are about the person rather than one
+organisation, so they are written once per organisation the user is a member of. Each org's admins therefore
+see the security events of their own members instead of only the admins of whichever membership happened to be
+oldest.
 
 ## Known inconsistencies
 
