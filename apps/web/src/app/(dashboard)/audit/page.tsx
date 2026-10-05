@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState } from '@/components/ui/empty-state'
 import { ApiError, apiFetch } from '@/lib/api'
+import { type AuditRetention, auditExportEntitlement, retentionNote } from '@/lib/audit-export'
 import type { AuditRow } from '@/lib/types'
 
 import styles from './audit.module.css'
@@ -36,6 +37,7 @@ function actorTone(actorType: string): 'accent' | 'neutral' | 'success' {
 
 export default function AuditPage() {
   const [entries, setEntries] = useState<AuditRow[]>([])
+  const [retention, setRetention] = useState<AuditRetention | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -51,9 +53,24 @@ export default function AuditPage() {
     }
   }, [])
 
+  // Fetched separately from the log, and its failure is not surfaced as a page error: it only
+  // decides which explanation the export note shows, and the helper has an honest "unknown"
+  // wording for the case where it did not load.
+  const loadRetention = useCallback(async () => {
+    try {
+      setRetention(await apiFetch<AuditRetention>('/api/audit/retention'))
+    } catch {
+      setRetention(null)
+    }
+  }, [])
+
   useEffect(() => {
     void load()
-  }, [load])
+    void loadRetention()
+  }, [load, loadRetention])
+
+  const entitlement = auditExportEntitlement(retention)
+  const retentionLine = retentionNote(retention)
 
   return (
     <div>
@@ -62,6 +79,7 @@ export default function AuditPage() {
           <h1 className={s('pageTitle')}>Audit log</h1>
           <p className={s('pageSubtitle')}>
             The most recent activity across your organisation. Showing up to 100 events.
+            {retentionLine ? ` ${retentionLine}` : ''}
           </p>
         </div>
       </div>
@@ -119,6 +137,13 @@ export default function AuditPage() {
           </tbody>
         </table>
       )}
+
+      <section className={s('exportSection')} aria-labelledby="audit-export-heading">
+        <h2 className={s('exportTitle')} id="audit-export-heading">
+          Export
+        </h2>
+        <p className={s('exportNote')}>{entitlement.note}</p>
+      </section>
     </div>
   )
 }

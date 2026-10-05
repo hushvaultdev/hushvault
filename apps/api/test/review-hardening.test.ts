@@ -150,6 +150,43 @@ describe('audit reads are admin-only', () => {
   })
 })
 
+// The export gate stays, but the dashboard has to be able to explain it before the user
+// trips over it, instead of rendering a bare 403 (#92).
+describe('audit retention reports the export entitlement', () => {
+  it('says export is unavailable on free, which is every real org today', async () => {
+    const env = createTestEnv()
+    const { token } = await seedUser(env, { role: 'admin' })
+
+    const res = await call(env, 'GET', '/api/audit/retention', { token })
+    expect(res.status).toBe(200)
+    expect(res.body.data.plan).toBe('free')
+    expect(res.body.data.complianceExport).toBe(false)
+  })
+
+  it('tracks the plan that the export handler actually allows', async () => {
+    const env = createTestEnv()
+    const { token, orgId } = await seedUser(env, { role: 'admin' })
+    await env.DB.prepare("UPDATE organisations SET plan = 'team' WHERE id = ?").bind(orgId).run()
+
+    const res = await call(env, 'GET', '/api/audit/retention', { token })
+    expect(res.body.data.complianceExport).toBe(true)
+    // The advertised entitlement and the enforced one must not disagree.
+    expect((await call(env, 'GET', '/api/audit/export', { token })).status).toBe(200)
+  })
+
+  it('refuses export on free without telling the caller to upgrade', async () => {
+    const env = createTestEnv()
+    const { token } = await seedUser(env, { role: 'admin' })
+
+    const res = await call(env, 'GET', '/api/audit/export', { token })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('PLAN_UPGRADE_REQUIRED')
+    // There is no billing, so "upgrade your plan" would be advice nobody can follow.
+    expect(res.body.message).not.toMatch(/upgrade/i)
+    expect(res.body.message).toMatch(/not available yet/)
+  })
+})
+
 // The rotation status endpoint answers one question: is it safe to retire the old key? A
 // `completed` job was never a sufficient answer on its own.
 describe('key-rotation status reports what blocks key retirement', () => {

@@ -606,6 +606,10 @@ curl "$HUSHVAULT_API_URL/api/audit?action=secret.read&from=2026-01-01T00:00:00.0
 Compliance export, **Team and Enterprise plans only** (`403 PLAN_UPGRADE_REQUIRED` otherwise). Query: the same
 filters as the list (no `cursor`) plus `format` = `json` (default) or `csv`. At most 50,000 rows, newest first.
 
+The 403 message does not tell the caller to upgrade, because there is no billing and therefore no way to
+leave `free`; clients should read `complianceExport` from `GET /api/audit/retention` and explain the
+boundary before the call, as the dashboard's audit page does.
+
 - `json`: `Content-Type: application/json`, attachment `audit-log-YYYY-MM-DD.json`,
   body `{ "data": [rows], "total": n, "exportedAt": "..." }`.
 - `csv`: `text/csv; charset=utf-8`, attachment `audit-log-YYYY-MM-DD.csv`, CRLF line endings, header
@@ -614,7 +618,10 @@ filters as the list (no `cursor`) plus `format` = `json` (default) or `csv`. At 
 
 ### GET /api/audit/retention
 
-`200` `{ "data": { "plan", "planMaxDays", "overrideDays", "effectiveDays" } }` (`-1` means unlimited).
+`200` `{ "data": { "plan", "planMaxDays", "overrideDays", "effectiveDays", "complianceExport" } }`
+(`-1` days means unlimited). `complianceExport` is a boolean derived from the plan — whether
+`GET /api/audit/export` will be permitted — so a client can surface the limit instead of a 403. It is
+advisory: the export route makes the check itself.
 
 ### PUT /api/audit/retention
 
@@ -683,7 +690,9 @@ These are real quirks of the current API, documented rather than hidden:
   list or restore a previous version.
 - **Audit export is unreachable in practice.** It requires the `team` or `enterprise` plan, and
   with no billing every organisation is on `free` forever — so `GET /api/audit/export` returns
-  403 `PLAN_UPGRADE_REQUIRED` for every real caller today.
+  403 `PLAN_UPGRADE_REQUIRED` for every real caller today. The gate is deliberate (#92); the
+  `complianceExport` flag on `GET /api/audit/retention` exists so clients can say so up front,
+  and the error code is kept for compatibility even though no upgrade is possible.
 - **Roles in JWTs** are fixed at issue time, for the 15-minute access-token lifetime; a refresh
   re-reads the caller's membership and role, so a role change takes effect within one token
   lifetime. Routes where that window is too long (integrations, CI access, audit retention) also

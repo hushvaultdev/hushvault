@@ -122,6 +122,10 @@ auditRoutes.get('/retention', async (c) => {
       planMaxDays,
       overrideDays: retention.auditRetentionDays,
       effectiveDays: effectiveRetentionDays(retention),
+      // Derived from the same predicate the export handler enforces, so the dashboard can
+      // explain the boundary up front instead of turning a 403 into an uninterpretable error.
+      // Advisory only: this is not the access check, /export still makes it itself.
+      complianceExport: canComplianceExport(retention.plan),
     },
   })
 })
@@ -198,6 +202,7 @@ auditRoutes.put(
       planMaxDays,
       overrideDays: retention.auditRetentionDays,
       effectiveDays: effectiveRetentionDays(retention),
+      complianceExport: canComplianceExport(retention.plan),
     },
   })
 })
@@ -217,7 +222,14 @@ auditRoutes.get('/export', requireRole('admin'), auditExportRateLimit, zValidato
   }
   if (!canComplianceExport(retention.plan)) {
     return c.json(
-      { error: 'PLAN_UPGRADE_REQUIRED', message: 'Compliance export requires the Team or Enterprise plan' },
+      {
+        error: 'PLAN_UPGRADE_REQUIRED',
+        // The code is kept for API compatibility, but the message must not read as "upgrade to
+        // fix this": there is no billing, so no organisation can leave `free`. Say it is
+        // unavailable and point at the read path that does work (#92).
+        message:
+          'Compliance export is limited to the Team and Enterprise plans. Hosted plans are not available yet, so export is unavailable; read the log with GET /api/audit instead',
+      },
       403,
     )
   }

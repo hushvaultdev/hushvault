@@ -98,3 +98,26 @@
 .muted {
   color: var(--text-muted);
 }
+
+.exportSection {
+  margin-top: 28px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.exportTitle {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+/* The reason is plain body text, not a colour-coded badge: it has to carry on its own for
+   anyone who cannot see the styling. */
+.exportNote {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
