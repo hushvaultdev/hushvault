@@ -33,7 +33,10 @@ Error codes are SCREAMING_SNAKE_CASE. Codes used by the routes: `UNAUTHORIZED` (
 `PLAN_UPGRADE_REQUIRED` (403), `NOT_FOUND` (404), `CONFLICT` (409), `VALIDATION_ERROR` (400),
 `PAYLOAD_TOO_LARGE` (413), `INVALID_ENVIRONMENT_CHAIN` (422), `COMPUTED_SECRET_ERROR` (422),
 `RATE_LIMIT_EXCEEDED` (429), `INTERNAL_ERROR` / `DECRYPTION_FAILED` (500),
-`OAUTH_NOT_CONFIGURED` (503). Error messages never contain secret values.
+`OAUTH_NOT_CONFIGURED` (503). Multi-org adds `NOT_A_MEMBER` (403), `MEMBERSHIP_REVOKED` (403 on a normal
+request, 401 on refresh), `KEY_ORG_UNRESOLVED` (401), `EMAIL_NOT_VERIFIED` (403), `ALREADY_MEMBER` (409),
+`LAST_OWNER` (409) and the invitation codes `INVITE_NOT_FOUND` (404), `INVITE_REVOKED` / `INVITE_EXPIRED` /
+`INVITE_ACCEPTED` / `INVITE_EMAIL_MISMATCH` (403). Error messages never contain secret values.
 
 One response does not follow this shape: an unknown path returns `404 {"error":"Not found"}` (no `message`).
 Unhandled exceptions return a generic 500 that never exposes internals; at the time of writing the work-in-progress
@@ -42,10 +45,11 @@ code returns `{"error":"INTERNAL_ERROR","message":"Something went wrong","reques
 
 Request-body validation: routes that use the Zod validator without a custom hook (auth, projects,
 environments, share, audit) return the validator's default 400 body (a Zod failure object, not
-`{error,message}`). Secrets routes use a hook and return `400 VALIDATION_ERROR` with the first issue message.
+`{error,message}`). Secrets, organisations, members and invitations use a hook and return
+`400 VALIDATION_ERROR` with the first issue message.
 Clients should treat any 400 as "invalid input".
 
-IDs are prefixed random strings: `usr_`, `org_`, `prj_`, `env_`, `sec_`, `key_`, `sh_`,
+IDs are prefixed random strings: `usr_`, `org_`, `mem_`, `inv_`, `prj_`, `env_`, `sec_`, `key_`, `sh_`,
 `tok_`, `audit_`.
 
 CORS (`/api/*`): allowed origins are `https://hushvault.dev`, `https://www.hushvault.dev`,
@@ -133,6 +137,9 @@ A window is aligned to the clock, so a caller can obtain up to 2× the limit acr
 | `auth-token-submit` | `POST /api/auth/{verify-email,reset-password}` | IP | 10 | 503 |
 | `org-create` | `POST /api/orgs` | IP | 5 | 503 |
 | `org-switch` | `POST /api/orgs/:id/switch` | IP | 60 | 503 |
+| `invite-create` | `POST /api/orgs/:id/invites` | **organisation** (the one in the path) | 20 | 503 |
+| `invite-accept` | `POST /api/invites/accept` | IP | 10 | 503 |
+| `member-write` | `PATCH`/`DELETE` `/api/orgs/:id/members/:userId`, `DELETE /api/orgs/:id/invites/:inviteId` | **organisation** (the one in the path) | 30 | 503 |
 | `auth-oidc` | `POST /api/auth/github-oidc` | IP | 30 | 503 |
 | `secret-read` | `GET /api/secrets`, `GET /api/secrets/:name`, `GET /api/environments/:id/resolved` | IP | 120 | degrades to a per-isolate counter |
 | `secret-write` | `POST/PATCH/DELETE /api/secrets` | IP | 60 | degrades to a per-isolate counter |
@@ -414,8 +421,198 @@ curl -X POST "$HUSHVAULT_API_URL/api/orgs/$ORG_ID/switch" \
   -H 'Content-Type: application/json' -d "{\"refreshToken\":\"$REFRESH\"}"
 ```
 
-> Members and invitations (`/api/orgs/:id/members`, `/api/orgs/:id/invites`, `POST /api/invites/accept`) are
-> issue #82 Lane B and are not implemented yet. The `org_invites` table ships with migration `0018`.
+### Members and invitations
+
+Issue #82 Lane B. These endpoints name their organisation in the **path**, not through the credential, so two
+rules apply to all of them.
+
+**Signed-in people only.** Every endpoint in this subsection is `requireHuman`: an API key gets `403 FORBIDDEN`.
+A key is a deployment credential bound to one organisation for life, and a leaked CI key must not be able to
+invite a new owner, change a role or send mail from the deployment.
+
+**A non-member gets `404 NOT_FOUND` (`Organisation not found`) — byte for byte the answer for an organisation
+id that does not exist.** So `/api/orgs/<guess>/members` cannot be used to discover which organisations exist,
+who is in them, or whether an id is real. The one exception discloses nothing new: when the credential
+presented *itself* names the organisation (`orgId` in the token) and the membership is gone, the answer is
+`403 MEMBERSHIP_REVOKED` — the caller's own token already said which organisation it acts in, and this is the
+code the dashboard needs in order to send them to the organisation picker. Note the status: `403` here, while
+`POST /api/auth/refresh` answers `401 MEMBERSHIP_REVOKED` with the family revoked. The status is what
+distinguishes "pick another organisation" from "sign in again".
+
+Roles below are the caller's role in **the organisation in the path**, re-read from `members` on every request —
+so a demotion or a removal takes effect at once rather than within an access token's lifetime.
+
+#### POST /api/orgs/:id/invites
+
+Auth, `admin` of `:id`. Scope `invite-create` (per **organisation**). Honours `REQUIRE_VERIFIED_EMAIL`.
+
+Body: `email` (3–254 chars, must parse as an address; trimmed and **lower-cased** before storage), `role`
+(`owner` | `admin` | `member` | `viewer`, default `member`).
+
+`201`
+```json
+{
+  "data": {
+    "invite": { "id": "inv_...", "orgId": "org_...", "email": "ann@example.com", "role": "member",
+                "createdAt": "2026-10-05T...", "expiresAt": "2026-10-12T...", "invitedBy": "usr_..." },
+    "acceptUrl": "https://hushvault.dev/invites/accept#token=...&email=ann%40example.com"
+  }
+}
+```
+
+The token is 256 random bits. Only `base64url(SHA-256(token))` is stored, so nothing can read it back out of
+the database. It is returned **once**, in this response, and mailed once — there is no endpoint that will show
+it again. `acceptUrl` is `null` when `WEB_APP_URL` is not configured. Handing it to the creating admin grants
+them nothing new (they chose the address and could invite it again), and the invitation is bound to that
+address, so the link cannot add a different account. Every response carries `Cache-Control: no-store`.
+
+Only an owner may invite an `owner`. The invitation expires in **7 days**.
+
+Audited `org.invite.create` against `:id`; the background send adds `org.invite.sent` (actor `system`). A
+failed send does not fail the request — see [OPERATIONS § 6](OPERATIONS.md#6-transactional-email).
+
+Errors: `400 VALIDATION_ERROR`; `403 FORBIDDEN` (not an admin, an API key, inviting an owner as an admin, or
+`EMAIL_NOT_VERIFIED` when enforced); `404 NOT_FOUND`; `409 ALREADY_MEMBER` (that address is already in the
+organisation); `409 CONFLICT` (an open invitation to that address already exists — revoke it to send a new
+one; enforced by the partial unique index `org_invites_open_idx`, which only constrains invitations that are
+neither accepted nor revoked).
+
+#### GET /api/orgs/:id/invites
+
+Auth, `admin` of `:id`. The invitations still waiting: not accepted, not revoked, not expired. At most 200.
+
+`200` `{ "data": [ { "id", "email", "role", "created_at", "expires_at", "invited_by" } ], "total": 1 }`
+(snake_case, like the other list endpoints).
+
+**Neither the token nor its hash is ever returned**, by this endpoint or any other.
+
+#### DELETE /api/orgs/:id/invites/:inviteId
+
+Auth, `admin` of `:id`. Scope `member-write` (per **organisation**).
+
+`200` `{ "data": { "id", "revokedAt" } }`. A soft revoke: the row keeps saying the invitation happened and who
+ended it, and the cron sweep collects it later. Revoking frees the address for a new invitation immediately.
+Idempotent — a second DELETE answers `200` and files no second audit row.
+
+Audited `org.invite.revoke` against `:id`, only by the request that actually revoked it.
+
+Errors: `404 NOT_FOUND` (no such invitation **in this organisation** — an id belonging to another organisation
+reads the same way); `409 CONFLICT` (already accepted; remove the member instead).
+
+#### POST /api/invites/accept
+
+Auth, **signed-in person only**. Scope `invite-accept` (per IP). Mounted outside `/api/orgs` because the
+person redeeming a token is not yet a member of the organisation and must not have to name it.
+
+Body: `token` (16–256 chars).
+
+`201` `{ "data": { "orgId", "orgName", "role", "userId" } }` — `role` is the caller's role in the organisation
+**as the membership row now reads**, which is their existing role if they were already a member: accepting an
+invitation never re-grades somebody's access (that is `PATCH .../members/:userId`).
+
+The caller's **session is not moved** into the organisation they just joined and no token is minted here. An
+organisation is chosen explicitly: the dashboard follows this with `POST /api/orgs/:id/switch`.
+
+The signed-in account's **verified** email must equal the invitation's address, case-insensitively. An
+invitation is to an address, not a bearer ticket, so forwarding the link is useless.
+
+Single use is enforced by the write, not by a read: the membership `INSERT ... SELECT` and the `UPDATE` that
+marks the invitation accepted go in one `batch()`, and each carries `accepted_at IS NULL AND revoked_at IS
+NULL AND expires_at > now` in its own `WHERE`. Two simultaneous accepts of one token therefore cannot both
+insert, and the route reports the outcome from reading the membership row back rather than from
+`meta.changes`.
+
+Errors:
+
+| Code | Status | Means |
+|---|---|---|
+| `VALIDATION_ERROR` | 400 | The token is outside the plausible length range |
+| `INVITE_NOT_FOUND` | 404 | No invitation has that token (unknown, or already swept) |
+| `INVITE_REVOKED` | 403 | An admin revoked it |
+| `INVITE_EXPIRED` | 403 | Past its 7 days |
+| `INVITE_ACCEPTED` | 403 | Already used |
+| `INVITE_EMAIL_MISMATCH` | 403 | Signed in as a different account — see below |
+| `EMAIL_NOT_VERIFIED` | 403 | The address matches but has not been confirmed |
+| `FORBIDDEN` | 403 | An API key |
+
+`INVITE_EMAIL_MISMATCH` carries the invited address **at the top level of the error body** and nothing else:
+
+```json
+{ "error": "INVITE_EMAIL_MISMATCH", "message": "This invitation was sent to a different email address. Sign in with that address to accept it.",
+  "invitedEmail": "ann@example.com" }
+```
+
+Top level, not nested under a `details` object, because the dashboard reads it as `ApiError.details.invitedEmail`
+and its `details` **is** the whole error body (`apps/web/src/lib/api.ts`). This discloses nothing: whoever holds
+the emailed token already has the address, and without it the page can only say "this was sent to someone else",
+which does not tell the person which account to sign in as. Nothing about the organisation is in it — not the
+name, not the id, not the role, not even that it exists.
+
+#### GET /api/orgs/:id/members
+
+Auth, any member of `:id` (down to `viewer`). Knowing who else can read the organisation's secrets is not
+privileged; the dashboard hides the controls from non-admins but still shows the list. At most 500.
+
+`200` `{ "data": [ { "user_id", "email", "role", "joined_at" } ], "total": 2 }`, oldest membership first.
+
+#### PATCH /api/orgs/:id/members/:userId
+
+Auth, `admin` of `:id`. Scope `member-write` (per **organisation**). Body: `role`.
+
+`200` `{ "data": { "userId", "role" } }`. Setting the role it already has is a no-op: `200`, no write, no audit
+row. Audited `org.member.role_change` against `:id` (resource `member`/`:userId`).
+
+Only an owner may grant the `owner` role or change an owner's. The last `owner` cannot be demoted.
+
+Errors: `400 VALIDATION_ERROR`; `403 FORBIDDEN` (not an admin, an API key, or an admin reaching for an owner);
+`404 NOT_FOUND` (not a member of this organisation — the same answer whether the account exists);
+`409 LAST_OWNER`.
+
+#### DELETE /api/orgs/:id/members/:userId
+
+Auth, `admin` of `:id` — **or** any member removing **themselves**, whatever their role. Scope `member-write`
+(per **organisation**).
+
+`200` `{ "data": { "userId", "removed": true } }`. Audited `org.member.remove` against `:id`, or
+`org.member.leave` when the caller removed themselves.
+
+The removal also kills that organisation's credentials for that person, in the **same `batch()`** as the
+membership delete: `refresh_tokens` for `(user, org)` are deleted and their `api_keys` for `(user, org)` are
+revoked with `revoked_reason = 'membership_removed'`. Credentials for the person's *other* organisations are
+untouched. Without this, removal would only be *eventually* effective — the Lane A fail-closed paths
+(`MEMBERSHIP_REVOKED`, `KEY_ORG_UNRESOLVED`) authorise nothing after removal, but an access token already
+issued would keep working for up to its 15 minutes and `api_keys` would give an operator no way to tell which
+keys are dead.
+
+Errors: `403 FORBIDDEN` (not an admin and not yourself, an API key, or an admin reaching for an owner);
+`404 NOT_FOUND`; `409 LAST_OWNER`.
+
+#### `LAST_OWNER`, and why it is safe under concurrency
+
+An organisation always keeps at least one `owner`. The guard is a correlated subquery **inside** the statement
+that performs the write —
+
+```sql
+AND (role <> 'owner' OR EXISTS (
+      SELECT 1 FROM members m2 WHERE m2.org_id = ? AND m2.role = 'owner' AND m2.user_id <> ?))
+```
+
+— and never a count read beforehand. `SELECT COUNT(*) ... WHERE role = 'owner'` followed by an `UPDATE` is two
+statements: two owners demoting each other at the same moment both read 2, both decide they are allowed, and
+the organisation ends with none. Here the condition is evaluated as part of the single statement that writes,
+and D1 serialises writes to a database, so the second evaluates it against a database in which the first has
+committed and matches no row. The route then reads the row back and returns `409 LAST_OWNER` from what it
+finds; `meta.changes` is documented by D1 as a rough indication and nothing here depends on it.
+
+On the removal path the two credential statements in the batch are themselves conditional on
+`NOT EXISTS (SELECT 1 FROM members WHERE org_id = ? AND user_id = ?)`. They run in the same transaction as the
+delete, so they see its result: a removal refused by the last-owner guard leaves the sessions and keys alone.
+
+Closed invitations (expired, or revoked) are collected by the cron sweep in `apps/api/src/lib/housekeeping.ts`,
+bounded per tick like the sweeps beside it. An accepted or revoked row survives until it is past its seven
+days, which is what lets a re-clicked link say `INVITE_ACCEPTED` or `INVITE_REVOKED` rather than
+`INVITE_NOT_FOUND`; after that the token is dead anyway. The trail lives in `audit_log`, which has its own
+retention.
 
 ---
 
@@ -795,13 +992,21 @@ Errors: `401 UNAUTHORIZED` (`Missing signature headers`, `Unknown signing key`, 
 Written by the API today: `auth.login`, `auth.login.github`, `auth.login.google`, `auth.api_key.create`,
 `auth.api_key.revoke`, `auth.oauth.account_takeover`, `auth.email_verification.sent`, `auth.email.verified`,
 `auth.password_reset.requested`, `auth.password_reset.completed`, `notify.api_key_revoked`, `org.create`,
-`org.switch_in`, `org.switch_out`, `project.create`, `project.update`, `project.delete`,
-`environment.create`, `secret.read`, `secret.read_bulk`, `secret.create`, `secret.update`, `secret.delete`,
-`share.create`. Not audited: registration, listing endpoints, share views.
+`org.switch_in`, `org.switch_out`, `org.invite.create`, `org.invite.sent`, `org.invite.revoke`,
+`org.invite.accept`, `org.member.role_change`, `org.member.remove`, `org.member.leave`, `project.create`,
+`project.update`, `project.delete`, `environment.create`, `secret.read`, `secret.read_bulk`, `secret.create`,
+`secret.update`, `secret.delete`, `share.create`. Not audited: registration, listing endpoints, share views.
+
+The invitation and membership rows carry `resource_type` `org_invite` (resource id `inv_...`) or `member`
+(resource id the member's `usr_...`), and `org.invite.sent` is the only one with `actor_type: system` — it
+records the background send, which runs after the response is decided. `audit_log` has no metadata column, so
+a role change records **that** a role changed and against whom, not what it changed to; the new value is in
+the member list.
 
 An audit row's organisation comes from the **resource**, not from the actor's current session: a key
 revocation is filed against the key's organisation, `org.create` / `org.switch_in` / `org.switch_out` against the organisation
-acted on. The account-level events — `auth.email.verified`, `auth.password_reset.requested`,
+acted on, and every invitation and membership row against the organisation in the request path rather than the
+one the actor's credential happens to act in. The account-level events — `auth.email.verified`, `auth.password_reset.requested`,
 `auth.password_reset.completed`, `auth.oauth.account_takeover` — are about the person rather than one
 organisation, so they are written once per organisation the user is a member of. Each org's admins therefore
 see the security events of their own members instead of only the admins of whichever membership happened to be
@@ -815,7 +1020,14 @@ These are real quirks of the current API, documented rather than hidden:
   are raw database rows in snake_case (`project_id`, `parent_env_id`, `is_computed`, `created_at`). Create,
   update, resolved and single-secret responses are camelCase (`projectId`, `parentEnvId`, `isComputed`).
   `GET /api/auth/api-keys` is camelCase even though it is a list. Audit rows are snake_case on purpose to
-  match the dashboard.
+  match the dashboard. The members and invitations endpoints follow the same split: the two **lists** are
+  snake_case rows, while the invitation **create** response and the accept response are camelCase.
+- **`INVITE_EMAIL_MISMATCH` puts `invitedEmail` at the top level** of the error body rather than inside a
+  `details` object. The plan in `docs/plans/multi-org-and-invites.md` calls it `details.invitedEmail`, which
+  is what it is from the dashboard's side — its `ApiError.details` is the whole error body — but it means the
+  wire format has one error code with a field beside `error` and `message`. No other code does.
+- **A role change is not recoverable from the audit log alone.** `audit_log` has no metadata column, so
+  `org.member.role_change` says who changed whose role, not to what (issue #96).
 - **`is_computed`** is `0`/`1` in snake_case rows and a boolean elsewhere.
 - **Validation error shape** differs between routes (see [Conventions](#conventions)); the unknown-path 404
   has no `message`.

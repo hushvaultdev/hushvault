@@ -239,6 +239,7 @@ The **Alert on** column distinguishes three shapes, and the difference matters:
 | `share.unattributed_refused` | A share link was refused for having no attributable creator | **Rate** |
 | `housekeeping.step_failed` | A retention or purge step threw. Carries `step`, `reason` | **Rate**. Sustained failure grows D1 until writes stop |
 | `housekeeping.orphan_blobs` | The KV reconciliation pass found blobs. Carries `scanned`, `unreferenced`, `deleted` | **Rate** on `unreferenced` growing while `deleted` does not keep up (see above) |
+| `housekeeping.swept` | The bounded retention deletes ran. Carries `auditRowsDeleted`, `shareLinksDeleted`, `authTokensDeleted`, `orgInvitesDeleted` | **Value**: any count sitting at its per-tick bound every tick means the sweep is not keeping up (`orgInvitesDeleted` at `INVITE_PURGE_PER_TICK` = 200 sustained is an invitation flood, not routine) |
 
 Not covered by any of these, because the data to alert on is not recorded: see
 "What is still not observable" at the end of this section.
@@ -303,12 +304,12 @@ GitHub Environment secret, review Worker deployment history
 
 ## 6. Transactional email
 
-Issue #26. Code: `apps/api/src/lib/email.ts` (sender), `email-templates.ts` (bodies),
-`account-security.ts` (budget), `routes/auth.ts` (callers).
+Issues #26 and #82. Code: `apps/api/src/lib/email.ts` (sender), `email-templates.ts` (bodies),
+`account-security.ts` (budget), `routes/auth.ts` and `routes/members.ts` (callers).
 
 ### What sends mail
 
-Four messages, and nothing else:
+Five messages, and nothing else:
 
 | Trigger | Message | Budget bucket |
 |---|---|---|
@@ -316,10 +317,36 @@ Four messages, and nothing else:
 | `POST /api/auth/verify-email/send` (resend) | Verify your email address | `verify` |
 | `POST /api/auth/forgot-password` | Reset your password | `reset` |
 | `POST /api/auth/reset-password` (after success) | Your password was changed | `reset` |
+| `POST /api/orgs/:id/invites` | Join `<org>` on HushVault | `invite` |
 
 Every send runs in the background after the response is decided, so **a failed send never
 fails the request that triggered it**. One completed reset therefore spends **two** from the
 `reset` bucket: the link, then the notice.
+
+**The invitation mail is the only one an authenticated caller can point at an address of their
+choosing**, which is why it has a bucket of its own (`invite`) and a per-organisation rate limit
+(`invite-create`, 20/min) rather than a per-IP one. An admin whose session is stolen must not be
+able to raise their mail allowance by changing IP, and a run of invitations must not be able to
+empty the bucket that sign-up verification or password reset depends on.
+
+It is also the only one whose failure is **recoverable without the mail**: the create response
+hands the admin a single-use `acceptUrl` they can pass on themselves. That is not a convenience —
+with the production `EMAIL` binding commented out (below), it is currently the *only* path an
+invitation has on production. The link works once, expires in 7 days, and only for the address it
+was issued to, so passing it on by Slack is no worse than the email would have been.
+
+**Before invitations work in production, an operator needs all three of:**
+
+1. the `EMAIL` send_email binding uncommented on `[env.production]` and the sender domain onboarded
+   (#75) — without it the mail is silently not sent and the handed-back link is the only path;
+2. `MAIL_FROM` matching the binding's `allowed_sender_addresses` (already set);
+3. `WEB_APP_URL` set for the environment — the link is built from it and **nothing else**, never
+   from a request `Host` or `Origin` header. Unset or unparseable and `acceptUrl` comes back `null`
+   and no mail goes out at all, with no error to the caller. It is set on `dev` and `production`
+   today.
+
+No new secret and no new variable are needed. `EMAIL_DAILY_BUDGET` is shared config and already
+applies per bucket, so raising it raises all three.
 
 ### Configuration
 
@@ -344,9 +371,13 @@ Four layers, outermost first:
 - **Per email address** — `forgot-email`, 3/hour, keyed on a hash of the address, so the
   address never becomes a limiter key.
 - **Per user** — resend is 1/min and 5/hour (`verify-send-min`, `verify-send-hour`).
-- **Global daily, per bucket** — `email-send-verify` and `email-send-reset`, default 200/day
-  each. Two buckets on purpose: a sign-up flood must not be able to exhaust the budget that
-  account recovery depends on.
+- **Per organisation** — `invite-create`, 20/min, on `POST /api/orgs/:id/invites`, keyed on the
+  organisation named in the path. Fails **closed**. The partial unique index `org_invites_open_idx`
+  is a second, harder cap on the same abuse: one open invitation per address per organisation, so
+  the same address cannot be mailed again until the first invitation is revoked or accepted.
+- **Global daily, per bucket** — `email-send-verify`, `email-send-reset` and `email-send-invite`,
+  default 200/day each. Three buckets on purpose: a sign-up flood, or a run of invitations, must
+  not be able to exhaust the budget that account recovery depends on.
 
 `spendEmailBudget` returns false both when the budget is spent **and when the Durable Object
 limiter is unavailable**, and the caller then silently skips the send. So "no mail" can mean
@@ -385,6 +416,7 @@ so **every** send path is covered — `purpose` says which one was skipped:
 | `verify_resend` | `verify` | `POST /api/auth/verify-email/send` |
 | `forgot_password` | `reset` | The password reset link |
 | `password_changed` | `reset` | The heads-up notice after a reset completes |
+| `org_invite` | `invite` | An organisation invitation (`POST /api/orgs/:id/invites`) |
 
 The two events are separate because the remedy is: `budget_exhausted` means the cap did its job
 (raise `EMAIL_DAILY_BUDGET`, or find what is burning it), while `budget_unavailable` means the
@@ -404,6 +436,14 @@ Work down this list; the first three are far more common than a provider problem
 5. **Did a token get issued at all?** `SELECT purpose, created_at, used_at FROM auth_tokens
    WHERE user_id = ?`. A row with no mail means the send failed after the token was created;
    no row means the request was throttled or the address did not match an account.
+   For an **invitation**: `SELECT id, role, created_at, expires_at, accepted_at, revoked_at FROM
+   org_invites WHERE org_id = ? AND email = ?` (the address is stored lower-cased), and the audit
+   trail distinguishes the two halves — `org.invite.create` means the row was written,
+   `org.invite.sent` means a send was attempted. A create with no `sent` is a skipped send: the
+   budget, the limiter, or an unset `WEB_APP_URL`. **Never select `token_hash` into a ticket or a
+   chat message**; it identifies the invitation but it is credential-derived material and the `id`
+   is what to quote. The remedy is almost always the same: revoke the invitation and have the admin
+   send a new one, or have the admin pass on the `acceptUrl` from a fresh create.
 6. **Only then suspect delivery.** Ask the recipient to check junk, then get the message source
    and read `Authentication-Results` (SPF/DKIM/DMARC) and, on Microsoft 365,
    `X-Forefront-Antispam-Report`. Microsoft has put HushVault verification mail in Junk while
@@ -438,4 +478,12 @@ below it, per bucket, remembering that a completed reset costs two.
 - **No delivery telemetry.** Nothing records that a message was accepted, bounced or opened, so
   "sent" means "the binding did not throw". Bounces are invisible except as a later
   `RECIPIENT_SUPPRESSED`.
-- **Production is not sending.** The binding is commented out until #75 is done.
+- **Production is not sending.** The binding is commented out until #75 is done. For invitations
+  that is survivable — the admin passes on the `acceptUrl` from the create response — but it means
+  the invitation flow on production is a manual one today, and an admin who dismisses the panel
+  before copying the link has to revoke the invitation and create a new one to get another.
+- **An unset `WEB_APP_URL` looks exactly like working software**, the same trap as a missing
+  binding: `buildTokenLink` returns null, no mail goes out, `acceptUrl` is `null`, and the
+  invitation still returns `201`. There is no log line for it, because there is nothing wrong with
+  the deployment other than the missing setting. Check it as step 0 in the list above when the
+  environment is a new one.

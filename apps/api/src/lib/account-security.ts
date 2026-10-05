@@ -17,7 +17,16 @@ const DAY_MS = 24 * 60 * 60 * 1000
 export const DEFAULT_EMAIL_DAILY_BUDGET = 200
 
 /** Which send was skipped. A label only — never an address, a token or a link. */
-export type EmailPurpose = 'registration' | 'verify_resend' | 'forgot_password' | 'password_changed'
+export type EmailPurpose = 'registration' | 'verify_resend' | 'forgot_password' | 'password_changed' | 'org_invite'
+
+/**
+ * The budget buckets. One per kind, because the point of the cap is that one flood cannot starve
+ * a different flow: a sign-up flood must not take out password reset, and — the reason `invite`
+ * is its own bucket rather than borrowing `verify` (issue #82 Lane B) — a run of invitations must
+ * not take out either. An invitation is also the one send a logged-in caller can trigger on an
+ * arbitrary address, which is exactly the shape of thing that empties a shared bucket.
+ */
+export type EmailKind = 'verify' | 'reset' | 'invite'
 
 /**
  * Global daily cap, per kind (so a sign-up flood cannot starve password reset), kept below the sending provider's quota so a
@@ -34,7 +43,7 @@ export type EmailPurpose = 'registration' | 'verify_resend' | 'forgot_password' 
  * `email.budget_unavailable` means the rate limiter is broken and the cap is not being enforced
  * at all. Collapsing them into one false was itself part of the gap.
  */
-export async function spendEmailBudget(env: Env, kind: 'verify' | 'reset', purpose: EmailPurpose): Promise<boolean> {
+export async function spendEmailBudget(env: Env, kind: EmailKind, purpose: EmailPurpose): Promise<boolean> {
   const configured = Number.parseInt(String(env.EMAIL_DAILY_BUDGET ?? ''), 10)
   const limit = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_EMAIL_DAILY_BUDGET
   const result = await consumeIdentityLimit(env, { scope: `email-send-${kind}`, identity: 'global', limit, windowMs: DAY_MS })

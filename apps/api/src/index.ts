@@ -4,6 +4,7 @@ import { HTTPException } from 'hono/http-exception'
 import { authRoutes } from './routes/auth'
 import { healthRoutes } from './routes/health'
 import { orgRoutes } from './routes/orgs'
+import { inviteRoutes, orgMemberRoutes } from './routes/members'
 import { projectRoutes } from './routes/projects'
 import { environmentRoutes } from './routes/environments'
 import { secretRoutes } from './routes/secrets'
@@ -136,6 +137,12 @@ app.get('/.well-known/security.txt', (c) => c.text([
 app.route('/api/auth', authRoutes)
 app.route('/health', healthRoutes)
 app.route('/api/orgs', orgRoutes)
+// Members and invitations share the /api/orgs prefix with the organisation context above (Hono
+// merges both routers' routes into the parent, so neither shadows the other), while accepting an
+// invitation is mounted separately: the person redeeming a token is not yet a member of the
+// organisation and must not have to name it.
+app.route('/api/orgs', orgMemberRoutes)
+app.route('/api/invites', inviteRoutes)
 app.route('/api/projects', projectRoutes)
 app.route('/api/environments', environmentRoutes)
 app.route('/api/secrets', secretRoutes)

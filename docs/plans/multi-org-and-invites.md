@@ -7,10 +7,12 @@
 This is the contract the implementation lanes work to. Where a lane finds the contract wrong,
 it changes this file in the same commit rather than diverging from it silently.
 
-**Lane status.** Lane A (foundation, API) is implemented: migration `0018_multi_org.sql`,
-`GET/POST /api/orgs`, `POST /api/orgs/:id/switch`, and all five first-membership resolutions
-removed. Lanes B and C are not started. Every change Lane A made to this file is marked inline
-with *(Lane A)*.
+**Lane status.** All three lanes are implemented. Lane A (foundation, API): migration
+`0018_multi_org.sql`, `GET/POST /api/orgs`, `POST /api/orgs/:id/switch`, and all five
+first-membership resolutions removed. Lane C (dashboard). Lane B (invites and members API):
+`apps/api/src/routes/members.ts`, `lib/invites.ts`, the `invite` email template and budget bucket,
+and the `org_invites` sweep in `lib/housekeeping.ts` — **no new migration was needed**. Changes
+each lane made to this file are marked inline with *(Lane A)* / *(Lane B)*.
 
 ---
 
@@ -169,6 +171,44 @@ are no longer open choices — Lane B matches them or Lane C breaks:
   from its own side.
 - Invite email: a new template beside the existing ones, no secret material in it beyond the
   single-use token, and it honours the per-kind email budget (`kind: 'invite'`).
+
+**What Lane B changed in this contract, and what it found.** *(Lane B)*
+
+- **`details.invitedEmail` is `invitedEmail` at the top level of the error body.** Not a divergence:
+  the dashboard reads it as `ApiError.details.invitedEmail`, and `ApiError.details` is the WHOLE
+  error body (`apps/web/src/lib/api.ts` sets `details = err`), so `err.details.invitedEmail`
+  resolves to `body.invitedEmail`. A literal `{ error, message, details: { invitedEmail } }` would
+  satisfy the wording and never reach the page. Documented as a wire-format quirk in
+  `docs/API.md` § Known inconsistencies, because no other error code has a third field.
+- **Every endpoint under `/api/orgs/:id/{members,invites}` is `requireHuman`.** Not stated in the
+  contract either way. An API key names one organisation for life, so letting one reach an endpoint
+  whose organisation comes from the PATH would be the only place a key could act outside its own
+  org — and a leaked CI key must not be able to invite an owner. Consequence: the CLI cannot manage
+  members with an API key, which is already out of scope ("CLI org selection").
+- **A non-member gets `404 NOT_FOUND`, except when their own credential names the org, where it is
+  `403 MEMBERSHIP_REVOKED`.** The brief for these endpoints requires that a stranger learn nothing,
+  and the dashboard needs `MEMBERSHIP_REVOKED` to route someone whose membership just ended to the
+  org picker. Both hold, because the exception only fires for a caller whose token already said
+  which org it acts in. `POST /api/orgs/:id/switch` keeps Lane A's `403 NOT_A_MEMBER`: there the
+  caller is asserting a membership, and a 404 would be indistinguishable from a deleted org.
+- **Accepting an invitation when already a member returns success with the EXISTING role.** The
+  invitation is consumed (so it cannot be replayed) but no role is changed: an invitation must not
+  be a second, unaudited path to a role change. `POST /api/orgs/:id/invites` refuses an address
+  that is already a member up front (`409 ALREADY_MEMBER`), so this is only reachable when the
+  membership appears between invitation and acceptance.
+- **Re-inviting an address with an invitation already open is `409 CONFLICT`, not a re-send.** The
+  partial unique index leaves no other option that keeps one live token per address, and the
+  dashboard already renders a 409 with the API's message. An admin revokes and re-invites.
+- **`org_invites` rows are swept once past `expires_at`, accepted or not, and immediately once
+  revoked.** The contract only asked for expired and revoked. Accepted rows would otherwise grow
+  without bound, and one predicate covers all three states because `expires_at` is set at creation
+  and never moved. The window is load-bearing: while a row survives, a re-clicked link says
+  `INVITE_ACCEPTED` rather than `INVITE_NOT_FOUND`.
+- **Nothing in the pinned list appears to be wrong.** The one thing worth flagging is not pinned:
+  `audit_log` has no metadata column, so `org.member.role_change` cannot record what the role
+  changed *to*. Reconstructing a role history from the trail is therefore not possible. Adding a
+  column is a migration, a schema-drift edit and a new rule about what may go in it, so Lane B
+  raised it as **issue #96** rather than taking it on its own authority.
 
 ## Lane C — dashboard (web)
 
