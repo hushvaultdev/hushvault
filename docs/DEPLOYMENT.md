@@ -217,6 +217,30 @@ database with a D1-capable token, like `0006`.
 
 ## Migrations
 
+**Migration `0017_drop_secret_history.sql` must be applied *after* the new code is deployed —
+it is the first migration that reverses the usual order.** Everything else here is additive and
+is applied first; this one removes a table the previously deployed Worker still queries. Apply it
+while the old code is live and `PATCH /api/secrets/:id` (the history insert), `DELETE
+/api/secrets/:id`, `DELETE /api/projects/:id`, `GET /api/security/key-rotation` and the key-rotation
+cron's bootstrap all fail on `no such table: secret_history`. The other order is safe: the new
+code never names the table, so it runs correctly against a database that still has it — the rows
+simply stop changing. So: deploy, confirm the version is live, then
+`pnpm --filter @hushvault/api db:migrate:dev` (then `:production`).
+
+Two further notes on it. It also rewrites any rotation stored mid-flight at `phase = 'history'`
+to `connections` with a NULL cursor; a job that reaches the new code before the migration is
+handled in code (it re-drives `secrets` from a cursor already at the end of that table and
+advances normally), so neither order wedges a rotation. And it destroys the wrapped DEKs of every
+superseded secret value: no replaced value is recoverable afterwards, by restore or otherwise.
+Export first if you want those rows — see OPERATIONS.md § 2 and issue #84.
+
+**Migration `0016_cron_bookkeeping.sql`** (`system_state` and `orphan_blob_candidates`, issue
+#87) is additive and applied in the usual order. Until it is applied the minute cron logs
+`housekeeping.tick_step_failed` with `step: "orphan_blobs"` each tick and no orphaned KV blob is
+collected; the audit, share-link and token sweeps, key rotation and every route are unaffected
+(`system_state` reads and writes swallow their own errors by design, so rotation's bootstrap
+backoff just does not persist).
+
 **Migrations `0011_sync.sql` and `0012_sync_triggers.sql`** (sync engine tables; automatic-trigger columns and outbox) are applied the same way. Without `0012` the sync routes and the minute cron's sync sweep fail (logged as `sync.tick_step_failed`) but secrets, sign-in and key rotation are unaffected.
 
 **Migration `0010_integration_connections.sql`** (integration credential vault; also rebuilds the two small key-rotation tables with a wider CHECK, copying their rows) should be applied before the code that uses it: until then the key-rotation cron logs `key_rotation.tick_failed` each minute (its first query reads the new table) and `/api/integrations/*` returns 500; secrets and auth are unaffected. Apply with `pnpm --filter @hushvault/api db:migrate:dev` (then `:production`).
@@ -229,7 +253,8 @@ database with a D1-capable token, like `0006`.
 
 Migrations run *before* the new code is deployed: keep each one backward compatible
 with the code that is currently running (add first; remove or rename in a later
-release). `0001`-`0003` and `0005` use plain `ALTER TABLE`; that is fine because
+release). A migration that *removes* something is the exception and must be applied
+after the deploy, called out above — `0017` is the only one so far. `0001`-`0003` and `0005` use plain `ALTER TABLE`; that is fine because
 wrangler tracks applied migrations in `d1_migrations` and never re-runs one. Do not
 edit applied files; add a new `NNNN_*.sql`. `wrangler d1 migrations apply` captures a
 backup before applying and skips the confirmation prompt when non-interactive

@@ -4,6 +4,7 @@ import {
   ORPHAN_CANDIDATE_TTL_MS,
   ORPHAN_DELETE_PER_TICK,
   ORPHAN_GRACE_MS,
+  LEGACY_HISTORY_DELETE_PER_TICK,
   ORPHAN_SCAN_KEYS_PER_TICK,
   housekeepingTick,
 } from '../src/lib/housekeeping'
@@ -167,7 +168,10 @@ describe('orphaned KV blob reconciliation', () => {
     })
     expect(created.status).toBe(201)
     const id = created.body.data.id
-    // Two value changes: rev 1 and 2 are referenced by history rows, rev 3 is current.
+    // Two value changes: rev 3 is current, and revs 1 and 2 are superseded. Since issue #84
+    // nothing reads a superseded revision, but the sweep still treats `rev <= blob_rev` as
+    // referenced, because that retention is what makes a secret recoverable after a D1
+    // point-in-time restore (see lib/housekeeping.ts).
     for (const value of ['two', 'three']) {
       expect((await call(env, 'PATCH', `/api/secrets/${id}`, { token: owner.token, json: { value } })).status).toBe(200)
     }
@@ -209,7 +213,6 @@ describe('orphaned KV blob reconciliation', () => {
     for (const key of ['secret:', 'secret::1', 'secret:sec_a:0', 'secret:sec_a:01', 'secret:sec_a:1:2']) {
       env.SECRETS_KV.store.set(key, 'NOT OURS')
     }
-    env.SECRETS_KV.store.set('secrethist:sech_1', 'PRE-0014 HISTORY COPY')
     env.SECRETS_KV.store.set('jwks:https://example.test', 'CACHE')
 
     for (const now of [T0, at(AFTER_GRACE), at(AFTER_GRACE * 2)]) {
@@ -217,7 +220,7 @@ describe('orphaned KV blob reconciliation', () => {
       expect(result.orphanBlobsScanned).toBe(0)
       expect(result.orphanBlobsDeleted).toBe(0)
     }
-    expect(env.SECRETS_KV.store.size).toBe(7)
+    expect(env.SECRETS_KV.store.size).toBe(6)
   })
 
   it('is bounded per tick and resumes where it stopped', async () => {
@@ -336,4 +339,75 @@ describe('orphaned KV blob reconciliation', () => {
       expect(haystack).not.toContain(needle)
     }
   })
+
+// Issue #84. Dropping `secret_history` took away the only thing that named these keys and the
+// only thing that could decrypt them, and both delete paths used to enumerate them from that
+// table — so without this sweep they would be unreachable, unreadable storage forever.
+describe('pre-0014 secrethist blob purge', () => {
+  it('deletes them without a grace period and drains to zero', async () => {
+    const { env } = await scene()
+    for (let i = 0; i < LEGACY_HISTORY_DELETE_PER_TICK + 7; i += 1) {
+      env.SECRETS_KV.store.set(`secrethist:sech_${String(i).padStart(4, '0')}`, 'UNREADABLE')
+    }
+    const left = () => [...env.SECRETS_KV.store.keys()].filter((k) => k.startsWith('secrethist:')).length
+
+    // No grace period: there is no in-flight writer of this prefix to race, because no code
+    // that writes it exists any more. Bounded per tick, because each delete is a subrequest.
+    const first = await housekeepingTick(env, T0)
+    expect(first.legacyHistoryBlobsDeleted).toBe(LEGACY_HISTORY_DELETE_PER_TICK)
+    expect(left()).toBe(7)
+
+    expect((await housekeepingTick(env, T0)).legacyHistoryBlobsDeleted).toBe(7)
+    expect(left()).toBe(0)
+
+    // And then it is silent rather than repeating work.
+    expect((await housekeepingTick(env, T0)).legacyHistoryBlobsDeleted).toBe(0)
+  })
+
+  it('touches nothing else under any other prefix', async () => {
+    const { env, owner, projectId, envId } = await scene()
+    const created = await call(env, 'POST', '/api/secrets', {
+      token: owner.token,
+      json: { projectId, envId, name: 'LIVE', value: 'keep-me' },
+    })
+    expect(created.status).toBe(201)
+    env.SECRETS_KV.store.set('secrethist:sech_1', 'UNREADABLE')
+    env.SECRETS_KV.store.set('jwks:https://example.test', 'CACHE')
+
+    expect((await housekeepingTick(env, T0)).legacyHistoryBlobsDeleted).toBe(1)
+    expect(env.SECRETS_KV.store.has('secrethist:sech_1')).toBe(false)
+    expect(env.SECRETS_KV.store.get('jwks:https://example.test')).toBe('CACHE')
+    const read = await call(env, 'GET', `/api/secrets/LIVE?envId=${envId}`, { token: owner.token })
+    expect(read.body.data.value).toBe('keep-me')
+  })
+
+  // A D1 restore to before migration 0017 brings `secret_history` back, and these blobs are
+  // what those rows point at. Same flag, same reason as the orphan sweep.
+  it('stops when DISABLE_ORPHAN_SWEEP is set', async () => {
+    const { env } = await scene()
+    env.SECRETS_KV.store.set('secrethist:sech_1', 'UNREADABLE')
+    ;(env as Record<string, unknown>)['DISABLE_ORPHAN_SWEEP'] = '1'
+    expect((await housekeepingTick(env, T0)).legacyHistoryBlobsDeleted).toBe(0)
+    await housekeepingTick(env, at(AFTER_GRACE * 3))
+    expect(env.SECRETS_KV.store.get('secrethist:sech_1')).toBe('UNREADABLE')
+  })
+
+  it('never logs a key it deleted', async () => {
+    const { env } = await scene()
+    env.SECRETS_KV.store.set('secrethist:sech_distinctive', 'UNREADABLE')
+    const logs: string[] = []
+    const realLog = console.log
+    console.log = (m: unknown) => { logs.push(String(m)) }
+    try {
+      await housekeepingTick(env, T0)
+    } finally {
+      console.log = realLog
+    }
+    const haystack = logs.join('\n')
+    expect(haystack).toContain('housekeeping.legacy_history_blobs')
+    expect(haystack).toContain('"deleted":1')
+    expect(haystack).not.toContain('sech_distinctive')
+    expect(haystack).not.toContain('UNREADABLE')
+  })
+})
 })

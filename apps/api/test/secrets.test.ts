@@ -4,7 +4,9 @@ import { secretBlobKey } from '../src/lib/secret-blobs'
 
 const PLAINTEXT = 'super-secret-plaintext-value-12345'
 
-// Rate limiter also stores counters in KV, so only look at secret blobs.
+// Rate limiter also stores counters in KV, so only look at secret blobs. `secrethist:` is
+// included so that a regression that started writing superseded copies again would be caught
+// here rather than silently pass: issue #84 removed the only writer of that prefix.
 function blobKeys(env: TestEnv) {
   return [...env.SECRETS_KV.store.keys()].filter((k) => k.startsWith('secret:') || k.startsWith('secrethist:'))
 }
@@ -64,8 +66,6 @@ describe('secrets routes', () => {
     const got = await call(env, 'GET', `/api/secrets/RENAMED?envId=${envId}`, { token: member.token })
     expect(got.status).toBe(200)
     expect(got.body.data.value).toBe(PLAINTEXT)
-    const hist = await env.DB.prepare('SELECT COUNT(*) AS n FROM secret_history').first<{ n: number }>()
-    expect(hist?.n).toBe(0)
   })
 
   it('PATCH with only isComputed keeps the stored value', async () => {
@@ -89,15 +89,14 @@ describe('secrets routes', () => {
     const got = await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })
     expect(got.body.data.value).toBe('new-value')
 
-    const rows = (await env.DB.prepare('SELECT * FROM secret_history WHERE secret_id = ?').bind(id).all<any>()).results
-    expect(rows).toHaveLength(1)
-    expect(rows[0].wrapped_dek).toBe(oldRow?.wrapped_dek)
-    expect(rows[0].key_version).toBe(oldRow?.key_version)
-    expect(rows[0].changed_by).toBe(member.userId)
-
-    // The history row points at the revision that already holds those bytes; nothing is copied.
-    expect(rows[0].blob_rev).toBe(oldRow?.blob_rev)
+    // Nothing records the superseded pair any more (issue #84): no history row, and no copy of
+    // the old ciphertext under its own key. The old revision itself is still in KV, untouched —
+    // that is the write-once rule, which has nothing to do with retention.
     expect(blobKeys(env).filter((k) => k.startsWith('secrethist:'))).toHaveLength(0)
+    expect(oldRow?.wrapped_dek).toBeTruthy()
+    const newRow = await env.DB.prepare('SELECT wrapped_dek, blob_rev FROM secrets WHERE id = ?').bind(id).first<{ wrapped_dek: string; blob_rev: number }>()
+    expect(newRow?.wrapped_dek).not.toBe(oldRow?.wrapped_dek)
+    expect(newRow?.blob_rev).toBe((oldRow?.blob_rev ?? 0) + 1)
 
     // The pointer moved to a key that did not exist before, and the old one is byte-identical.
     const newKey = await liveBlobKey(env, id)
@@ -192,8 +191,6 @@ describe('secrets routes', () => {
     const del = await call(env, 'DELETE', `/api/secrets/${id}`, { token: member.token })
     expect(del.status).toBe(200)
     expect(keys()).toHaveLength(0)
-    const hist = await env.DB.prepare('SELECT COUNT(*) AS n FROM secret_history').first<{ n: number }>()
-    expect(hist?.n).toBe(0)
     expect((await call(env, 'GET', `/api/secrets/API_KEY?envId=${envId}`, { token: member.token })).status).toBe(404)
   })
 
@@ -234,8 +231,6 @@ describe('secrets routes', () => {
     // The pointer never moved, and the bytes it points at were never touched.
     expect(await liveBlobKey(env, id)).toBe(liveKey)
     expect(env.SECRETS_KV.store.get(liveKey)).toBe(oldBlob)
-    const hist = await env.DB.prepare('SELECT COUNT(*) AS n FROM secret_history').first<{ n: number }>()
-    expect(hist?.n).toBe(0)
 
     // And the secret is still decryptable, which is what the old design could not guarantee.
     env.DB.sqlite.exec('DROP TRIGGER fail_update')

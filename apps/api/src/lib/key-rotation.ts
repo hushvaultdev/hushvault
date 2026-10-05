@@ -38,23 +38,46 @@ export const BOOTSTRAP_RETRY_MS = 15 * 60_000
 const BOOTSTRAP_FAILED_KEY = 'key_rotation.bootstrap_failed_at'
 
 // The rotation walks these in order. `recordId` is the id the wrapped DEK is bound to by AAD
-// (a history row is bound to its secret; a connection to itself).
+// (a connection is bound to itself).
+//
+// The `history` phase was removed with `secret_history` (issue #84, migration 0017): it
+// re-wrapped what was normally the largest of the three tables it then walked, so that nothing
+// could ever read the result. A job may still be stored mid-flight on it; `phaseFor` handles that.
 const PHASES = [
   { phase: 'secrets', table: 'secrets', cursor: 'secrets_cursor', recordId: 'id' },
-  { phase: 'history', table: 'secret_history', cursor: 'history_cursor', recordId: 'secret_id' },
   { phase: 'connections', table: 'integration_connections', cursor: 'connections_cursor', recordId: 'id' },
 ] as const
 type PhaseSpec = (typeof PHASES)[number]
 type Table = PhaseSpec['table']
+
+/**
+ * The phase spec to drive a job by, which is not simply `job.phase`.
+ *
+ * A rotation that was running when 0017 deployed can be sitting on `history`, a phase that no
+ * longer exists. That must not wedge the cron, and must not skip a table either. Falling back
+ * to the FIRST phase does both: the job re-drives `secrets` from `secrets_cursor`, which an
+ * in-flight `history` job had already run to the end, so the next tick reads zero rows and the
+ * normal "phase exhausted" transition moves it on to `connections` with a fresh cursor. Even if
+ * that reasoning were wrong, the convergence pass at the end of the job counts every remaining
+ * row in every phase and restarts from `secrets` while any are left, so no row can be missed.
+ *
+ * Migration 0017 also rewrites any stored `history` phase to `connections`, so in practice this
+ * fallback only covers the window between the code deploying and the migration applying (and a
+ * row restored from an older backup afterwards). Both belts are cheap; the failure mode they
+ * guard against is a permanently stuck rotation, which ends in an undecryptable table.
+ */
+function phaseFor(phase: string): PhaseSpec {
+  return PHASES.find((p) => p.phase === phase) ?? PHASES[0]
+}
 
 type RotationRow = {
   id: string
   from_version: string
   to_version: string
   status: string
-  phase: PhaseSpec['phase']
+  /** May name a retired phase on a job that predates migration 0017; see `phaseFor`. */
+  phase: string
   secrets_cursor: string | null
-  history_cursor: string | null
   connections_cursor: string | null
   rewrapped: number
   skipped: number
@@ -274,7 +297,7 @@ async function recordBootstrapFailure(env: Env, ring: KeyRing, code: string, now
 
 /** The bootstrap proper. Unchanged behaviour; `bootstrap` wraps it in the retry interval. */
 async function attemptBootstrap(env: Env, ring: KeyRing, nowIso: string): Promise<TickResult> {
-  const used = await env.DB.prepare('SELECT key_version AS v FROM secrets UNION SELECT key_version FROM secret_history UNION SELECT key_version FROM integration_connections').all<{ v: string }>()
+  const used = await env.DB.prepare('SELECT key_version AS v FROM secrets UNION SELECT key_version FROM integration_connections').all<{ v: string }>()
   const versions = (used.results ?? []).map((r) => r.v)
   const others = versions.filter((v) => v !== ring.activeVersion).sort((x, y) => Number(x.slice(1)) - Number(y.slice(1)))
   const version = others[0] ?? ring.activeVersion
@@ -392,7 +415,7 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
       return await holdOnError(env, job, err instanceof KeyRingError ? err.code : 'KEY_INVALID', nowIso)
     }
 
-    const spec = PHASES.find((p) => p.phase === job.phase) ?? PHASES[0]
+    const spec = phaseFor(job.phase)
     const table: Table = spec.table
     const cursor = (job[spec.cursor] as string | null) ?? ''
     const limit = batchSizeFrom(env, options.batchSize)
@@ -506,7 +529,7 @@ async function drive(env: Env, ring: KeyRing, job: RotationRow, nowIso: string, 
     // from a backup) behind the cursor start another pass instead of being missed.
     const remaining = await countRemaining(env, job)
     if (remaining > 0) {
-      await env.DB.prepare("UPDATE key_rotations SET phase = 'secrets', secrets_cursor = NULL, history_cursor = NULL, connections_cursor = NULL, updated_at = ? WHERE id = ? AND status = 'running'").bind(nowIso, job.id).run()
+      await env.DB.prepare("UPDATE key_rotations SET phase = 'secrets', secrets_cursor = NULL, connections_cursor = NULL, updated_at = ? WHERE id = ? AND status = 'running'").bind(nowIso, job.id).run()
       return { state: 'progress', rewrapped, skipped, failed }
     }
 

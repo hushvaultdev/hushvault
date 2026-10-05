@@ -58,9 +58,11 @@ Master-key rotation is implemented as a versioned key ring plus a cron-driven DE
   sweep treats D1 as the source of truth: a blob is referenced when its row exists and its
   revision is at or below `secrets.blob_rev`. A restore that moves `blob_rev` *backwards* makes
   a blob the live row still needs look unreferenced, and an hour later the sweep deletes it —
-  a data-loss path that only opens during recovery. Leave the flag set until D1 and KV agree
-  again, then remove it and redeploy. While it is set, `housekeeping.orphan_sweep_disabled`
-  appears in the logs each tick and the other sweeps carry on as normal.
+  a data-loss path that only opens during recovery. The same flag also stops the one-way purge of
+  pre-0014 `secrethist:` blobs, for the same reason (see below). Leave the flag set until D1 and
+  KV agree again, then remove it and redeploy. While it is set,
+  `housekeeping.orphan_sweep_disabled` appears in the logs each tick and the audit, share-link and
+  token sweeps carry on as normal.
 - `wrangler d1 migrations apply` captures a backup before applying
   **[verified: `wrangler d1 migrations apply --help`]**.
 - **Never run a migration that rebuilds a table other tables reference.** D1 ignores
@@ -74,12 +76,31 @@ Master-key rotation is implemented as a versioned key ring plus a cron-driven DE
   store them encrypted, and remember they are useless without the KV blobs and master key.
 
 **After a D1 restore, secrets diverge per row, not all at once.** A secret whose value changed
-after the restore point has the old wrapped DEK in D1 and the newer ciphertext in KV, so it will
-not decrypt — but the pre-change ciphertext is usually still in KV under its own revision
-(`secret:{id}:{rev}`, see ENCRYPTION.md), and the restored `secret_history` row names which one.
-Recovery is therefore per secret and possible by hand; there is no tool for it yet. A secret
-created after the restore point loses its D1 row and its blob becomes an orphan; one deleted
-after the restore point comes back as a row with no blob and reads as `404`.
+after the restore point has the old wrapped DEK in D1 and the newer ciphertext in KV. It still
+decrypts, because the restored row's `blob_rev` names the revision it was written with, and that
+revision's blob is still in KV: superseded revisions are never deleted (`secret:{id}:{rev}`, see
+ENCRYPTION.md). So the restore gives you the pre-change value back. Recovery is per secret and
+needs no tool. A secret created after the restore point loses its D1 row and its blob becomes an
+orphan; one deleted after the restore point comes back as a row with no blob and reads as `404`.
+
+**What a restore can no longer get back (issue #84).** Before migration 0017, `secret_history`
+kept a superseded wrapped DEK per value change, and a `secrethist:{historyId}` blob for changes
+made before migration 0014. Together they meant an operator could reconstruct *any* past value of
+a secret by hand, not just the one the restore point happened to name. That is gone, and it is a
+real loss of a recovery option, not a tidy-up:
+
+- There is no way to recover a value that was replaced, by restore or by any other means. The
+  wrapped DEK is overwritten on each change and nothing keeps a copy. If an old credential may be
+  needed, read it out *before* replacing it.
+- A restore can recover only the value that was current at the restore point.
+- Any `secrethist:` blobs still in KV are now undecryptable — 0017 destroyed their wrapped DEKs —
+  and the cron deletes them as it finds them, bounded per tick. If you are restoring D1 to a point
+  *before* 0017, those rows come back and those blobs are what they point at, so set
+  `DISABLE_ORPHAN_SWEEP=1` first: it stops that purge as well as the orphaned-blob sweep.
+
+The trade this was made for: no retained ciphertext of a rotated credential that the organisation
+cannot ask us to forget, no rotation phase re-wrapping rows nobody could read, and no unbounded
+D1 growth. See issue #84 for the decision.
 
 ### KV (encrypted secret blobs)
 

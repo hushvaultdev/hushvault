@@ -161,22 +161,11 @@ export const secrets = sqliteTable('secrets', {
   index('secrets_key_version_idx').on(t.keyVersion), // rotation scans by key version
 ])
 
-export const secretHistory = sqliteTable('secret_history', {
-  id: text('id').primaryKey(),
-  secretId: text('secret_id').notNull().references(() => secrets.id, { onDelete: 'cascade' }),
-  wrappedDek: text('wrapped_dek').notNull(),
-  keyVersion: text('key_version').notNull(),
-  encVersion: integer('enc_version').notNull().default(1),
-  // Which blob holds this historical value: null = a pre-0014 copy at
-  // "secrethist:{id}", otherwise the secret's own revision. Nullable and
-  // without a default, unlike secrets.blobRev — the null is load-bearing.
-  blobRev: integer('blob_rev'),
-  changedAt: text('changed_at').notNull(),
-  changedBy: text('changed_by').references(() => users.id, { onDelete: 'set null' }),
-}, (t) => [
-  index('secret_history_secret_idx').on(t.secretId),
-  index('secret_history_key_version_idx').on(t.keyVersion),
-])
+// `secret_history` was here. It recorded the superseded (wrapped DEK, blob revision) pair on
+// every value change, and no endpoint ever read one: no list, no restore, no retention, no
+// purge. Migration 0017 dropped it (issue #84) rather than build the versions API that would
+// have justified retaining every historical secret value forever. Previous values are not
+// retained; see docs/API.md and docs/OPERATIONS.md § 2 for the recovery path this removes.
 
 // ─────────────────────────────────────────────
 // Share Links (Temporary share URLs)
@@ -239,9 +228,13 @@ export const keyRotations = sqliteTable('key_rotations', {
   fromVersion: text('from_version').notNull(),
   toVersion: text('to_version').notNull(),
   status: text('status', { enum: ['running', 'paused', 'completed', 'completed_with_errors', 'failed'] }).notNull(),
+  // 'history' is still in the CHECK constraint and so must stay in this enum, which exists to
+  // match it (see the drift test). The engine no longer walks that phase and never writes the
+  // value: narrowing the constraint would mean rebuilding key_rotations and recreating its
+  // partial unique index, which migration 0017 judged not worth the risk. `history_cursor` was
+  // dropped there, because a column needs no rebuild.
   phase: text('phase', { enum: ['secrets', 'history', 'connections'] }).notNull().default('secrets'),
   secretsCursor: text('secrets_cursor'),
-  historyCursor: text('history_cursor'),
   connectionsCursor: text('connections_cursor'),
   rewrapped: integer('rewrapped').notNull().default(0),
   skipped: integer('skipped').notNull().default(0),
@@ -259,6 +252,8 @@ export const keyRotations = sqliteTable('key_rotations', {
 
 export const keyRotationFailures = sqliteTable('key_rotation_failures', {
   rotationId: text('rotation_id').notNull(),
+  // 'secret_history' likewise remains in the CHECK and therefore here, although the table is
+  // gone and no row can name it again. Historical quarantine rows naming it may still exist.
   tableName: text('table_name', { enum: ['secrets', 'secret_history', 'integration_connections'] }).notNull(),
   rowId: text('row_id').notNull(),
   errorCode: text('error_code').notNull(),

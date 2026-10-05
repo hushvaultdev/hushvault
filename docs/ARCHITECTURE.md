@@ -26,8 +26,8 @@
 │  - users    │           │  key: secret:{id}    │
 │  - projects │           │  val: iv:ciphertext  │
 │  - envs     │           │  (base64, plain str) │
-│  - secrets  │           │  history key:        │
-│    (no val) │           │  secrethist:{histId} │
+│  - secrets  │           │  one blob per        │
+│    (no val) │           │  revision; see #84   │
 │  - audit    │           └─────────────────────┘
 └─────────────┘
 ```
@@ -46,8 +46,8 @@ Data Encryption Key (DEK, random per secret, AES-256)
 Secret Value (plaintext)
 ```
 
-- `wrappedDek` stored in D1 (alongside secret metadata; superseded ones in `secret_history`)
-- `encryptedValue` stored in KV as a plain `base64(iv):base64(ciphertext+tag)` string under `secret:{id}` (superseded values under `secrethist:{historyId}`)
+- `wrappedDek` stored in D1 alongside the secret metadata — exactly one, for the current revision. Superseded wrapped DEKs are not kept, so no previous value is recoverable (issue #84, migration 0017)
+- `encryptedValue` stored in KV as a plain `base64(iv):base64(ciphertext+tag)` string under `secret:{id}:{blobRev}` (`secret:{id}` at revision 0). Each value change writes the next revision and D1 then moves the pointer, so a blob key is never overwritten
 - One master key for the whole deployment (no per-organisation keys)
 - Master key lives in Cloudflare Worker secrets (never in code or D1)
 - To rotate master key: re-encrypt all DEKs with new master key (no re-encryption of values needed)

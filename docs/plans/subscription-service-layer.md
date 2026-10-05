@@ -1,6 +1,9 @@
 # HushVault — Subscription Service Layer
 
 **Status:** Approved — Phase 4 implementation (Weeks 19–24)
+**Stale:** the `secretHistoryDays` plan limit below predates issue #84, which removed secret
+history entirely (migration 0017). There is no per-plan history window to gate; drop the field or
+re-decide the feature before implementing this plan.
 **Date:** 2026-03-31
 **Dogfood target:** alpeshnakar.github.io uses HushVault Free tier as first customer
 

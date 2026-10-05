@@ -25,13 +25,19 @@ export function secretBlobKey(secretId: string, blobRev: number): string {
 }
 
 /**
- * Where a historical value's ciphertext lives. A pre-0014 row has no blob_rev and
- * points at its own copy; a row written since points at the secret revision that
- * held that value, so nothing is copied.
+ * Pre-0014 superseded-value copies, `secrethist:{historyId}`.
+ *
+ * Nothing writes this prefix any more, and since issue #84 nothing *references* it either:
+ * the `secret_history` rows that named these keys, and that held the wrapped DEKs needed to
+ * read them, were dropped by migration 0017. So every key under this prefix is unreadable
+ * ciphertext and pure leaked storage. It is kept here for one reason only — the housekeeping
+ * sweep is the last thing that can still find and delete them, because the delete paths no
+ * longer have any D1 row to enumerate them from.
+ *
+ * Note it is NOT a sub-prefix of SECRET_BLOB_PREFIX: `secrethist:` does not start with
+ * `secret:` (the seventh character is `h`, not `:`), which is why it needs its own listing.
  */
-export function historyBlobKey(secretId: string, historyId: string, blobRev: number | null): string {
-  return blobRev === null ? `secrethist:${historyId}` : secretBlobKey(secretId, blobRev)
-}
+export const LEGACY_HISTORY_BLOB_PREFIX = 'secrethist:'
 
 /**
  * Every blob key a secret may own: the unversioned one plus every revision up to

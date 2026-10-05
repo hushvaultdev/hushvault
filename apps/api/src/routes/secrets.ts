@@ -8,7 +8,7 @@ import { createPrefixedId } from '../lib/auth'
 import { enqueueSyncForEnvironment } from '../integrations/sync-scheduler'
 import { requireAuth, requireRole, secretReadRateLimit, secretWriteRateLimit } from '../middleware/auth'
 import { MAX_SECRET_VALUE_BYTES, getRequestIp, logEvent, logKeyRingError, writeAuditLog } from '../lib/security'
-import { KV_DELETE_CHUNK, allSecretBlobKeys, historyBlobKey, secretBlobKey } from '../lib/secret-blobs'
+import { KV_DELETE_CHUNK, allSecretBlobKeys, secretBlobKey } from '../lib/secret-blobs'
 import { validationHook } from '../lib/validation'
 
 export const secretRoutes = new Hono<{ Bindings: Env }>()
@@ -257,23 +257,25 @@ secretRoutes.patch('/:id', requireRole('member'), secretWriteRateLimit, zValidat
       // old bytes back on failure — a second write to the same key in the same request, which
       // KV's one-write-per-second-per-key limit makes unreliable, so a failed update could
       // leave the secret permanently undecryptable (and with it the whole environment).
+      //
+      // Nothing records the superseded (blob, wrapped DEK) pair any more: `secret_history` was
+      // write-only and is gone (issue #84, migration 0017). That removes a reader of old
+      // revisions but changes nothing here, because the write-once rule is about crash safety,
+      // not retention. The superseded blob stays in KV and stays referenced, because the
+      // housekeeping sweep counts `rev <= secrets.blob_rev` as live; dropping the table took
+      // the wrapped DEKs with it, so those older revisions are now undecryptable by anyone,
+      // which is what makes retaining them harmless. lib/housekeeping.ts explains why the test
+      // was deliberately left as it is rather than narrowed to `rev == blob_rev`.
       const nextRev = current.blob_rev + 1
-      const historyId = createPrefixedId('sech')
       const { encryptedValue, wrappedDek, keyVersion, encVersion } = await encryptSecretWithRing(
         newPlaintext, await loadWriteRing(c.env), { projectId: current.project_id, envId: current.env_id, secretId: id },
       )
 
       await c.env.SECRETS_KV.put(secretBlobKey(id, nextRev), encryptedValue)
 
-      const update = c.env.DB.prepare(
+      await c.env.DB.prepare(
         'UPDATE secrets SET name = ?, wrapped_dek = ?, key_version = ?, enc_version = ?, blob_rev = ?, is_computed = ?, template = ?, updated_at = ? WHERE id = ?',
-      ).bind(nextName, wrappedDek, keyVersion, encVersion, nextRev, nextIsComputed, nextTemplate ?? null, now, id)
-      // The history row points at the revision that already holds the old bytes rather than
-      // copying them to a second key, so a value change costs one KV write instead of two.
-      const history = c.env.DB.prepare(
-        'INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, enc_version, blob_rev, changed_at, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      ).bind(historyId, id, current.wrapped_dek, current.key_version, current.enc_version, current.blob_rev, now, auth.userId)
-      await c.env.DB.batch([history, update])
+      ).bind(nextName, wrappedDek, keyVersion, encVersion, nextRev, nextIsComputed, nextTemplate ?? null, now, id).run()
     }
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -309,15 +311,14 @@ secretRoutes.delete('/:id', requireRole('member'), secretWriteRateLimit, async (
     return c.json({ error: 'NOT_FOUND', message: 'Secret not found' }, 404)
   }
 
-  const history = await c.env.DB.prepare('SELECT id, blob_rev FROM secret_history WHERE secret_id = ?')
-    .bind(id).all<{ id: string; blob_rev: number | null }>()
-
-  // Every revision of the value, plus the pre-0014 per-history copies. Collected before
-  // the D1 delete, because afterwards there is nothing left to tell us which keys exist.
+  // Every revision of the value. Collected before the D1 delete, because afterwards there is
+  // nothing left to tell us which keys exist. There are no per-history copies to collect any
+  // more: `secret_history` is gone (issue #84) and with it the only thing that named a
+  // `secrethist:{historyId}` key. Pre-0014 copies may still exist in KV on a long-lived
+  // deployment; the housekeeping sweep reclaims those, since nothing here can enumerate them.
   const blobKeys = new Set(allSecretBlobKeys(id, secret.blob_rev))
-  for (const row of history.results ?? []) blobKeys.add(historyBlobKey(id, row.id, row.blob_rev))
 
-  // D1 first (history rows cascade); then remove blobs. Orphaned KV blobs are unreadable without their wrapped DEK.
+  // D1 first; then remove blobs. Orphaned KV blobs are unreadable without their wrapped DEK.
   await c.env.DB.prepare('DELETE FROM secrets WHERE id = ?').bind(id).run()
   await enqueueSyncForEnvironment(c.env, secret.env_id)
   // Bounded concurrency: a secret with many revisions must not turn one delete into a
