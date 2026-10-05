@@ -111,6 +111,18 @@ Watch:
 - Email: `email.not_configured`, `email.send_failed` and `email.budget_exhausted` (section 6).
   These are the only signal that mail has stopped — the auth endpoints keep answering normally
   when it has.
+- `key_rotation.bootstrap_failed` — the deployment has no `active` row in `encryption_keys` and
+  the key it needs does not match the data. Writes keep using the last proven key version, so
+  this is not an outage, but no rotation can start until it is fixed. The tick records the
+  attempt in `system_state` and retries every 15 minutes rather than every minute, so expect
+  this line four times an hour, not sixty, while it is broken. Fixing
+  `ENCRYPTION_ACTIVE_KEY_VERSION` is retried on the next tick; replacing the key material
+  behind an unchanged version waits out the interval.
+- `housekeeping.orphan_blobs` — the reconciliation pass over KV's `secret:` blobs. `deleted` is
+  routine; a `unreferenced` count that grows tick after tick without `deleted` keeping up means
+  D1 writes are failing *after* their KV write succeeded (the create and update paths write KV
+  first), which is worth investigating on its own. A blob is only deleted once it has been
+  proved unreferenced twice an hour apart, so a backlog is expected to lag, not to grow.
 
 ## 4. Routine tasks
 
