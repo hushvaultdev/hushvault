@@ -1,0 +1,167 @@
+.wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.trigger,
+.static {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-translucent);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.static {
+  flex-wrap: wrap;
+  cursor: default;
+}
+
+.trigger:hover {
+  border-color: var(--border-strong);
+}
+
+.trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.trigger[disabled] {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.labels {
+  display: grid;
+  min-width: 0;
+}
+
+.eyebrow {
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.name {
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 24ch;
+}
+
+/* No name is known for this id, so the id itself is shown. Monospace makes that obvious rather
+   than looking like a badly chosen organisation name. */
+.nameUnknown {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.role {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.chevron {
+  color: var(--text-muted);
+}
+
+.note {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  max-width: 34ch;
+}
+
+.retry {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-strong);
+  font-size: var(--text-sm);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 268px;
+  max-width: min(360px, calc(100vw - 32px));
+  display: grid;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-md);
+}
+
+.item {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.item:hover,
+.item:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.itemCurrent {
+  background: var(--accent-soft);
+}
+
+.itemName {
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.itemMeta {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.error {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 268px;
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

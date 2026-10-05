@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/lib/auth-context'
 
+import { OrgSwitcher } from './org-switcher'
 import { VerifyBanner } from './verify-banner'
 
 import styles from './dashboard-shell.module.css'
@@ -16,6 +17,7 @@ const navItems: ReadonlyArray<{ href: string; label: string; alsoActiveFor?: rea
   { href: '/dashboard', label: 'Projects', alsoActiveFor: ['/projects'] },
   { href: '/onboarding', label: 'Get started' },
   { href: '/integrations', label: 'Integrations' },
+  { href: '/members', label: 'Members' },
   { href: '/audit', label: 'Audit log' },
   { href: '/billing', label: 'Billing' },
 ]
@@ -27,7 +29,7 @@ function isActive(pathname: string, href: string, alsoActiveFor?: readonly strin
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const { session, logout } = useAuth()
+  const { logout } = useAuth()
 
   return (
     <div className={s('shell')}>
@@ -53,9 +55,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
       </aside>
       <div className={s('main')}>
         <header className={s('topbar')}>
-          <span className={s('orgBadge')}>{session?.orgId ?? 'Workspace'}</span>
+          {/* The organisation in play is never implied: it is named here on every dashboard page,
+              and the name comes from the org the access token acts in. */}
+          <OrgSwitcher />
           <div className={s('topbarActions')}>
-            <span className={s('role')}>{session?.role}</span>
             <Button variant="ghost" onClick={logout}>Sign out</Button>
           </div>
         </header>
