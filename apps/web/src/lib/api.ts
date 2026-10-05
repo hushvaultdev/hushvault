@@ -8,12 +8,19 @@ export const API_BASE = (process.env['NEXT_PUBLIC_API_URL'] ?? 'http://127.0.0.1
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  /**
+   * The rest of the API's error object, when it sent one. Only ever read for named, non-secret
+   * fields (e.g. the address an invitation was sent to); never logged and never rendered whole,
+   * so an error body cannot become a channel for leaking internals into the UI.
+   */
+  readonly details: Record<string, unknown> | null
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details: Record<string, unknown> | null = null) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -136,8 +143,21 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   }
 
   if (!res.ok) {
-    const err = payload as { error?: string; message?: string } | null
-    throw new ApiError(res.status, err?.error ?? 'ERROR', err?.message ?? `Request failed (${res.status}).`)
+    const err = payload as (Record<string, unknown> & { error?: string; message?: string }) | null
+    const code = err?.error ?? 'ERROR'
+    // The org this token acts in is no longer one the caller is a member of. Every org-scoped
+    // list on the page would be empty or belong to nobody, so go to organisation selection
+    // rather than render a signed-in dashboard for an org the user cannot see. This is not a
+    // sign-out: the session is still valid for the user's other organisations.
+    if (
+      auth &&
+      (code === 'NOT_A_MEMBER' || code === 'MEMBERSHIP_REVOKED') &&
+      typeof window !== 'undefined' &&
+      !window.location.pathname.startsWith('/organisations')
+    ) {
+      window.location.assign(`/organisations?reason=${code}`)
+    }
+    throw new ApiError(res.status, code, err?.message ?? `Request failed (${res.status}).`, err ?? null)
   }
 
   if (payload === null || typeof payload !== 'object' || !('data' in payload)) {

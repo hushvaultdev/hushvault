@@ -1,14 +1,15 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import { useEffect } from 'react'
+import { Fragment, useEffect } from 'react'
 
 import { DashboardShell } from '@/components/shell/dashboard-shell'
 import { useAuth } from '@/lib/auth-context'
+import { OrgProvider } from '@/lib/org-context'
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter()
-  const { isAuthenticated, ready } = useAuth()
+  const { isAuthenticated, ready, session } = useAuth()
 
   useEffect(() => {
     if (ready && !isAuthenticated) {
@@ -42,5 +43,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     return null
   }
 
-  return <DashboardShell>{children}</DashboardShell>
+  // Every page below this layout fetches org-scoped data into its own state on mount, and there
+  // is no query cache to invalidate. Keying the subtree on the organisation the token acts in
+  // makes that an advantage: when the org changes — from the switcher, or because this tab's
+  // token was refreshed into a family another tab switched — React unmounts every page and its
+  // state, and the new page mounts and fetches from scratch. A project list from the previous
+  // organisation cannot survive under the new organisation's name.
+  return (
+    <OrgProvider>
+      <DashboardShell>
+        <Fragment key={session?.orgId ?? 'no-org'}>{children}</Fragment>
+      </DashboardShell>
+    </OrgProvider>
+  )
 }

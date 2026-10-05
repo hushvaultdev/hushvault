@@ -3,7 +3,8 @@
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { useAuth } from '@/lib/auth-context'
+import { useOrgs } from '@/lib/org-context'
+import { orgNameOrId } from '@/lib/orgs-helpers'
 import { PLANS, type PlanName } from '@/lib/plans'
 
 import styles from './billing.module.css'
@@ -43,8 +44,10 @@ function clampPercent(value: number, limit: number): number {
 }
 
 export default function BillingPage() {
-  const { session } = useAuth()
-  const workspace = session?.orgId ?? 'Unknown workspace'
+  // The organisation this page is about, named the same way the switcher names it: from the org
+  // the access token acts in, with its id when no name is known for that id.
+  const { orgs, currentOrgId } = useOrgs()
+  const workspace = currentOrgId ? orgNameOrId(orgs, currentOrgId) : 'Unknown workspace'
 
   return (
     <div>

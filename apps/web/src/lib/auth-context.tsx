@@ -11,6 +11,7 @@ import {
   pathRequiresSession,
   purgeLegacyStorage,
   readSession,
+  subscribeSession,
   writeSession,
 } from './auth-storage'
 import type { Session } from './types'
@@ -56,6 +57,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  // The in-memory session is the single source of truth for who we are and which organisation we
+  // are in, and it is written from outside React (apiFetch's transparent refresh, endSession).
+  // Following it means the organisation on screen is always the organisation the next request
+  // will be made in — never one inferred from local storage, which can be a switch behind.
+  useEffect(() => {
+    const sync = () => setSession(readSession())
+    const unsubscribe = subscribeSession(sync)
+    sync()
+    return unsubscribe
   }, [])
 
   const login = useCallback(async (email: string, password: string) => {
