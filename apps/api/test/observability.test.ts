@@ -13,6 +13,7 @@ import { syncTick, OUTBOX_OVERDUE_MS } from '../src/integrations/sync-scheduler'
 import { MAX_SYNC_ATTEMPTS } from '../src/integrations/sync-engine'
 import { spendEmailBudget } from '../src/lib/account-security'
 import { createRateLimitMiddleware, resetRateLimitDegradedState } from '../src/middleware/rate-limit'
+import { HEALTH_CACHE_MS, resetHealthCache } from '../src/routes/health'
 import { createPrefixedId } from '../src/lib/auth'
 import { call, createTestEnv, seedEnvironment, seedProject, seedUser, type TestEnv } from './helpers/env'
 import { installFakeProvider, setupSyncWorld } from './helpers/sync-fixture'
@@ -27,6 +28,8 @@ let logs: string[]
 beforeEach(() => {
   logs = []
   resetRateLimitDegradedState()
+  // /health serves one probe result per window, so every case here must start from an empty one.
+  resetHealthCache()
   for (const level of ['log', 'warn', 'error', 'info'] as const) {
     vi.spyOn(console, level).mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(' ')) })
   }
@@ -125,6 +128,97 @@ describe('GET /health probes both stores', () => {
     const res = await call(env, 'GET', '/health')
     expect(res.status).toBe(503)
     expect(res.body.checks).toEqual({ db: 'down', kv: 'down' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 1b. /health is the one unauthenticated route that touches both stores, so the probe is
+//     served from a short window. Without this, anyone could flood /health to burn the D1 and
+//     KV quotas the probe exists to report on — the probe would cause the outage it detects.
+// ---------------------------------------------------------------------------
+
+/** Counts what each store is actually asked to do, while still answering normally. */
+function countingEnv(opts: { kvGet?: () => Promise<string | null> } = {}) {
+  const env = createTestEnv()
+  const counts = { dbPrepare: 0, kvGet: 0 }
+  const realDb = env.DB
+  const realKv = env.SECRETS_KV
+  env.DB = {
+    ...realDb,
+    prepare: (sql: string) => { counts.dbPrepare += 1; return realDb.prepare(sql) },
+    batch: realDb.batch.bind(realDb),
+  } as unknown as TestEnv['DB']
+  env.SECRETS_KV = {
+    get: (key: string) => { counts.kvGet += 1; return opts.kvGet ? opts.kvGet() : realKv.get(key) },
+    put: realKv.put.bind(realKv),
+    delete: realKv.delete.bind(realKv),
+    list: realKv.list.bind(realKv),
+    store: realKv.store,
+  } as unknown as TestEnv['SECRETS_KV']
+  return { env, counts }
+}
+
+describe('GET /health is not a free amplifier against D1 and KV', () => {
+  it('serves a flood of sequential requests from one probe', async () => {
+    const { env, counts } = countingEnv()
+    for (let i = 0; i < 50; i += 1) {
+      expect((await call(env, 'GET', '/health')).status).toBe(200)
+    }
+    expect(counts).toEqual({ dbPrepare: 1, kvGet: 1 })
+  })
+
+  it('shares one probe across a concurrent burst', async () => {
+    // The window alone does not cover this: nothing is cached until the first probe resolves, so
+    // without in-flight sharing N simultaneous requests are N probes. This is the shape a slow
+    // store produces, which is exactly when requests pile up fastest.
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { env, counts } = countingEnv({ kvGet: () => gate.then(() => null) })
+
+    const burst = Array.from({ length: 25 }, () => call(env, 'GET', '/health'))
+    await Promise.resolve()
+    release()
+    for (const res of await Promise.all(burst)) expect(res.status).toBe(200)
+    expect(counts).toEqual({ dbPrepare: 1, kvGet: 1 })
+  })
+
+  it('probes again once the window has passed, so a recovery is reported', async () => {
+    const { env, counts } = countingEnv()
+    let down = true
+    env.SECRETS_KV = {
+      get: () => { counts.kvGet += 1; return down ? Promise.reject(new Error('kv down')) : Promise.resolve(null) },
+    } as unknown as TestEnv['SECRETS_KV']
+
+    expect((await call(env, 'GET', '/health')).status).toBe(503)
+    down = false
+    // Still inside the window: the stale answer stands rather than a fresh probe being paid for.
+    expect((await call(env, 'GET', '/health')).status).toBe(503)
+    expect(counts.kvGet).toBe(1)
+
+    const after = Date.now() + HEALTH_CACHE_MS + 1
+    vi.spyOn(Date, 'now').mockReturnValue(after)
+    expect((await call(env, 'GET', '/health')).status).toBe(200)
+    expect(counts.kvGet).toBe(2)
+  })
+
+  it('logs health.degraded once per window, not once per request', async () => {
+    // An alert needs the line to keep firing while a store is down, and needs it not to be the
+    // thing that fills the log when someone floods the endpoint.
+    const env = createTestEnv()
+    env.SECRETS_KV = { get: () => Promise.reject(new Error('kv down')) } as unknown as TestEnv['SECRETS_KV']
+
+    for (let i = 0; i < 10; i += 1) {
+      expect((await call(env, 'GET', '/health')).status).toBe(503)
+    }
+    expect(named('health.degraded')).toHaveLength(1)
+
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + HEALTH_CACHE_MS + 1)
+    expect((await call(env, 'GET', '/health')).status).toBe(503)
+    expect(named('health.degraded')).toHaveLength(2)
+  })
+
+  it('the window is short enough that a once-a-minute monitor always gets a fresh probe', () => {
+    expect(HEALTH_CACHE_MS).toBeLessThan(60_000)
   })
 })
 

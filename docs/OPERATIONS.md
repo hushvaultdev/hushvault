@@ -136,6 +136,15 @@ Watch:
   to the request that writes. The probe proves the binding resolves and KV is reachable, which is
   what makes "every secret is unreadable" visible at all — it used to leave health green.
   `housekeeping.orphan_blobs` and `secret.decrypt_failed` are the signals for write-side trouble.
+
+  **The answer is served from a 5-second window.** `/health` is mounted outside `/api/*`, so it
+  has no token requirement and no rate limit — a monitor must be able to reach it. That made it
+  the one unauthenticated route that drove work in both stores on every request, i.e. a way for
+  anyone to burn the quotas the probe reports on. One probe result is now served to every caller
+  for 5 s (per isolate), and concurrent callers share the probe already running. A monitor at
+  1/min is unaffected (60 s > 5 s, so every poll probes), and a reported recovery can be at most
+  5 s stale. `health.degraded` is logged only when a probe actually ran, so it keeps firing while
+  a store is down without a flood turning it into a log flood.
 - Error-rate and 5xx spikes, especially `DECRYPTION_FAILED` (possible wrong or
   rotated master key) and 429 spikes (abuse or a misbehaving client).
 - Failed CI deploy runs on `main`/`dev`.
@@ -183,7 +192,7 @@ The **Alert on** column distinguishes three shapes, and the difference matters:
 |---|---|---|
 | `cron.tick` | The scheduled handler ran. Carries each tick's outcome: `rotation` (its `TickResult.state`), `rotationCode`, `sync`, `housekeeping` | **Absence** for 10 min — the only signal that the cron itself has stopped. Also **presence** of `rotation: "error"` or any `"threw"` |
 | `sync.tick` | The sync sweep ran. Emitted every tick, including when it did nothing | **Absence** for 10 min. Zero counts are the healthy steady state, so the counts are not an alert |
-| `health.degraded` | `/health` answered 503. Carries `db`, `kv`, `reason` | **Presence**. Pair it with an external check on `/health`, which catches the case where the Worker cannot answer at all |
+| `health.degraded` | `/health` answered 503. Carries `db`, `kv`, `reason`. At most one line per 5 s window per isolate, so the rate is not a request rate | **Presence**. Pair it with an external check on `/health`, which catches the case where the Worker cannot answer at all |
 | `key_rotation.unresolved_rows` | A rotation **finished** with rows nothing could re-wrap. Carries `unresolvedRows` and `safeToRetireOldKeys: false` | **Presence**, highest severity. Retiring the old key now makes those rows permanently undecryptable. Confirm against `GET /api/security/key-rotation` and leave both keys in the ring |
 | `key_rotation.rows_quarantined` | A tick quarantined rows. Carries `quarantined`, `keyVersionUnavailable`, `unwrapFailed`, `table` | **Presence**. `keyVersionUnavailable` may be recoverable by restoring the missing key; `unwrapFailed` is data damage |
 | `key_rotation.stalled` | A `key_rotations` row is `running` with `updated_at` older than 10 min. Carries `staleMs`, `phase`, `lastErrorCode` | **Presence**. Re-emitted every tick while stuck, so it cannot be missed by a short log window |
