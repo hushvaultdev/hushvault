@@ -220,6 +220,81 @@ describe('POST /api/environments', () => {
   })
 })
 
+// Issue #87: resolving an environment is the hot path for `hv run`, every CI pull and every
+// sync run. KV's bulk read counts as one operation per chunk of 100 keys against the
+// per-invocation limit, instead of one per secret.
+describe('GET /api/environments/:id/resolved — KV operation count', () => {
+  /** Count how the binding is read, keeping FakeKV as the actual store. */
+  function instrumentKv(target: TestEnv, opts: { bulk: boolean }) {
+    const store = target.SECRETS_KV.store
+    const calls: { bulk: number; single: number; maxChunk: number } = { bulk: 0, single: 0, maxChunk: 0 }
+    target.SECRETS_KV = {
+      store,
+      async get(key: string | string[]) {
+        if (Array.isArray(key)) {
+          calls.bulk += 1
+          calls.maxChunk = Math.max(calls.maxChunk, key.length)
+          // A binding without bulk read coerces the array to a key and misses.
+          if (!opts.bulk) return null
+          return new Map(key.map((k) => [k, store.get(k) ?? null]))
+        }
+        calls.single += 1
+        return store.get(key) ?? null
+      },
+      put: async (k: string, v: string) => void store.set(k, v),
+      delete: async (k: string) => void store.delete(k),
+    } as unknown as TestEnv['SECRETS_KV']
+    return calls
+  }
+
+  it('reads 30 secrets in one bulk operation when the binding supports it', async () => {
+    const e = await seedEnvironment(env, projectId, 'prod')
+    const expected: Record<string, string> = {}
+    for (let i = 0; i < 30; i += 1) {
+      expected[`S_${i}`] = `value-${i}`
+      await seedSecret(env, projectId, e, `S_${i}`, `value-${i}`)
+    }
+    const calls = instrumentKv(env, { bulk: true })
+
+    const res = await get(e, owner.token, true)
+    expect(res.status).toBe(200)
+    expect(Object.fromEntries(res.body.data.secrets.map((s: any) => [s.name, s.value]))).toEqual(expected)
+    expect(calls).toEqual({ bulk: 1, single: 0, maxChunk: 30 })
+  })
+
+  it('chunks to Cloudflare\'s documented maximum of 100 keys per call', async () => {
+    const e = await seedEnvironment(env, projectId, 'prod')
+    for (let i = 0; i < 150; i += 1) await seedSecret(env, projectId, e, `S_${i}`, `v-${i}`)
+    const calls = instrumentKv(env, { bulk: true })
+
+    expect((await get(e, owner.token, true)).status).toBe(200)
+    expect(calls.bulk).toBe(2)
+    expect(calls.single).toBe(0)
+    expect(calls.maxChunk).toBe(100)
+  })
+
+  it('still resolves, via single reads, on a binding without bulk read', async () => {
+    const e = await seedEnvironment(env, projectId, 'prod')
+    await seedSecret(env, projectId, e, 'A', 'a')
+    await seedSecret(env, projectId, e, 'B', 'b')
+    const calls = instrumentKv(env, { bulk: false })
+
+    const res = await get(e, owner.token, true)
+    expect(res.status).toBe(200)
+    expect(res.body.data.secrets.map((s: any) => s.value)).toEqual(['a', 'b'])
+    expect(calls.single).toBe(2)
+  })
+
+  it('reads no blobs at all for a computed-only environment', async () => {
+    const e = await seedEnvironment(env, projectId, 'prod')
+    await seedComputed(env, projectId, e, 'C', 'static')
+    const calls = instrumentKv(env, { bulk: true })
+
+    expect((await get(e, owner.token, true)).status).toBe(200)
+    expect(calls).toEqual({ bulk: 0, single: 0, maxChunk: 0 })
+  })
+})
+
 describe('GET /api/environments', () => {
   it('lists snake_case rows for viewers', async () => {
     const viewer = await seedUser(env, { role: 'viewer', orgId: owner.orgId })

@@ -19,11 +19,22 @@ import {
   verifyKeyCheck,
   type KeyRing,
 } from '../crypto/envelope'
+import { clearSystemState, readSystemState, writeSystemState } from './system-state'
 
 export const DEFAULT_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 500
 const WRITE_CHUNK = 50
 const LEASE_MS = 90_000
+
+/**
+ * Minimum gap between bootstrap attempts after one has failed (issue #87). bootstrap()
+ * runs on every tick while `encryption_keys` has no 'active' row, and a failed attempt
+ * used to write nothing — so a deployment with the wrong ENCRYPTION_MASTER_KEY repeated
+ * three full table scans every minute, 1,440 times a day, until someone noticed. At 15
+ * minutes that is 96 attempts a day, still well inside any plausible mean time to repair.
+ */
+export const BOOTSTRAP_RETRY_MS = 15 * 60_000
+const BOOTSTRAP_FAILED_KEY = 'key_rotation.bootstrap_failed_at'
 
 // The rotation walks these in order. `recordId` is the id the wrapped DEK is bound to by AAD
 // (a history row is bound to its secret; a connection to itself).
@@ -61,6 +72,8 @@ export type TickResult =
   | { state: 'failed'; code: string }
   | { state: 'busy' }
   | { state: 'error'; code: string }
+  /** A previous bootstrap attempt failed and the retry interval has not elapsed; nothing was read. */
+  | { state: 'bootstrap_backoff'; code: string; retryAfterMs: number }
 
 export type TickOptions = {
   now?: Date
@@ -154,8 +167,71 @@ export async function rotationTick(env: Env, options: TickOptions = {}): Promise
  * wrapped DEK) as active. If the deployment already names a different active version, the next
  * tick then starts a rotation, so a first deploy with ACTIVE != v1 on a populated database is
  * not silently skipped.
+ *
+ * A FAILED attempt is persisted (issue #87) and the next BOOTSTRAP_RETRY_MS of ticks skip it
+ * without reading anything, because the attempt itself is three full table scans and nothing
+ * about the outcome can change until an operator changes the deployment. A successful attempt
+ * clears the record, so recovery needs no intervention beyond restoring the key.
+ *
+ * The record is tied to the active key version it failed under, so redeploying with a
+ * different ENCRYPTION_ACTIVE_KEY_VERSION retries at once rather than waiting out an interval
+ * for a question that has changed. Swapping the key material behind an unchanged version
+ * cannot be detected without doing the scans, so that fix waits for the interval.
  */
 async function bootstrap(env: Env, ring: KeyRing, nowIso: string): Promise<TickResult> {
+  // Back off a failing bootstrap before reading anything. The whole cost of a wedged
+  // deployment was in attemptBootstrap's scans, so the check has to come first.
+  const failed = parseBootstrapFailure(await readSystemState(env, BOOTSTRAP_FAILED_KEY))
+  if (failed && failed.activeVersion === ring.activeVersion) {
+    const elapsed = Date.parse(nowIso) - Date.parse(failed.at)
+    // A stored timestamp that will not parse, or one in the future (a clock moved
+    // backwards), must not wedge the retry forever: treat it as due now.
+    if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed < BOOTSTRAP_RETRY_MS) {
+      return { state: 'bootstrap_backoff', code: failed.code, retryAfterMs: BOOTSTRAP_RETRY_MS - elapsed }
+    }
+  }
+
+  let result: TickResult
+  try {
+    result = await attemptBootstrap(env, ring, nowIso)
+  } catch (err) {
+    // A throw from here (a missing or malformed key, a D1 error) repeats every minute
+    // just as a returned error does, so it backs off the same way. The code is the
+    // KeyRingError's own or an opaque placeholder — never a message, which could quote
+    // deployment state.
+    return await recordBootstrapFailure(env, ring, err instanceof KeyRingError ? err.code : 'BOOTSTRAP_FAILED', nowIso)
+  }
+
+  if (result.state === 'error') return await recordBootstrapFailure(env, ring, result.code, nowIso)
+
+  // Recovery is automatic: once an attempt gets through, the stored failure goes, so a
+  // deployment that is fixed and then breaks again is not throttled by the old record.
+  if (failed) await clearSystemState(env, BOOTSTRAP_FAILED_KEY)
+  return result
+}
+
+type BootstrapFailure = { activeVersion: string; code: string; at: string }
+
+function parseBootstrapFailure(state: { value: string; updatedAt: string } | null): BootstrapFailure | null {
+  if (!state) return null
+  try {
+    const parsed = JSON.parse(state.value) as { activeVersion?: unknown; code?: unknown }
+    if (typeof parsed.activeVersion !== 'string' || typeof parsed.code !== 'string') return null
+    return { activeVersion: parsed.activeVersion, code: parsed.code, at: state.updatedAt }
+  } catch {
+    // Unreadable record: attempt the bootstrap rather than back off on a value we cannot read.
+    return null
+  }
+}
+
+async function recordBootstrapFailure(env: Env, ring: KeyRing, code: string, nowIso: string): Promise<TickResult> {
+  await writeSystemState(env, BOOTSTRAP_FAILED_KEY, JSON.stringify({ activeVersion: ring.activeVersion, code }), nowIso)
+  console.error(JSON.stringify({ level: 'error', event: 'key_rotation.bootstrap_failed', code, retryAfterMs: BOOTSTRAP_RETRY_MS }))
+  return { state: 'error', code }
+}
+
+/** The bootstrap proper. Unchanged behaviour; `bootstrap` wraps it in the retry interval. */
+async function attemptBootstrap(env: Env, ring: KeyRing, nowIso: string): Promise<TickResult> {
   const used = await env.DB.prepare('SELECT key_version AS v FROM secrets UNION SELECT key_version FROM secret_history UNION SELECT key_version FROM integration_connections').all<{ v: string }>()
   const versions = (used.results ?? []).map((r) => r.v)
   const others = versions.filter((v) => v !== ring.activeVersion).sort((x, y) => Number(x.slice(1)) - Number(y.slice(1)))

@@ -70,9 +70,16 @@ export class FakeD1 {
   }
 }
 
+/**
+ * Deliberately NOT bulk-read capable: `get` takes a single key, so the whole suite exercises
+ * readSecretBlobs' fallback path. test/secret-blobs.test.ts covers the bulk path with its own
+ * double. `list` paginates like KV does (sorted keys, opaque cursor, `list_complete`), which
+ * is what the orphan sweep's per-tick bound rides on.
+ */
 export class FakeKV {
   readonly store = new Map<string, string>()
   async get(key: string): Promise<string | null> {
+    if (Array.isArray(key)) throw new Error('FakeKV does not implement bulk reads')
     return this.store.get(key) ?? null
   }
   async put(key: string, value: string): Promise<void> {
@@ -81,9 +88,16 @@ export class FakeKV {
   async delete(key: string): Promise<void> {
     this.store.delete(key)
   }
-  async list(opts?: { prefix?: string }) {
-    const keys = [...this.store.keys()].filter((k) => k.startsWith(opts?.prefix ?? '')).map((name) => ({ name }))
-    return { keys, list_complete: true }
+  async list(opts?: { prefix?: string | null; limit?: number; cursor?: string | null }) {
+    const all = [...this.store.keys()].filter((k) => k.startsWith(opts?.prefix ?? '')).sort()
+    const after = opts?.cursor ? all.filter((k) => k > opts.cursor!) : all
+    const limit = opts?.limit ?? 1000
+    const page = after.slice(0, limit)
+    const keys = page.map((name) => ({ name }))
+    if (page.length < after.length) {
+      return { keys, list_complete: false as const, cursor: page[page.length - 1] as string }
+    }
+    return { keys, list_complete: true as const }
   }
 }
 

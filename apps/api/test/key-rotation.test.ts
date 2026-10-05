@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { decryptSecretWithRing, encryptSecretWithRing, loadKeyRing, makeKeyCheck, type KeyRing } from '../src/crypto/envelope'
-import { rotationTick, type TickResult } from '../src/lib/key-rotation'
+import { BOOTSTRAP_RETRY_MS, rotationTick, type TickResult } from '../src/lib/key-rotation'
 import { createPrefixedId } from '../src/lib/auth'
 import { encryptCredentialWithRing } from '../src/crypto/envelope'
 import { readCredential } from '../src/lib/integration-credentials'
@@ -298,6 +298,145 @@ describe('key rotation engine', () => {
     expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
     const n = await ctx.env.DB.prepare('SELECT count(*) AS n FROM encryption_keys').first<{ n: number }>()
     expect(n!.n).toBe(0)
+  })
+
+  // Issue #87. bootstrap() runs on every tick while encryption_keys has no 'active' row, and
+  // used to write nothing when it failed — so a deployment with the wrong key repeated three
+  // full table scans 1,440 times a day, forever.
+  describe('bootstrap backoff', () => {
+    /** Record which tables each statement touched. */
+    function watchReads(env: TestEnv) {
+      const real = env.DB
+      const sql: string[] = []
+      env.DB = {
+        prepare: (q: string) => { sql.push(q); return real.prepare(q) },
+        batch: real.batch.bind(real),
+      } as unknown as TestEnv['DB']
+      return { sql, restore: () => { env.DB = real } }
+    }
+    const scans = (sql: string[]) => sql.filter((q) => /FROM secrets|FROM secret_history|FROM integration_connections/.test(q))
+
+    it('records the failure and skips the scans entirely on the next tick', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 3)
+      ctx.env.ENCRYPTION_MASTER_KEY = b64()
+
+      const first = watchReads(ctx.env)
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+      expect(scans(first.sql).length).toBeGreaterThan(0) // the attempt did happen
+      first.restore()
+
+      const stored = await ctx.env.DB.prepare('SELECT value FROM system_state WHERE key = ?')
+        .bind('key_rotation.bootstrap_failed_at').first<{ value: string }>()
+      expect(JSON.parse(stored!.value)).toEqual({ activeVersion: 'v1', code: 'KEY_CHECK_FAILED' })
+
+      const second = watchReads(ctx.env)
+      const result = await rotationTick(ctx.env as never)
+      expect(result).toMatchObject({ state: 'bootstrap_backoff', code: 'KEY_CHECK_FAILED' })
+      expect(scans(second.sql)).toEqual([]) // nothing scanned while backing off
+      second.restore()
+    })
+
+    it('still writes nothing to encryption_keys or key_rotations while backing off', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 2)
+      ctx.env.ENCRYPTION_MASTER_KEY = b64()
+      for (let i = 0; i < 5; i += 1) await rotationTick(ctx.env as never)
+      for (const table of ['encryption_keys', 'key_rotations']) {
+        const n = await ctx.env.DB.prepare(`SELECT count(*) AS n FROM ${table}`).first<{ n: number }>()
+        expect(n!.n).toBe(0)
+      }
+    })
+
+    it('backs off exactly BOOTSTRAP_RETRY_MS, then retries', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 3)
+      const good = ctx.env.ENCRYPTION_MASTER_KEY
+      ctx.env.ENCRYPTION_MASTER_KEY = b64()
+      const t0 = new Date('2026-10-05T00:00:00.000Z')
+      expect(await rotationTick(ctx.env as never, { now: t0 })).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+
+      // One millisecond short: still suppressed, and the remaining wait is reported.
+      const nearly = new Date(t0.getTime() + BOOTSTRAP_RETRY_MS - 1)
+      expect(await rotationTick(ctx.env as never, { now: nearly }))
+        .toEqual({ state: 'bootstrap_backoff', code: 'KEY_CHECK_FAILED', retryAfterMs: 1 })
+
+      // Due, and still broken: it attempts again and records the fresh attempt.
+      const due = new Date(t0.getTime() + BOOTSTRAP_RETRY_MS)
+      expect(await rotationTick(ctx.env as never, { now: due })).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+      const again = await ctx.env.DB.prepare('SELECT updated_at FROM system_state WHERE key = ?')
+        .bind('key_rotation.bootstrap_failed_at').first<{ updated_at: string }>()
+      expect(again!.updated_at).toBe(due.toISOString())
+
+      // Fixed: the next due tick recovers on its own and clears the record.
+      ctx.env.ENCRYPTION_MASTER_KEY = good
+      const later = new Date(due.getTime() + BOOTSTRAP_RETRY_MS)
+      expect(await rotationTick(ctx.env as never, { now: later })).toEqual({ state: 'bootstrapped', version: 'v1' })
+      expect(await ctx.env.DB.prepare('SELECT value FROM system_state WHERE key = ?')
+        .bind('key_rotation.bootstrap_failed_at').first()).toBeNull()
+      expect(await rotationTick(ctx.env as never, { now: later })).toEqual({ state: 'idle' })
+    })
+
+    it('retries at once when the deployment names a different active version', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 3)
+      const good = ctx.env.ENCRYPTION_MASTER_KEY
+      ctx.env.ENCRYPTION_MASTER_KEY = b64()
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+
+      // The operator redeploys with a different ENCRYPTION_ACTIVE_KEY_VERSION. The stored
+      // failure was about a different question, so it must not suppress this attempt — even
+      // though the interval has not elapsed and the key is still wrong.
+      activate(ctx.env, 'v2')
+      const retry = watchReads(ctx.env)
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+      expect(scans(retry.sql).length).toBeGreaterThan(0)
+      retry.restore()
+
+      // And once the key is restored it bootstraps on the next tick, with no wait.
+      ctx.env.ENCRYPTION_MASTER_KEY = good
+      activate(ctx.env, 'v1')
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'bootstrapped', version: 'v1' })
+    })
+
+    it('attempts rather than backs off when the stored record is unreadable', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 2)
+      await ctx.env.DB.prepare('INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, ?)')
+        .bind('key_rotation.bootstrap_failed_at', 'not json', new Date().toISOString()).run()
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'bootstrapped', version: 'v1' })
+    })
+
+    it('records nothing when the first attempt succeeds', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 2)
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'bootstrapped', version: 'v1' })
+      expect(await ctx.env.DB.prepare('SELECT count(*) AS n FROM system_state').first<{ n: number }>()).toEqual({ n: 0 })
+    })
+
+    it('keeps working when migration 0016 has not been applied', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 2)
+      ctx.env.DB.sqlite.exec('DROP TABLE system_state')
+      ctx.env.ENCRYPTION_MASTER_KEY = b64()
+      // No backoff is possible without the table, but the tick must not break.
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+      expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
+    })
+
+    it('never logs key material while backing off', async () => {
+      const ctx = await setup()
+      await seedMany(ctx, 2)
+      const wrong = b64()
+      ctx.env.ENCRYPTION_MASTER_KEY = wrong
+      await rotationTick(ctx.env as never)
+      await rotationTick(ctx.env as never)
+      const haystack = logs.join('\n')
+      expect(haystack).toContain('key_rotation.bootstrap_failed')
+      for (const needle of [wrong, String(ctx.env['ENCRYPTION_KEY_V2'])]) {
+        expect(haystack).not.toContain(needle)
+      }
+    })
   })
 
   it('quarantines a corrupt row, finishes the rest, and reports completed_with_errors', async () => {

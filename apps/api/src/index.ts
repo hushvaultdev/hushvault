@@ -36,6 +36,8 @@ export type Env = {
   ENCRYPTION_ACTIVE_KEY_VERSION?: string
   ENFORCE_AAD?: string
   ROTATION_BATCH_SIZE?: string
+  /** Set to "1" to stop the orphaned-blob sweep. Required before a D1 restore — OPERATIONS.md § 2. */
+  DISABLE_ORPHAN_SWEEP?: string
   // Transactional email (issue #26): Cloudflare Email Service binding + sender address.
   EMAIL?: EmailBinding
   MAIL_FROM?: string

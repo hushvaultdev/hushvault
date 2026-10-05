@@ -168,7 +168,9 @@ secretScannerRouter.post('/github', async (c) => {
     const apiKey = await db
       .prepare('SELECT id, user_id, revoked_at FROM api_keys WHERE key_hash = ? LIMIT 1')
       .bind(keyHash)
-      .first<{ id: string; user_id: string; revoked_at: string | null }>()
+      // revoked_at is an INTEGER column that most writers fill with unix seconds and this one
+      // with an ISO string, so a read can return either; only its presence matters here.
+      .first<{ id: string; user_id: string; revoked_at: number | string | null }>()
 
     if (!apiKey) {
       // Not one of ours (or already rotated out) — report as a false positive.

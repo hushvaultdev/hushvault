@@ -54,12 +54,27 @@ Master-key rotation is implemented as a versioned key ring plus a cron-driven DE
   <https://developers.cloudflare.com/d1/reference/time-travel/> before relying on it.
 - Restoring overwrites the database in place; take an export first if possible and
   note the bookmark `info` returns so you can undo.
+- **Before restoring D1, set `DISABLE_ORPHAN_SWEEP=1` and deploy.** The cron's orphaned-blob
+  sweep treats D1 as the source of truth: a blob is referenced when its row exists and its
+  revision is at or below `secrets.blob_rev`. A restore that moves `blob_rev` *backwards* makes
+  a blob the live row still needs look unreferenced, and an hour later the sweep deletes it —
+  a data-loss path that only opens during recovery. Leave the flag set until D1 and KV agree
+  again, then remove it and redeploy. While it is set, `housekeeping.orphan_sweep_disabled`
+  appears in the logs each tick and the other sweeps carry on as normal.
 - `wrangler d1 migrations apply` captures a backup before applying
   **[verified: `wrangler d1 migrations apply --help`]**.
 - Manual export (not automatic; schedule it yourself if you want off-Cloudflare copies):
   `wrangler d1 export hushvault-db --remote --output backup-$(date +%F).sql`
   **[verified: `wrangler d1 export --help`]**. Exports contain wrapped DEKs and user data;
   store them encrypted, and remember they are useless without the KV blobs and master key.
+
+**After a D1 restore, secrets diverge per row, not all at once.** A secret whose value changed
+after the restore point has the old wrapped DEK in D1 and the newer ciphertext in KV, so it will
+not decrypt — but the pre-change ciphertext is usually still in KV under its own revision
+(`secret:{id}:{rev}`, see ENCRYPTION.md), and the restored `secret_history` row names which one.
+Recovery is therefore per secret and possible by hand; there is no tool for it yet. A secret
+created after the restore point loses its D1 row and its blob becomes an orphan; one deleted
+after the restore point comes back as a row with no blob and reads as `404`.
 
 ### KV (encrypted secret blobs)
 
@@ -111,6 +126,18 @@ Watch:
 - Email: `email.not_configured`, `email.send_failed` and `email.budget_exhausted` (section 6).
   These are the only signal that mail has stopped — the auth endpoints keep answering normally
   when it has.
+- `key_rotation.bootstrap_failed` — the deployment has no `active` row in `encryption_keys` and
+  the key it needs does not match the data. Writes keep using the last proven key version, so
+  this is not an outage, but no rotation can start until it is fixed. The tick records the
+  attempt in `system_state` and retries every 15 minutes rather than every minute, so expect
+  this line four times an hour, not sixty, while it is broken. Fixing
+  `ENCRYPTION_ACTIVE_KEY_VERSION` is retried on the next tick; replacing the key material
+  behind an unchanged version waits out the interval.
+- `housekeeping.orphan_blobs` — the reconciliation pass over KV's `secret:` blobs. `deleted` is
+  routine; a `unreferenced` count that grows tick after tick without `deleted` keeping up means
+  D1 writes are failing *after* their KV write succeeded (the create and update paths write KV
+  first), which is worth investigating on its own. A blob is only deleted once it has been
+  proved unreferenced twice an hour apart, so a backlog is expected to lag, not to grow.
 
 ## 4. Routine tasks
 

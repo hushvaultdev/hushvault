@@ -78,6 +78,30 @@ describe('migrations', () => {
     for (const t of ['sync_targets', 'sync_items', 'sync_runs']) expect(await env.DB.prepare(`SELECT 1 AS x FROM ${t}`).first()).toBeNull()
   })
 
+  it('0016 creates the cron bookkeeping tables and is safe to apply twice', async () => {
+    const env = createTestEnv()
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const cols = async (t: string) =>
+      (await env.DB.prepare(`PRAGMA table_info(${t})`).all<{ name: string }>()).results.map((r) => r.name)
+    expect(await cols('system_state')).toEqual(['key', 'value', 'updated_at'])
+    expect(await cols('orphan_blob_candidates')).toEqual(['kv_key', 'first_seen_at'])
+
+    const now = new Date().toISOString()
+    await env.DB.prepare('INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, ?)').bind('k', 'v', now).run()
+    await env.DB.prepare('INSERT INTO orphan_blob_candidates (kv_key, first_seen_at) VALUES (?, ?)').bind('secret:sec_a:1', now).run()
+    // Both are upserted by key, so a second sighting must not duplicate or error.
+    await env.DB.prepare('INSERT INTO orphan_blob_candidates (kv_key, first_seen_at) VALUES (?, ?) ON CONFLICT(kv_key) DO NOTHING')
+      .bind('secret:sec_a:1', new Date(Date.now() + 1000).toISOString()).run()
+    expect((await env.DB.prepare('SELECT first_seen_at AS t FROM orphan_blob_candidates').all<{ t: string }>()).results)
+      .toEqual([{ t: now }])
+
+    // Re-applying changes nothing and loses nothing.
+    env.DB.sqlite.exec(readFileSync(join(__dirname, '../migrations/0016_cron_bookkeeping.sql'), 'utf8'))
+    expect((await env.DB.prepare('SELECT value AS v FROM system_state').all<{ v: string }>()).results).toEqual([{ v: 'v' }])
+    expect((await env.DB.prepare('SELECT count(*) AS n FROM orphan_blob_candidates').first<{ n: number }>())!.n).toBe(1)
+  })
+
   it('0006 is safe to apply twice and enforces a single running rotation', async () => {
     const env = createTestEnv()
     const { readFileSync } = await import('node:fs')
