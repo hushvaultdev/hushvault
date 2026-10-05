@@ -294,6 +294,24 @@ describe('orphaned KV blob reconciliation', () => {
     expect(blobs(env)).toEqual(['secret:sec_orphan:1'])
   })
 
+  // The one scenario the sweep's safety argument does not cover: a D1 restore that moves
+  // blob_rev backwards makes a live blob look unreferenced. Hence the off switch.
+  it('does nothing at all when DISABLE_ORPHAN_SWEEP is set, but keeps the other sweeps', async () => {
+    const { env, owner } = await scene()
+    env.SECRETS_KV.store.set('secret:sec_orphan:1', 'CIPHERTEXT')
+    await seedAudit(env, owner.orgId, 3, 30)
+    ;(env as Record<string, unknown>)['DISABLE_ORPHAN_SWEEP'] = '1'
+
+    const first = await housekeepingTick(env, T0)
+    expect(first).toMatchObject({ orphanBlobsScanned: 0, orphanBlobsUnreferenced: 0, orphanBlobsDeleted: 0 })
+    expect(first.auditRowsDeleted).toBe(3)
+
+    // Still there long after the grace period, which is the whole point.
+    await housekeepingTick(env, at(AFTER_GRACE * 3))
+    expect(env.SECRETS_KV.store.get('secret:sec_orphan:1')).toBe('CIPHERTEXT')
+    expect(await candidates(env)).toEqual([])
+  })
+
   it('never logs a blob key, a value or a wrapped DEK', async () => {
     const { env, owner, projectId, envId } = await scene()
     const id = await seedSecret(env, projectId, envId, 'LIVE', 'the-plaintext-value')

@@ -54,12 +54,27 @@ Master-key rotation is implemented as a versioned key ring plus a cron-driven DE
   <https://developers.cloudflare.com/d1/reference/time-travel/> before relying on it.
 - Restoring overwrites the database in place; take an export first if possible and
   note the bookmark `info` returns so you can undo.
+- **Before restoring D1, set `DISABLE_ORPHAN_SWEEP=1` and deploy.** The cron's orphaned-blob
+  sweep treats D1 as the source of truth: a blob is referenced when its row exists and its
+  revision is at or below `secrets.blob_rev`. A restore that moves `blob_rev` *backwards* makes
+  a blob the live row still needs look unreferenced, and an hour later the sweep deletes it —
+  a data-loss path that only opens during recovery. Leave the flag set until D1 and KV agree
+  again, then remove it and redeploy. While it is set, `housekeeping.orphan_sweep_disabled`
+  appears in the logs each tick and the other sweeps carry on as normal.
 - `wrangler d1 migrations apply` captures a backup before applying
   **[verified: `wrangler d1 migrations apply --help`]**.
 - Manual export (not automatic; schedule it yourself if you want off-Cloudflare copies):
   `wrangler d1 export hushvault-db --remote --output backup-$(date +%F).sql`
   **[verified: `wrangler d1 export --help`]**. Exports contain wrapped DEKs and user data;
   store them encrypted, and remember they are useless without the KV blobs and master key.
+
+**After a D1 restore, secrets diverge per row, not all at once.** A secret whose value changed
+after the restore point has the old wrapped DEK in D1 and the newer ciphertext in KV, so it will
+not decrypt — but the pre-change ciphertext is usually still in KV under its own revision
+(`secret:{id}:{rev}`, see ENCRYPTION.md), and the restored `secret_history` row names which one.
+Recovery is therefore per secret and possible by hand; there is no tool for it yet. A secret
+created after the restore point loses its D1 row and its blob becomes an orphan; one deleted
+after the restore point comes back as a row with no blob and reads as `404`.
 
 ### KV (encrypted secret blobs)
 

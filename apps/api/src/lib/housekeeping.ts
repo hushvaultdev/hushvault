@@ -146,7 +146,27 @@ async function purgeShareLinks(env: Env, now: Date): Promise<number> {
  * The asymmetry is deliberate: a referenced blob is never a candidate, so the worst outcome of
  * a wrong answer here is leaked storage, never an unreadable secret.
  */
+/**
+ * Kill switch, for one specific scenario: a D1 point-in-time restore.
+ *
+ * The sweep's safety argument rests on D1 being the source of truth — a blob is referenced when
+ * its row exists and its revision is at or below `blob_rev`. A restore that moves `blob_rev`
+ * *backwards* breaks that premise: a blob the live row still needs looks unreferenced, and an
+ * hour later the sweep deletes it. That is a data-loss path that only opens during recovery,
+ * which is the worst moment for it, so it gets an explicit off switch rather than a comment.
+ *
+ * Set `DISABLE_ORPHAN_SWEEP=1` before restoring D1, and leave it set until KV and D1 agree
+ * again. See OPERATIONS.md § 2.
+ */
+function orphanSweepDisabled(env: Env): boolean {
+  return String(env.DISABLE_ORPHAN_SWEEP ?? '').trim() === '1'
+}
+
 async function sweepOrphanBlobs(env: Env, now: Date): Promise<Pick<HousekeepingResult, 'orphanBlobsScanned' | 'orphanBlobsUnreferenced' | 'orphanBlobsDeleted'>> {
+  if (orphanSweepDisabled(env)) {
+    logEvent('housekeeping.orphan_sweep_disabled')
+    return { orphanBlobsScanned: 0, orphanBlobsUnreferenced: 0, orphanBlobsDeleted: 0 }
+  }
   const nowIso = now.toISOString()
   const stored = await readSystemState(env, ORPHAN_CURSOR_KEY)
   const listing = await env.SECRETS_KV.list({
