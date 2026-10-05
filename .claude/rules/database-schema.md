@@ -52,18 +52,51 @@ wrangler d1 migrations apply DB --remote --env production
 
 ### Rebuilding a table
 
-SQLite cannot alter a foreign key or a CHECK constraint, so the table must be rebuilt. Two rules,
-both learned the hard way:
+SQLite cannot alter a foreign key or a CHECK constraint, so the table must be rebuilt.
 
-1. **Rename first, then create, then copy, then drop.** The reverse order (drop the original,
-   rename the copy into place) has a window where a partial apply leaves no table at all, and the
-   retry's first statement drops the only surviving copy. `0010_integration_connections.sql` does
-   it the wrong way round; do not copy it.
-2. **Watch what RENAME does to other tables.** `ALTER TABLE x RENAME TO x_old` rewrites every
-   other table's `REFERENCES x` to `REFERENCES x_old`, so dropping `x_old` afterwards dangles
-   those foreign keys. D1 documents `PRAGMA defer_foreign_keys = true` for migrations, but not
-   `PRAGMA foreign_keys` or `PRAGMA legacy_alter_table` — so verify against D1 before relying on
-   either, and prefer not rebuilding a referenced table at all.
+**First: is anything else's `REFERENCES` pointing at this table?**
+
+```bash
+grep -rn "REFERENCES <table>" apps/api/migrations/
+```
+
+#### If nothing references it — rename first
+
+Rename, create, copy, drop. Never the reverse (drop the original, rename the copy into place):
+that has a window where a partial apply leaves no table at all, and the retry's first statement
+drops the only surviving copy. `0010_integration_connections.sql` does it the wrong way round.
+
+#### If something references it — do not rebuild it
+
+There is **no safe ordering**, and no PRAGMA on D1 to make one. This was established empirically
+against the dev database and reproduced locally (issue #81):
+
+- `ALTER TABLE x RENAME TO x_old` rewrites every other table's `REFERENCES x` into
+  `REFERENCES x_old`. Then `DROP TABLE x_old` runs an implicit `DELETE FROM`, which **fires the
+  children's `ON DELETE CASCADE` and deletes every child row** — and leaves the rewritten
+  foreign keys dangling. Every statement returns success. There is no error to notice.
+  Verified: a parent with two cascading children ends the rebuild with zero children and
+  `no such table: main.parent_old` on the next write.
+- Drop-first preserves the children, because references resolve by **name** and the final rename
+  restores it — but it keeps the destructive-retry window above.
+- `PRAGMA foreign_keys = OFF` is **silently ignored by D1**: it is accepted and still reads back
+  `1`.
+- `PRAGMA legacy_alter_table = ON` is accepted by D1, **reads back `1`, and is not honoured** —
+  the rename still rewrites the child. This is the worst of the three, because it looks like it
+  worked.
+- `PRAGMA defer_foreign_keys = true` *is* honoured, but only defers the check to commit. A real
+  end-state violation then makes D1 **reset the database and roll back to its last known good
+  state**, which is worse than an immediate error. It helps only where the violation is
+  transient and repaired before commit — a rebuild is not that case.
+
+So: change the application, not the schema. A nullable column can get `ON DELETE SET NULL`
+semantics by having the deleting code null it first, inside the same `batch()` as the delete.
+A `NO ACTION` foreign key is then a **safety property**, not a bug: it guarantees no code path
+can remove the parent while rows still reference it.
+
+In this schema that applies to `integration_connections`, `sync_targets` (referenced by
+`sync_items`, `sync_runs` and `sync_outbox`, all cascading) and transitively anything below
+them. `oidc_repo_rules` is referenced by nothing and would be safe to rebuild.
 
 ## Query Patterns
 

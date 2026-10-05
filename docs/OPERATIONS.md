@@ -63,6 +63,11 @@ Master-key rotation is implemented as a versioned key ring plus a cron-driven DE
   appears in the logs each tick and the other sweeps carry on as normal.
 - `wrangler d1 migrations apply` captures a backup before applying
   **[verified: `wrangler d1 migrations apply --help`]**.
+- **Never run a migration that rebuilds a table other tables reference.** D1 ignores
+  `PRAGMA foreign_keys = OFF`, accepts but does not honour `PRAGMA legacy_alter_table`, and
+  turns a deferred foreign-key violation into a whole-database rollback. A rename-and-drop
+  rebuild of a referenced table silently deletes every cascading child row with no error.
+  Verified against the dev database; see `.claude/rules/database-schema.md`.
 - Manual export (not automatic; schedule it yourself if you want off-Cloudflare copies):
   `wrangler d1 export hushvault-db --remote --output backup-$(date +%F).sql`
   **[verified: `wrangler d1 export --help`]**. Exports contain wrapped DEKs and user data;
