@@ -7,7 +7,10 @@
 // `encrypted_payload` after the link expired or was used up, so ciphertext nobody can reach any
 // more still landed in every `wrangler d1 export`. `auth_tokens` was only purged opportunistically
 // by the routes that happened to touch it. Issue #87 added a fourth sweep, for orphaned KV
-// blobs, which nothing collected and nothing could even enumerate.
+// blobs, which nothing collected and nothing could even enumerate. Issue #84 added a fifth,
+// one-way one: the pre-0014 `secrethist:` copies, which dropping `secret_history` turned from
+// reachable storage into blobs nothing in D1 names and nothing can decrypt. It drains to zero
+// and stays there.
 //
 // Two rules shape this file:
 //   - Bounded per tick. The cron shares one subrequest and CPU budget with rotation and sync, so
@@ -18,7 +21,7 @@
 import type { Env } from '../index'
 import { AUDIT_RETENTION_DAYS, DEFAULT_RETENTION_DAYS, retentionCutoffIso } from './audit-retention'
 import { logEvent } from './security'
-import { KV_DELETE_CHUNK, SECRET_BLOB_PREFIX, parseSecretBlobKey } from './secret-blobs'
+import { KV_DELETE_CHUNK, LEGACY_HISTORY_BLOB_PREFIX, SECRET_BLOB_PREFIX, parseSecretBlobKey } from './secret-blobs'
 import { clearSystemState, readSystemState, writeSystemState } from './system-state'
 
 /** Organisations whose audit log is swept per tick. */
@@ -48,6 +51,12 @@ export const ORPHAN_CANDIDATE_TTL_MS = 7 * 24 * 3600_000
 /** Stale candidate rows pruned per tick. */
 export const ORPHAN_CANDIDATE_PRUNE_PER_TICK = 200
 
+/**
+ * Pre-0014 `secrethist:` copies removed per tick. Same reasoning as ORPHAN_DELETE_PER_TICK:
+ * each delete is a subrequest, shared with rotation and sync on the same invocation.
+ */
+export const LEGACY_HISTORY_DELETE_PER_TICK = 50
+
 const ORPHAN_CURSOR_KEY = 'housekeeping.orphan_blob_cursor'
 /**
  * Values bound per statement when building an `IN (...)` list. D1's documented limits do not
@@ -66,6 +75,8 @@ export type HousekeepingResult = {
   orphanBlobsUnreferenced: number
   /** Blobs deleted: proved unreferenced twice, ORPHAN_GRACE_MS apart. */
   orphanBlobsDeleted: number
+  /** Pre-0014 `secrethist:` copies deleted. Counts down to zero and stays there (issue #84). */
+  legacyHistoryBlobsDeleted: number
 }
 
 /**
@@ -126,11 +137,24 @@ async function purgeShareLinks(env: Env, now: Date): Promise<number> {
  *
  *  1. Referenced-ness is computed from the pointer, generously. A blob is referenced when its
  *     secret row exists and its revision is <= that row's `blob_rev`. `blob_rev` only ever
- *     increases, and a `secret_history` row points at a revision of its OWN secret, so that
- *     one bound covers every historical reference without reading `secret_history` at all.
- *     The pre-0014 unversioned key is revision 0 and so is referenced for as long as its row
+ *     increases, so that one bound covers every revision the row has ever pointed at. The
+ *     pre-0014 unversioned key is revision 0 and so is referenced for as long as its row
  *     exists. Anything that does not parse as a key this codebase writes is skipped, not
  *     guessed at. So the set considered for deletion is a subset of the truly unreferenced.
+ *
+ *     WHY `<=` AND NOT `==`, NOW THAT NOTHING READS OLD REVISIONS. Dropping `secret_history`
+ *     (issue #84) removed the last thing that named a superseded revision, so on the face of
+ *     it `rev < blob_rev` is now collectable and this test could be narrowed to reclaim it.
+ *     It is deliberately not, for two reasons. The compliance half of #84 is already settled
+ *     without deleting anything: the wrapped DEKs went with the table, so every superseded
+ *     revision is undecryptable by anyone, including us — crypto-shredded, not retained. And
+ *     the retention is load-bearing for the one recovery path left. After a D1 point-in-time
+ *     restore, a secret whose value changed since the restore point comes back with its OLD
+ *     `wrapped_dek` and OLD `blob_rev`; it decrypts again only because the blob that revision
+ *     names is still in KV (OPERATIONS.md § 2). Narrowing this test would delete that blob an
+ *     hour after each value change and turn a recoverable restore into a lost secret. The cost
+ *     is leaked KV storage, bounded by how often values change — the trade the rest of this
+ *     file already makes everywhere: storage over an unrecoverable outcome.
  *
  *  2. A blob written by a request still in flight is excluded by time, not by inspection.
  *     Nothing in KV distinguishes "rubbish from a failed D1 write" from "a blob whose row is
@@ -249,6 +273,50 @@ async function sweepOrphanBlobs(env: Env, now: Date): Promise<Pick<HousekeepingR
   return { orphanBlobsScanned: parsed.length, orphanBlobsUnreferenced: unreferencedCount, orphanBlobsDeleted: deleted }
 }
 
+/**
+ * Delete pre-0014 `secrethist:{historyId}` copies (issue #84).
+ *
+ * These are the one piece of storage that dropping `secret_history` would otherwise orphan
+ * forever. Before 0017 they were reachable: a history row named the key and held the wrapped
+ * DEK. Migration 0017 dropped those rows, so now nothing in D1 names them, nothing can decrypt
+ * them, and — crucially — neither delete path can find them any more, because both used to
+ * enumerate them from `secret_history`. KV listing is the only remaining handle on them, which
+ * is why this lives here rather than in a route.
+ *
+ * Unlike `secret:` blobs these need no candidate row and no grace period, and the distinction is
+ * not a shortcut. The grace period exists because a `secret:` blob with no D1 row is ambiguous:
+ * it may be rubbish from a failed D1 write, or a blob whose row is about to be inserted by a
+ * request still in flight. There is no such ambiguity here. Nothing has written this prefix
+ * since migration 0014, and no code that could write it exists any more, so every key under it
+ * is dead by construction — there is no in-flight writer to lose a race with.
+ *
+ * No cursor either. Each tick lists the first page and deletes exactly what it listed, so the
+ * set shrinks monotonically and the sweep finishes on its own; a cursor into a listing the same
+ * tick is deleting from would only be something to get wrong. Once the prefix is empty this
+ * costs one KV list per tick.
+ *
+ * It honours DISABLE_ORPHAN_SWEEP for the same reason the main sweep does: restoring D1 to a
+ * point before 0017 brings `secret_history` back, and these blobs are what those rows point at.
+ * That is the last moment they are worth anything, and the last moment to stop deleting them.
+ */
+async function purgeLegacyHistoryBlobs(env: Env): Promise<number> {
+  if (orphanSweepDisabled(env)) return 0
+  const listing = await env.SECRETS_KV.list({
+    prefix: LEGACY_HISTORY_BLOB_PREFIX,
+    limit: LEGACY_HISTORY_DELETE_PER_TICK,
+  })
+  const keys = listing.keys.map((entry) => entry.name)
+  if (keys.length === 0) return 0
+
+  let deleted = 0
+  for (const chunk of chunked(keys, KV_DELETE_CHUNK)) {
+    // A KV error must not fail the sweep; the key is simply listed again next tick.
+    const outcomes = await Promise.all(chunk.map((key) => env.SECRETS_KV.delete(key).then(() => true, () => false)))
+    deleted += outcomes.filter(Boolean).length
+  }
+  return deleted
+}
+
 function chunked<T>(items: T[], size: number): T[][] {
   const out: T[][] = []
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
@@ -293,6 +361,7 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
     orphanBlobsScanned: 0,
     orphanBlobsUnreferenced: 0,
     orphanBlobsDeleted: 0,
+    legacyHistoryBlobsDeleted: 0,
   }
 
   for (const [step, run] of [
@@ -300,6 +369,7 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
     ['share', async () => { result.shareLinksDeleted = await purgeShareLinks(env, now) }],
     ['tokens', async () => { result.authTokensDeleted = await purgeAuthTokens(env, now) }],
     ['orphan_blobs', async () => { Object.assign(result, await sweepOrphanBlobs(env, now)) }],
+    ['legacy_history_blobs', async () => { result.legacyHistoryBlobsDeleted = await purgeLegacyHistoryBlobs(env) }],
   ] as const) {
     try {
       await run()
@@ -316,6 +386,11 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
       unreferenced: result.orphanBlobsUnreferenced,
       deleted: result.orphanBlobsDeleted,
     })
+  }
+  // Logged separately and only while there is anything left: this is a one-way backlog from
+  // issue #84, and an operator wants to see it drain to zero rather than read it as routine.
+  if (result.legacyHistoryBlobsDeleted) {
+    logEvent('housekeeping.legacy_history_blobs', { deleted: result.legacyHistoryBlobsDeleted })
   }
   if (result.auditRowsDeleted || result.shareLinksDeleted || result.authTokensDeleted) {
     logEvent('housekeeping.swept', {

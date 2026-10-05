@@ -152,7 +152,7 @@ describe('parseSecretBlobKey', () => {
 
   it('refuses anything that is not one of those two shapes', () => {
     for (const key of [
-      'secrethist:sech_1', // history copies live outside the secret: prefix
+      'secrethist:sech_1', // pre-0014 history copies live outside the secret: prefix (issue #84)
       'jwks:https://example.test',
       'ghss:public-keys',
       'secret:', // no id

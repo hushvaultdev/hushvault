@@ -87,7 +87,7 @@ await c.env.DB.prepare('INSERT INTO secrets (id, name, created_at) VALUES (?, ?,
   .bind(createPrefixedId('sec'), name, new Date().toISOString()).run()
 
 // Several statements that must land together
-await c.env.DB.batch([historyInsert, secretUpdate])
+await c.env.DB.batch([auditInsert, secretUpdate])
 ```
 
 `meta.changes` is documented by D1 as a rough indication; do not rely on it for correctness.
@@ -95,8 +95,15 @@ Where a write must be confirmed, read the row back.
 
 ## KV Storage (Encrypted Secrets)
 
-KV key format: `secret:{secretId}:{version}`
-KV value: JSON `{ encryptedValue: string, wrappedDek: string }`
+KV key format: `secret:{secretId}:{blobRev}` — `secret:{secretId}` at revision 0 (pre-0014).
+KV value: the plain string `base64(iv):base64(ciphertext+tag)`, not JSON. The wrapped DEK is in D1.
 
-D1 stores metadata only (id, key name, projectId, wrappedDek, keyVersion).
+D1 stores metadata only (id, name, projectId, wrappedDek, keyVersion, encVersion, blobRev).
 KV stores the encrypted value blob.
+
+**A blob key is written once and never overwritten.** A value change writes
+`secret:{id}:{blobRev+1}` and D1 then moves the pointer, so a failed D1 write leaves an orphan
+rather than a secret whose ciphertext and wrapped DEK disagree (migration 0014). Superseded
+revisions stay in KV but are undecryptable: only the current wrapped DEK is kept, so no previous
+value is recoverable (issue #84 dropped `secret_history`; see docs/API.md). Do not add a table
+that retains superseded wrapped DEKs without also building the retention and purge for it.

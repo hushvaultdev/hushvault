@@ -197,7 +197,7 @@ abc123def456==:xyz789uvw012==
 AES-GCM additional authenticated data (AAD):
 ```
 v2:base64(iv):base64(ciphertext || authTag)
-value AAD = "hushvault|value|v2|<projectId>|<envId>|<secretId>"   (history blobs reuse their secret's context)
+value AAD = "hushvault|value|v2|<projectId>|<envId>|<secretId>"   (every revision of a secret shares this context)
 wrap  AAD = "hushvault|wrap|v2|<secretId>"                         (no key version, so rotation can re-wrap)
 ```
 A blob copied to another environment, project or secret, or paired with another secret's wrapped DEK, fails
@@ -207,9 +207,8 @@ attacker with D1 *and* KV write from restoring an older valid (blob, wrapped DEK
 
 Rows written before AAD are `enc_version = 1` (migration `0008`) and still read until you set
 `ENFORCE_AAD=true`. Upgrade them by re-saving each secret (any PATCH with a value re-encrypts as v2), check
-`SELECT COUNT(*) FROM secrets WHERE enc_version = 1` and the same on `secret_history` (history rows only change
-when the secret next changes; old history can be deleted instead), then set `ENFORCE_AAD=true` so a v1 row
-can no longer be used for a downgrade.
+`SELECT COUNT(*) FROM secrets WHERE enc_version = 1`, then set `ENFORCE_AAD=true` so a v1 row can no longer
+be used for a downgrade. `secret_history` used to need the same treatment and no longer exists (issue #84).
 
 **Integration credentials (issue #39)** use the same envelope and key ring but the tag `c2:` and a separate AAD domain:
 ```
@@ -217,7 +216,7 @@ credential AAD = "hushvault|credential|v2|<orgId>|<connectionId>"
 wrap       AAD = "hushvault|credential-wrap|v2|<connectionId>"
 ```
 A secret blob can therefore never be substituted for a credential (or the reverse), nor one connection's credential for
-another's. Rotation re-wraps `integration_connections` as a third phase after `secrets` and `secret_history`, preserving the
+another's. Rotation re-wraps `integration_connections` as a second phase after `secrets`, preserving the
 `c2:` tag. An HKDF-derived per-purpose KEK is not implemented (the AAD domain separation is).
 
 The IV and ciphertext+tag are stored together to enable decryption without separate IV storage.
@@ -231,13 +230,23 @@ or per-project key-encryption keys. Each secret version has its own random DEK.
 
 | What | Where | Key / column |
 |------|-------|--------------|
-| Encrypted value (`iv:ciphertext`) | KV (`SECRETS_KV`), stored as a plain string | `secret:{secretId}` |
-| Wrapped DEK (`iv:wrappedKey`) | D1 `secrets.wrapped_dek` | per secret |
-| Previous encrypted value | KV | `secrethist:{historyId}` |
-| Previous wrapped DEK | D1 `secret_history.wrapped_dek` | per history row |
+| Encrypted value (`iv:ciphertext`) | KV (`SECRETS_KV`), stored as a plain string | `secret:{secretId}:{blobRev}` (`secret:{secretId}` at revision 0) |
+| Wrapped DEK (`iv:wrappedKey`) | D1 `secrets.wrapped_dek` | per secret — exactly one, for the current revision |
 
-Updating a secret value generates a new DEK, writes the old blob to `secrethist:{historyId}`, and records the
-old wrapped DEK in `secret_history`. Renames and flag changes do not re-encrypt.
+Updating a secret value generates a new DEK, writes the ciphertext to the next revision — a KV key that has
+never been written — and then moves `secrets.blob_rev` in D1. D1 is the single source of truth, so a failed
+D1 write leaves an orphaned blob and a still-readable secret (migration 0014 explains why that order is the
+safe one). Renames and flag changes do not re-encrypt.
+
+**No previous value is retained.** The superseded ciphertext stays in KV under its own revision, but the only
+wrapped DEK that could decrypt it has been overwritten, so it is unreadable by anyone — including an operator
+with full D1 and KV access. Migration 0017 removed `secret_history`, which was the one place a superseded
+wrapped DEK was kept, and nothing read it (issue #84). Two consequences worth stating plainly: replacing a
+value is irreversible, and that is also what gives an organisation a "forget" path it never had before.
+
+The retained older revisions are collected by nothing on purpose: the cron's orphaned-blob sweep counts
+`rev <= secrets.blob_rev` as referenced, because that is what lets a secret recover after a D1
+point-in-time restore (OPERATIONS.md § 2). They cost storage and reveal nothing.
 
 ## Master Key Setup
 
@@ -268,7 +277,7 @@ Rotation replaces the key (KEK) that wraps each secret's DEK. It is operator-dri
 3. Safety point: `wrangler d1 export` and note the `d1 time-travel info` bookmark (OPERATIONS.md section 2).
 4. Set `ENCRYPTION_ACTIVE_KEY_VERSION = "v2"` for that env in `wrangler.toml` and deploy. New writes use v2.
 5. Within a minute the Cron Trigger notices the active version changed. It verifies both keys against their stored check values (fail closed on a mistyped key), marks v1 `decrypt_only`, starts a job, and writes `key.rotation.started` to every organisation's audit log.
-6. The job re-wraps `secrets` then `secret_history` in small batches (default 100 per tick, `ROTATION_BATCH_SIZE`), each row with a compare-and-swap update, and repeats a convergence pass for rows written by a stale isolate. It finishes as `completed` or `completed_with_errors` (rows it could not unwrap, or whose label names an unknown key version, are listed in `key_rotation_failures`; keep the old key until they are resolved). If a needed key is missing from the deployment the job stays `running`, records the error, and resumes by itself on the next tick once the key is restored.
+6. The job re-wraps `secrets` then `integration_connections` in small batches (default 100 per tick, `ROTATION_BATCH_SIZE`), each row with a compare-and-swap update, and repeats a convergence pass for rows written by a stale isolate. It finishes as `completed` or `completed_with_errors` (rows it could not unwrap, or whose label names an unknown key version, are listed in `key_rotation_failures`; keep the old key until they are resolved). If a needed key is missing from the deployment the job stays `running`, records the error, and resumes by itself on the next tick once the key is restored.
 7. Check progress with `GET /api/security/key-rotation` (org admins/owners; per-version row counts for their own organisation).
 8. Retire v1 only when no row uses it **and** every backup or export you might restore has aged out (at least the 30-day Time Travel window, longer for retained exports). Then `wrangler secret delete ENCRYPTION_MASTER_KEY` and keep the offline copy as long as any backup needs it.
 

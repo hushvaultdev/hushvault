@@ -1,21 +1,22 @@
 import { createPrefixedId } from '../../src/lib/auth'
 import type { TestEnv } from './env'
 
-/** Seed a secret row + KV blob + one history row + history blob. Returns ids and KV keys. */
-export async function seedSecretWithHistory(env: TestEnv, projectId: string, envId: string) {
+/**
+ * Seed a secret row at blob revision 2, with the blob for every revision it has pointed at.
+ *
+ * Was `seedSecretWithHistory`, which also seeded a `secret_history` row and a
+ * `secrethist:{historyId}` copy. Both are gone (issue #84); what a project delete has to clean
+ * up is now exactly the secret's own revisions, which is what this seeds.
+ */
+export async function seedSecretWithRevisions(env: TestEnv, projectId: string, envId: string) {
   const now = new Date().toISOString()
   const secretId = createPrefixedId('sec')
-  const historyId = createPrefixedId('his')
   await env.DB.prepare(
-    'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, blob_rev, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 2, ?, ?)',
   ).bind(secretId, projectId, envId, `API_KEY_${secretId.slice(-6)}`, 'wrapped', 'v1', now, now).run()
-  await env.DB.prepare('INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, changed_at) VALUES (?, ?, ?, ?, ?)')
-    .bind(historyId, secretId, 'wrapped-old', 'v1', now).run()
-  const secretKey = `secret:${secretId}`
-  const historyKey = `secrethist:${historyId}`
-  await env.SECRETS_KV.put(secretKey, 'blob')
-  await env.SECRETS_KV.put(historyKey, 'old-blob')
-  return { secretId, historyId, secretKey, historyKey }
+  const blobKeys = [`secret:${secretId}`, `secret:${secretId}:1`, `secret:${secretId}:2`]
+  for (const key of blobKeys) await env.SECRETS_KV.put(key, 'blob')
+  return { secretId, secretKey: blobKeys[2], blobKeys }
 }
 
 export async function auditActions(env: TestEnv, orgId: string, resourceId?: string) {

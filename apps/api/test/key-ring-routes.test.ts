@@ -46,7 +46,7 @@ describe('secrets routes use the key ring', () => {
     expect(JSON.stringify(resolved.body)).toContain('written-under-v2')
   })
 
-  it('PATCH with a new value re-wraps under the active version and records the old pair in history', async () => {
+  it('PATCH with a new value re-wraps under the active version', async () => {
     const { env, owner, projectId, envId } = await setup()
     const created = await call(env, 'POST', '/api/secrets', { token: owner.token, json: { projectId, envId, name: 'K', value: 'one' } })
     const id = created.body.data.id as string
@@ -54,8 +54,6 @@ describe('secrets routes use the key ring', () => {
     await activateVersion(env, 'v2')
     expect((await call(env, 'PATCH', `/api/secrets/${id}`, { token: owner.token, json: { value: 'two' } })).status).toBe(200)
     expect(await keyVersionOf(env, 'K')).toBe('v2')
-    const hist = await env.DB.prepare('SELECT key_version FROM secret_history WHERE secret_id = ?').bind(id).first<{ key_version: string }>()
-    expect(hist!.key_version).toBe('v1')
     const read = await call(env, 'GET', `/api/secrets/K?envId=${envId}`, { token: owner.token })
     expect(read.body.data.value).toBe('two')
   })
@@ -96,6 +94,8 @@ describe('GET /api/security/key-rotation', () => {
       const res = await call(env, 'GET', '/api/security/key-rotation', { token: t })
       expect(res.status).toBe(200)
       expect(res.body.data.rows.secrets).toEqual({ v1: 1 })
+      // `rows.history` went with secret_history (issue #84); only these two remain.
+      expect(Object.keys(res.body.data.rows).sort()).toEqual(['connections', 'secrets'])
       // A job exists once v2 was activated; the job block is deployment-wide, so it has no counters.
       expect(Object.keys(res.body.data.job).sort()).toEqual(['completedAt', 'phase', 'startedAt', 'status'])
       const text = JSON.stringify(res.body)

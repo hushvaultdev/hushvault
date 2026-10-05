@@ -45,7 +45,7 @@ environments, share, audit) return the validator's default 400 body (a Zod failu
 `{error,message}`). Secrets routes use a hook and return `400 VALIDATION_ERROR` with the first issue message.
 Clients should treat any 400 as "invalid input".
 
-IDs are prefixed random strings: `usr_`, `org_`, `prj_`, `env_`, `sec_`, `sech_` (history), `key_`, `sh_`,
+IDs are prefixed random strings: `usr_`, `org_`, `prj_`, `env_`, `sec_`, `key_`, `sh_`,
 `tok_`, `audit_`.
 
 CORS (`/api/*`): allowed origins are `https://hushvault.dev`, `https://www.hushvault.dev`,
@@ -322,8 +322,8 @@ Prefix `/api/projects`. All routes require auth.
   that normalises to empty falls back to a generated one on create and to the current slug on update.
 - Errors: `404 NOT_FOUND` (`Project not found`), `409 CONFLICT` (`A project with this slug already exists`;
   slugs are unique per organisation).
-- DELETE cascades to environments, secrets and history rows in D1, then deletes the matching KV blobs
-  (`secret:{id}`, `secrethist:{historyId}`) on a best-effort basis.
+- DELETE cascades to environments and secrets in D1, then deletes the matching KV blobs — every
+  revision of every value (`secret:{id}`, `secret:{id}:{rev}`) — on a best-effort basis.
 
 ```bash
 curl -X POST "$HUSHVAULT_API_URL/api/projects" -H "Authorization: Bearer $TOKEN" \
@@ -442,12 +442,17 @@ Details:
   (`A secret with this name already exists in this environment`), `400`.
 - **Update** body: any of `name`, `value`, `isComputed`, `template` (at least one; `projectId`/`envId` cannot
   change). Re-encryption (new DEK) happens only when new plaintext is supplied (`value`, or `template` on a
-  computed secret). When a value is replaced, the previous encrypted blob is kept as history (KV
-  `secrethist:{historyId}`, D1 `secret_history`). Renames or flag changes alone do not touch the stored value.
-  Errors: `404`, `409` on a name clash.
-- **History**: recorded as described above, but there is currently **no API endpoint to list or restore
-  versions**.
-- **Delete** removes the secret, its history rows and the KV blobs.
+  computed secret). The new ciphertext is written to a KV key that has never been used
+  (`secret:{id}:{rev+1}`) and D1 then moves the pointer, so a failed write leaves the secret readable
+  rather than corrupt. Renames or flag changes alone do not touch the stored value. Errors: `404`,
+  `409` on a name clash.
+- **Previous values are not retained.** Replacing a value destroys the only wrapped DEK that could
+  decrypt the old one, so there is nothing to list, restore or purge — and nothing retained that an
+  organisation would later have to be able to forget. HushVault keeps the current value of a secret and
+  the audit record that it changed, never the superseded value. If you need the old credential, read it
+  before you replace it. (The `secret_history` table that used to record it was write-only, with no
+  endpoint, retention window or purge; it was dropped in migration 0017 — issue #84.)
+- **Delete** removes the secret and every KV blob it owns.
 
 ```bash
 # create
@@ -566,14 +571,16 @@ Read-only encryption key status for the caller's organisation. Roles: `admin`, `
 ```json
 { "data": {
   "activeVersion": "v2",
-  "rows": { "secrets": { "v1": 0, "v2": 42 }, "history": { "v1": 3, "v2": 17 } },
+  "rows": { "secrets": { "v1": 0, "v2": 42 }, "connections": { "v2": 3 } },
   "oldVersionsInUse": ["v1"],
-  "job": { "status": "running", "phase": "history",
+  "job": { "status": "running", "phase": "secrets",
            "startedAt": "2026-10-02T03:00:00.000Z", "completedAt": null }
 } }
 ```
 
-`activeVersion` is `null` until the first scheduled tick registers the key (and until migration 0006 is applied the route returns `500 INTERNAL_ERROR`). `job` is the most recent rotation and is deployment-wide, so it carries only status, phase and timestamps (the row counts above are scoped to your organisation); it is `null` if no rotation has ever run.
+`activeVersion` is `null` until the first scheduled tick registers the key (and until migration 0006 is applied the route returns `500 INTERNAL_ERROR`). `job` is the most recent rotation and is deployment-wide, so it carries only status, phase and timestamps (the row counts above are scoped to your organisation); it is `null` if no rotation has ever run. `phase` is `secrets` or `connections`; a job that has not run since migration 0017 may still report the retired `history` phase, which the engine treats as "start again from `secrets`".
+
+`rows` carried a third entry, `history`, until migration 0017 dropped `secret_history` (issue #84). It is gone rather than reported as a permanent zero.
 
 ---
 
@@ -679,8 +686,9 @@ These are real quirks of the current API, documented rather than hidden:
   currently rejected as exceeding the plan limit; use `null`.
 - **API-key DELETE** removes the row, while the scanner soft-revokes (`revoked_at`); `revokedAt` in the list
   is therefore only set for scanner-revoked keys.
-- **Secret history** is recorded but not readable through the API, and there is no endpoint to
-  list or restore a previous version.
+- **Previous secret values are not retained at all** (issue #84, migration 0017). There is no
+  version list and no restore, and unlike before there is nothing stored that such an endpoint
+  could be built on later without first writing the retention and purge to go with it.
 - **Audit export is unreachable in practice.** It requires the `team` or `enterprise` plan, and
   with no billing every organisation is on `free` forever — so `GET /api/audit/export` returns
   403 `PLAN_UPGRADE_REQUIRED` for every real caller today.

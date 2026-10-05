@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { call, createTestEnv, seedEnvironment, seedProject, seedUser, type Role } from './helpers/env'
-import { auditActions, seedSecretWithHistory } from './helpers/projects-seed'
+import { auditActions, seedSecretWithRevisions } from './helpers/projects-seed'
 
 async function setup() {
   const env = createTestEnv()
@@ -129,28 +129,27 @@ describe('project delete', () => {
 
     const projectId = await seedProject(env, owner.orgId, 'Doomed')
     const envId = await seedEnvironment(env, projectId)
-    const a = await seedSecretWithHistory(env, projectId, envId)
-    const b = await seedSecretWithHistory(env, projectId, envId)
+    const a = await seedSecretWithRevisions(env, projectId, envId)
+    const b = await seedSecretWithRevisions(env, projectId, envId)
 
     const otherProject = await seedProject(env, other.orgId, 'Safe')
     const otherEnv = await seedEnvironment(env, otherProject)
-    const keep = await seedSecretWithHistory(env, otherProject, otherEnv)
+    const keep = await seedSecretWithRevisions(env, otherProject, otherEnv)
 
     const res = await call(env, 'DELETE', `/api/projects/${projectId}`, { token: owner.token })
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data: { deleted: true } })
 
-    for (const k of [a.secretKey, a.historyKey, b.secretKey, b.historyKey]) {
+    // Every revision of both doomed secrets, including the pre-0014 unversioned key.
+    for (const k of [...a.blobKeys, ...b.blobKeys]) {
       expect(env.SECRETS_KV.store.has(k)).toBe(false)
     }
-    expect(env.SECRETS_KV.store.has(keep.secretKey)).toBe(true)
-    expect(env.SECRETS_KV.store.has(keep.historyKey)).toBe(true)
+    for (const k of keep.blobKeys) expect(env.SECRETS_KV.store.has(k)).toBe(true)
 
     const count = async (sql: string, ...p: string[]) =>
       (await env.DB.prepare(sql).bind(...p).first<{ n: number }>())!.n
     expect(await count('SELECT COUNT(*) AS n FROM secrets WHERE project_id = ?', projectId)).toBe(0)
     expect(await count('SELECT COUNT(*) AS n FROM environments WHERE project_id = ?', projectId)).toBe(0)
-    expect(await count('SELECT COUNT(*) AS n FROM secret_history WHERE secret_id IN (?, ?)', a.secretId, b.secretId)).toBe(0)
     expect(await count('SELECT COUNT(*) AS n FROM secrets WHERE project_id = ?', otherProject)).toBe(1)
 
     expect(await auditActions(env, owner.orgId, projectId)).toEqual(['project.delete'])
@@ -160,7 +159,7 @@ describe('project delete', () => {
     const { env, owner } = await setup()
     const projectId = await seedProject(env, owner.orgId)
     const envId = await seedEnvironment(env, projectId)
-    await seedSecretWithHistory(env, projectId, envId)
+    await seedSecretWithRevisions(env, projectId, envId)
     env.SECRETS_KV.delete = async () => { throw new Error('kv down') }
     const res = await call(env, 'DELETE', `/api/projects/${projectId}`, { token: owner.token })
     expect(res.status).toBe(200)
@@ -172,11 +171,10 @@ describe('project delete', () => {
     const other = await seedUser(env, { role: 'owner' })
     const projectId = await seedProject(env, other.orgId)
     const envId = await seedEnvironment(env, projectId)
-    const s = await seedSecretWithHistory(env, projectId, envId)
+    const s = await seedSecretWithRevisions(env, projectId, envId)
     const res = await call(env, 'DELETE', `/api/projects/${projectId}`, { token: owner.token })
     expect(res.status).toBe(404)
-    expect(env.SECRETS_KV.store.has(s.secretKey)).toBe(true)
-    expect(env.SECRETS_KV.store.has(s.historyKey)).toBe(true)
+    for (const k of s.blobKeys) expect(env.SECRETS_KV.store.has(k)).toBe(true)
   })
 })
 

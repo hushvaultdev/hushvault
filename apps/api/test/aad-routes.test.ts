@@ -23,8 +23,9 @@ describe('AAD binding through the API', () => {
     expect((await read('K', prod)).body.data.value).toBe('v1')
     await call(env, 'PATCH', `/api/secrets/${created.body.data.id}`, { token: owner.token, json: { value: 'v2' } })
     expect((await read('K', prod)).body.data.value).toBe('v2')
-    const hist = await env.DB.prepare('SELECT enc_version FROM secret_history WHERE secret_id = ?').bind(created.body.data.id).first<{ enc_version: number }>()
-    expect(hist?.enc_version).toBe(2)
+    // The replacement is re-encrypted as v2 too; there is no history row to check since #84.
+    const after = await env.DB.prepare('SELECT enc_version FROM secrets WHERE id = ?').bind(created.body.data.id).first<{ enc_version: number }>()
+    expect(after?.enc_version).toBe(2)
   })
 
   it('ATTACK: moving a prod secret row (blob + wrapped DEK) into staging fails closed', async () => {

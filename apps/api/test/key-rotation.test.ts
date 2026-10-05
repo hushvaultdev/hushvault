@@ -22,7 +22,7 @@ function ringOf(env: TestEnv, active: string): KeyRing {
   return loadKeyRing({ ...(env as unknown as { ENCRYPTION_MASTER_KEY: string }), ENCRYPTION_ACTIVE_KEY_VERSION: active })
 }
 
-/** Insert `n` secrets (+ one history row each) encrypted under `version` with real KV blobs. */
+/** Insert `n` secrets encrypted under `version` with real KV blobs. */
 async function seedMany(ctx: Ctx, n: number, version = 'v1') {
   const ring = ringOf(ctx.env, version)
   const expected = new Map<string, string>() // KV key -> plaintext
@@ -36,14 +36,6 @@ async function seedMany(ctx: Ctx, n: number, version = 'v1') {
       'INSERT INTO secrets (id, project_id, env_id, name, wrapped_dek, key_version, enc_version, is_computed, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 2, 0, ?, ?, ?)',
     ).bind(id, ctx.projectId, ctx.envId, `S_${i}`, w.wrappedDek, w.keyVersion, '[]', now, now).run()
     expected.set(`secret:${id}`, value)
-
-    const hid = createPrefixedId('sech')
-    const hv = `old-${i}-${crypto.randomUUID()}`
-    const hw = await encryptSecretWithRing(hv, ring, { projectId: ctx.projectId, envId: ctx.envId, secretId: id })
-    await ctx.env.SECRETS_KV.put(`secrethist:${hid}`, hw.encryptedValue)
-    await ctx.env.DB.prepare('INSERT INTO secret_history (id, secret_id, wrapped_dek, key_version, enc_version, changed_at) VALUES (?, ?, ?, ?, 2, ?)')
-      .bind(hid, id, hw.wrappedDek, hw.keyVersion, now).run()
-    expected.set(`secrethist:${hid}`, hv)
   }
   return expected
 }
@@ -53,10 +45,8 @@ type Row = { id: string; secret_id: string; project_id: string; env_id: string; 
 /** The central invariant: every row decrypts to its original value through the full ring. */
 async function assertAllDecryptable(ctx: Ctx, expected: Map<string, string>) {
   const ring = ringOf(ctx.env, 'v2')
-  const rows = [
-    ...(await ctx.env.DB.prepare('SELECT id, id AS secret_id, project_id, env_id, wrapped_dek, key_version, enc_version FROM secrets').all<Row>()).results.map((r) => ({ kv: `secret:${r.id}`, ...r })),
-    ...(await ctx.env.DB.prepare('SELECT h.id, h.secret_id, s.project_id, s.env_id, h.wrapped_dek, h.key_version, h.enc_version FROM secret_history h JOIN secrets s ON s.id = h.secret_id').all<Row>()).results.map((r) => ({ kv: `secrethist:${r.id}`, ...r })),
-  ]
+  const rows = (await ctx.env.DB.prepare('SELECT id, id AS secret_id, project_id, env_id, wrapped_dek, key_version, enc_version FROM secrets').all<Row>())
+    .results.map((r) => ({ kv: `secret:${r.id}`, ...r }))
   expect(rows.length).toBe(expected.size)
   for (const r of rows) {
     const blob = await ctx.env.SECRETS_KV.get(r.kv)
@@ -68,7 +58,7 @@ async function assertAllDecryptable(ctx: Ctx, expected: Map<string, string>) {
 
 async function versionCounts(ctx: Ctx) {
   const out: Record<string, number> = {}
-  for (const t of ['secrets', 'secret_history']) {
+  for (const t of ['secrets', 'integration_connections']) {
     const { results } = await ctx.env.DB.prepare(`SELECT key_version AS v, count(*) AS n FROM ${t} GROUP BY key_version`).all<{ v: string; n: number }>()
     for (const r of results) out[`${t}:${r.v}`] = r.n
   }
@@ -123,7 +113,7 @@ describe('key rotation engine', () => {
     expect(reads.every((q) => /LIMIT 1/.test(q) && /encryption_keys|key_rotations/.test(q))).toBe(true)
   })
 
-  it('rotates every secret and history row v1 -> v2 without touching KV, then finds nothing more to do', async () => {
+  it('rotates every secret row v1 -> v2 without touching KV, then finds nothing more to do', async () => {
     const ctx = await setup()
     const expected = await seedMany(ctx, 250)
     const kvBefore = new Map([...ctx.env.SECRETS_KV.store].filter(([k]) => k.startsWith('secret')))
@@ -134,7 +124,7 @@ describe('key rotation engine', () => {
     expect(results[0]).toMatchObject({ state: 'activated', from: 'v1', to: 'v2' })
     expect(results.at(-1)).toEqual({ state: 'completed', failed: 0 })
 
-    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 250, 'secret_history:v2': 250 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 250 })
     for (const [k, v] of kvBefore) expect(ctx.env.SECRETS_KV.store.get(k)).toBe(v) // KV byte-identical
     await assertAllDecryptable(ctx, expected)
 
@@ -186,7 +176,7 @@ describe('key rotation engine', () => {
       }
       restore()
       expect(completed).toBe(true)
-      expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 40, 'secret_history:v2': 40 })
+      expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 40 })
     }
   })
 
@@ -230,7 +220,7 @@ describe('key rotation engine', () => {
     ctx.env['ENCRYPTION_KEY_V2'] = b64() // operator typo / wrong key
     activate(ctx.env, 'v2')
     expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_CHECK_FAILED' })
-    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 3, 'secret_history:v1': 3 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 3 })
     expect((await ctx.env.DB.prepare('SELECT count(*) AS n FROM key_rotations').first<{ n: number }>())!.n).toBe(0)
     const active = await ctx.env.DB.prepare("SELECT version FROM encryption_keys WHERE status = 'active'").first<{ version: string }>()
     expect(active!.version).toBe('v1')
@@ -242,7 +232,7 @@ describe('key rotation engine', () => {
     await rotationTick(ctx.env as never)
     activate(ctx.env, 'v2')
     expect(await rotationTick(ctx.env as never)).toEqual({ state: 'error', code: 'KEY_VERSION_UNAVAILABLE' })
-    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 2, 'secret_history:v1': 2 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 2 })
   })
 
   it('holds the job (does not fail it) when a key disappears mid-rotation, and resumes when it returns', async () => {
@@ -263,7 +253,7 @@ describe('key rotation engine', () => {
     ctx.env['ENCRYPTION_KEY_V2'] = v2Key // operator fixes the deployment
     const results = await runToEnd(ctx.env, { batchSize: 10 })
     expect(results.at(-1)).toEqual({ state: 'completed', failed: 0 })
-    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 30, 'secret_history:v2': 30 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 30 })
     await assertAllDecryptable(ctx, expected)
   })
 
@@ -287,7 +277,7 @@ describe('key rotation engine', () => {
     expect(results[0]).toEqual({ state: 'bootstrapped', version: 'v1' })
     expect(results[1]).toMatchObject({ state: 'activated', from: 'v1', to: 'v2' })
     expect(results.at(-1)).toEqual({ state: 'completed', failed: 0 })
-    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 12, 'secret_history:v2': 12 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 12 })
     await assertAllDecryptable(ctx, expected)
   })
 
@@ -314,7 +304,7 @@ describe('key rotation engine', () => {
       } as unknown as TestEnv['DB']
       return { sql, restore: () => { env.DB = real } }
     }
-    const scans = (sql: string[]) => sql.filter((q) => /FROM secrets|FROM secret_history|FROM integration_connections/.test(q))
+    const scans = (sql: string[]) => sql.filter((q) => /FROM secrets|FROM integration_connections/.test(q))
 
     it('records the failure and skips the scans entirely on the next tick', async () => {
       const ctx = await setup()
@@ -470,10 +460,34 @@ describe('key rotation engine', () => {
     expect(r).toMatchObject({ state: 'activated', from: 'v2', to: 'v1' })
     const results = await runToEnd(ctx.env, { batchSize: 10 })
     expect(results.at(-1)).toEqual({ state: 'completed', failed: 0 })
-    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 30, 'secret_history:v1': 30 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 30 })
     await assertAllDecryptable(ctx, expected)
     const statuses = await ctx.env.DB.prepare('SELECT status, count(*) AS n FROM key_rotations GROUP BY status ORDER BY status').all()
     expect(statuses.results).toEqual([{ status: 'completed', n: 1 }, { status: 'paused', n: 1 }])
+  })
+
+  // Issue #84: the `history` phase is gone. A rotation could be stored mid-flight on it when
+  // that deploys, and the engine must neither wedge nor skip a table. Migration 0017 rewrites
+  // the stored value, so this covers the belt rather than the braces: the phase as the code
+  // finds it before (or without) the migration.
+  it('finishes a job left mid-flight on the removed history phase', async () => {
+    const ctx = await setup()
+    const expected = await seedMany(ctx, 6)
+    await rotationTick(ctx.env as never)
+    activate(ctx.env, 'v2')
+    await rotationTick(ctx.env as never, { batchSize: 100 }) // activate
+    await rotationTick(ctx.env as never, { batchSize: 100 }) // secrets phase runs to the end
+
+    // Exactly the state 0017 can land on: the secrets phase done, the cursor at its end, and the
+    // job parked on a phase this build does not have. (The CHECK still permits the value.)
+    await ctx.env.DB.prepare("UPDATE key_rotations SET phase = 'history' WHERE status = 'running'").run()
+
+    const results = await runToEnd(ctx.env, { batchSize: 100, maxTicks: 10 })
+    expect(results.at(-1)).toEqual({ state: 'completed', failed: 0 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v2': 6 })
+    await assertAllDecryptable(ctx, expected)
+    const job = await ctx.env.DB.prepare('SELECT status, phase FROM key_rotations').first<{ status: string; phase: string }>()
+    expect(job).toEqual({ status: 'completed', phase: 'connections' })
   })
 
   it('does not run twice concurrently (lease)', async () => {
@@ -484,7 +498,7 @@ describe('key rotation engine', () => {
     await rotationTick(ctx.env as never) // activation
     await ctx.env.DB.prepare("UPDATE key_rotations SET lease_until = '2999-01-01T00:00:00.000Z', lease_owner = 'someone-else'").run()
     expect(await rotationTick(ctx.env as never)).toEqual({ state: 'busy' })
-    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 5, 'secret_history:v1': 5 })
+    expect(await versionCounts(ctx)).toEqual({ 'secrets:v1': 5 })
   })
 
   it('reports an error instead of throwing when migration 0006 has not been applied', async () => {

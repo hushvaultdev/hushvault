@@ -6,9 +6,11 @@ describe('migrations', () => {
     const env = createTestEnv()
     const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all<{ name: string }>()
     const tables = results.map((r) => r.name)
-    for (const t of ['users', 'api_keys', 'organisations', 'members', 'projects', 'environments', 'secrets', 'secret_history', 'share_links', 'audit_log', 'encryption_keys', 'key_rotations', 'key_rotation_failures', 'auth_tokens', 'refresh_tokens']) {
+    for (const t of ['users', 'api_keys', 'organisations', 'members', 'projects', 'environments', 'secrets', 'share_links', 'audit_log', 'encryption_keys', 'key_rotations', 'key_rotation_failures', 'auth_tokens', 'refresh_tokens']) {
       expect(tables).toContain(t)
     }
+    // 0017 dropped it (issue #84); 0000 still creates it, so this asserts the drop actually ran.
+    expect(tables).not.toContain('secret_history')
   })
 
   it('includes columns added by the ALTER migrations', async () => {
@@ -100,6 +102,31 @@ describe('migrations', () => {
     env.DB.sqlite.exec(readFileSync(join(__dirname, '../migrations/0016_cron_bookkeeping.sql'), 'utf8'))
     expect((await env.DB.prepare('SELECT value AS v FROM system_state').all<{ v: string }>()).results).toEqual([{ v: 'v' }])
     expect((await env.DB.prepare('SELECT count(*) AS n FROM orphan_blob_candidates').first<{ n: number }>())!.n).toBe(1)
+  })
+
+  it('0017 drops secret_history and the retired rotation cursor, keeping single flight', async () => {
+    const env = createTestEnv()
+    const cols = (await env.DB.prepare('PRAGMA table_info(key_rotations)').all<{ name: string }>()).results.map((r) => r.name)
+    expect(cols).not.toContain('history_cursor')
+    expect(cols).toEqual(expect.arrayContaining(['secrets_cursor', 'connections_cursor', 'phase']))
+
+    // The partial unique index must survive DROP COLUMN, or single flight is silently lost.
+    const now = new Date().toISOString()
+    const insert = (id: string, status: string) =>
+      env.DB.prepare("INSERT INTO key_rotations (id, from_version, to_version, status, started_at, updated_at) VALUES (?, 'v1', 'v2', ?, ?, ?)").bind(id, status, now, now)
+    await insert('r1', 'running').run()
+    await expect(insert('r2', 'running').run()).rejects.toThrow(/UNIQUE/i)
+
+    // The CHECK is deliberately not narrowed, so the retired phase name is still accepted; the
+    // migration's UPDATE is what stops a stored job sitting on it.
+    await env.DB.prepare("UPDATE key_rotations SET phase = 'history' WHERE id = 'r1'").run()
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const sql = readFileSync(join(__dirname, '../migrations/0017_drop_secret_history.sql'), 'utf8')
+    // Re-apply only the re-runnable part; DROP COLUMN has no IF EXISTS (see the file header).
+    env.DB.sqlite.exec(sql.split('ALTER TABLE key_rotations DROP COLUMN')[0]!)
+    expect(await env.DB.prepare("SELECT phase FROM key_rotations WHERE id = 'r1'").first<{ phase: string }>())
+      .toEqual({ phase: 'connections' })
   })
 
   it('0006 is safe to apply twice and enforces a single running rotation', async () => {

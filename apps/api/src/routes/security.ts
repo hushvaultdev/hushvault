@@ -16,20 +16,18 @@ router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
   const secretRows = await c.env.DB.prepare(
     'SELECT s.key_version AS version, count(*) AS n FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE p.org_id = ? GROUP BY s.key_version',
   ).bind(auth.orgId).all<{ version: string; n: number }>()
-  const historyRows = await c.env.DB.prepare(
-    'SELECT h.key_version AS version, count(*) AS n FROM secret_history h INNER JOIN secrets s ON s.id = h.secret_id INNER JOIN projects p ON p.id = s.project_id WHERE p.org_id = ? GROUP BY h.key_version',
-  ).bind(auth.orgId).all<{ version: string; n: number }>()
 
   const connectionRows = await c.env.DB.prepare(
     'SELECT key_version AS version, count(*) AS n FROM integration_connections WHERE org_id = ? GROUP BY key_version',
   ).bind(auth.orgId).all<{ version: string; n: number }>()
 
+  // `rows` used to carry a third entry, `history`, counting `secret_history` by key version.
+  // That table was write-only and is gone (issue #84, migration 0017), so the field is gone with
+  // it rather than being reported as a permanent zero.
   const secrets: Record<string, number> = {}
-  const history: Record<string, number> = {}
   const connections: Record<string, number> = {}
   for (const r of connectionRows.results ?? []) connections[r.version] = r.n
   for (const r of secretRows.results ?? []) secrets[r.version] = r.n
-  for (const r of historyRows.results ?? []) history[r.version] = r.n
 
   // Rows still on the pre-AAD blob format (enc_version 1). Rotation re-wraps their DEK and
   // advances key_version without adding an AAD tag — correctly, because the tag belongs to the
@@ -39,9 +37,6 @@ router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
   // before flipping the flag.
   const legacySecrets = await c.env.DB.prepare(
     'SELECT count(*) AS n FROM secrets s INNER JOIN projects p ON p.id = s.project_id WHERE p.org_id = ? AND s.enc_version = 1',
-  ).bind(auth.orgId).first<{ n: number }>()
-  const legacyHistory = await c.env.DB.prepare(
-    'SELECT count(*) AS n FROM secret_history h INNER JOIN secrets s ON s.id = h.secret_id INNER JOIN projects p ON p.id = s.project_id WHERE p.org_id = ? AND h.enc_version = 1',
   ).bind(auth.orgId).first<{ n: number }>()
 
   // Quarantined rows from the latest job: a row the engine could not re-wrap stays on its old
@@ -61,15 +56,15 @@ router.get('/key-rotation', requireAuth, requireRole('admin'), async (c) => {
     failureCodes = (failures.results ?? []).map((r) => r.code).sort()
   }
 
-  const versionsInUse = new Set([...Object.keys(secrets), ...Object.keys(history), ...Object.keys(connections)])
+  const versionsInUse = new Set([...Object.keys(secrets), ...Object.keys(connections)])
   const oldVersionsInUse = [...versionsInUse].filter((v) => v !== active?.version).sort()
 
-  const legacyEncVersionRows = (legacySecrets?.n ?? 0) + (legacyHistory?.n ?? 0)
+  const legacyEncVersionRows = legacySecrets?.n ?? 0
 
   return c.json({
     data: {
       activeVersion: active?.version ?? null,
-      rows: { secrets, history, connections },
+      rows: { secrets, connections },
       oldVersionsInUse,
       /** Rows still on enc_version 1. ENFORCE_AAD will refuse these, so it must stay off until 0. */
       legacyEncVersionRows,
