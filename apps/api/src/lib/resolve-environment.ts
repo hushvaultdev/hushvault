@@ -5,15 +5,9 @@ import { KeyRingError, decryptSecretWithRing, loadKeyRing } from '../crypto/enve
 import type { Env } from '../index'
 import { describeComputedError, evaluateSecrets, type ComputedError } from './resolve'
 import { logEvent, logKeyRingError } from './security'
-import { secretBlobKey } from './secret-blobs'
+import { readSecretBlobs, secretBlobKey } from './secret-blobs'
 
 export const MAX_INHERITANCE_DEPTH = 10
-
-/**
- * Workers allows a small number of simultaneous outgoing connections per invocation, so a
- * wider fan-out queues rather than going faster.
- */
-const KV_READ_CONCURRENCY = 6
 
 type SecretRow = { id: string; env_id: string; name: string; is_computed: number; template: string | null; wrapped_dek: string; key_version: string; enc_version: number; blob_rev: number }
 
@@ -81,22 +75,20 @@ export async function resolveEnvironment(env: Env, orgId: string, environmentId:
     try {
       const ring = loadKeyRing(env)
       // This is the hot path for `hv run`, a CI pull and every sync run. One awaited KV read
-      // per secret made the request's latency the sum of them all and spent one subrequest
-      // each, so a large environment could run into Cloudflare's per-invocation subrequest
-      // ceiling. Fetch in bounded batches instead: concurrent enough to collapse the latency,
-      // small enough to stay under the simultaneous-connection limit.
+      // per secret made the request's latency the sum of them all and spent one operation
+      // each, so a large environment could run into Cloudflare's per-invocation ceiling on
+      // operations to external services. readSecretBlobs uses KV's bulk read, which counts
+      // as ONE operation per chunk of 100 keys and ignores the simultaneous-connection
+      // limit, and falls back to bounded batches on a binding without it.
       const toFetch = selected.filter((row) => !row.is_computed)
-      for (let i = 0; i < toFetch.length; i += KV_READ_CONCURRENCY) {
-        const batch = toFetch.slice(i, i + KV_READ_CONCURRENCY)
-        const blobs = await Promise.all(batch.map((row) => env.SECRETS_KV.get(secretBlobKey(row.id, row.blob_rev))))
-        for (const [index, row] of batch.entries()) {
-          const blob = blobs[index]
-          if (blob === null || blob === undefined) throw new Error('missing blob')
-          plain.set(row.name, await decryptSecretWithRing(
-            blob, row.wrapped_dek, row.key_version, ring,
-            { projectId: environment.project_id, envId: row.env_id, secretId: row.id }, row.enc_version,
-          ))
-        }
+      const blobs = await readSecretBlobs(env.SECRETS_KV, toFetch.map((row) => secretBlobKey(row.id, row.blob_rev)))
+      for (const row of toFetch) {
+        const blob = blobs.get(secretBlobKey(row.id, row.blob_rev))
+        if (blob === null || blob === undefined) throw new Error('missing blob')
+        plain.set(row.name, await decryptSecretWithRing(
+          blob, row.wrapped_dek, row.key_version, ring,
+          { projectId: environment.project_id, envId: row.env_id, secretId: row.id }, row.enc_version,
+        ))
       }
     } catch (err) {
       logKeyRingError(err)

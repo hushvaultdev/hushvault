@@ -418,3 +418,28 @@ export const oidcRepoRules = sqliteTable('oidc_repo_rules', {
   // for table constraints, so the drift test compares this predicate against the replayed DDL.
   check('oidc_repo_rules_one_constraint', sql`(ref IS NOT NULL) <> (environment IS NOT NULL)`),
 ])
+
+// ─────────────────────────────────────────────
+// Cron bookkeeping (migration 0016, issue #87)
+// ─────────────────────────────────────────────
+
+/**
+ * Small keyed scratchpad for state the minute cron needs between ticks: the last failed
+ * key-rotation bootstrap attempt, and the orphaned-blob sweep's KV list cursor. Nothing
+ * secret is ever stored here.
+ */
+export const systemState = sqliteTable('system_state', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: text('updated_at').notNull(),
+})
+
+/**
+ * First time a `secret:` KV blob was seen with no live row pointing at it. The orphaned-blob
+ * sweep only deletes a blob still unreferenced a grace period after this, which is what keeps
+ * it from deleting a blob whose row is about to be committed. See lib/housekeeping.ts.
+ */
+export const orphanBlobCandidates = sqliteTable('orphan_blob_candidates', {
+  kvKey: text('kv_key').primaryKey(),
+  firstSeenAt: text('first_seen_at').notNull(),
+}, (t) => [index('orphan_blob_candidates_seen_idx').on(t.firstSeenAt)])
