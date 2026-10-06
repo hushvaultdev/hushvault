@@ -152,19 +152,28 @@ IDs into the matching `[env.*]` block. Never share a D1 or KV between dev and pr
 
 ### 2. Create the four Workers and connect the repo
 
-**State as of 2026-10-06 (issue #93): no Worker is building from Git.** Every deployment
-on all four Workers reads `Source: Unknown (deployment)` or `Secret Change` in
-`wrangler deployments list --env <env>` — not one is Workers-Builds-sourced, and pushes to
-`dev` and `main` through `f3929dc` produced no build. The Workers were created by
-`wrangler deploy`, not by "Import a repository", so the Git connection the rest of this
-section describes has never existed. Both environments' APIs were deployed by hand on
-2026-10-06; both dashboards are still the 2026-10-02 build.
+**State as of 2026-10-06 (issue #93): all four Workers ARE connected to
+`hushvaultdev/hushvault`, and every one of them reports "Latest build failed."**
 
-**Connecting the repository cannot be scripted, and cannot be done from a Claude Code
-session.** It needs the Cloudflare dashboard's GitHub (or GitLab) authorization flow,
-which links a Git account to the Cloudflare account and installs the Cloudflare app on
-the repository; an account-scoped API token cannot stand in for that. The click path is
-below, and it is the only way in.
+An earlier version of this section claimed the repository had never been connected. That
+was wrong, and the reasoning that produced it is worth recording so nobody repeats it:
+every deployment reads `Source: Unknown (deployment)` or `Secret Change` in
+`wrangler deployments list`, and the deployed versions were days old. Both facts are
+equally explained by "connected, but every build fails" — a failed build never deploys,
+so it never leaves a Workers-Builds-sourced deployment behind. Deployment source is
+evidence about *successful* builds only; it says nothing about whether a connection
+exists. The Worker's **Settings > Builds** page, or the build history on the card in
+**Workers & Pages**, is what actually answers that.
+
+So the task is not to connect anything. It is to read the failing build's log and fix the
+build settings, which live in the dashboard and not in this repository.
+
+**Build logs cannot be read from a Claude Code session.** The Workers Builds REST API
+(`GET /builds/workers/{worker_tag}/builds`, `GET /builds/builds/{uuid}/logs` —
+<https://developers.cloudflare.com/workers/ci-cd/builds/api-reference/>) answers **403
+`Forbidden` (code 12004)** with the credential available to such a session, even though
+the same credential can list Workers and read their tags. Paste the failing step's output
+instead.
 
 Two credential limits found while deploying by hand, worth knowing before trusting a
 build token:
@@ -179,12 +188,12 @@ build token:
   zone, which is in the default generated token's list but must be present on any
   replacement.
 
-All four Workers already exist, so this is the **connect an existing Worker** flow, not
-"Import a repository" (that one creates a new Worker and would collide on the name):
+The repository is already connected to all four Workers, so this is the **review the
+settings** path, not a connect flow (and never "Import a repository" — that creates a new
+Worker and would collide on the name):
 
-1. **Workers & Pages** > select the Worker > **Settings** > **Builds** > **Connect**, and
-   authorize GitHub for the `hushvaultdev` account on the first Worker (the later three
-   reuse the authorization).
+1. **Workers & Pages** > select the Worker > **Settings** > **Builds**, and open the
+   failing build to read which step failed.
 2. Set **Git branch** to the row's branch, **Root directory** to the row's directory, and
    the **build** and **deploy** commands exactly as in the table — including `--env`,
    which the `deploy:*` scripts already carry.
