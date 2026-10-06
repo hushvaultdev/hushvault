@@ -54,12 +54,28 @@ Per Worker, in the dashboard under **Settings > Build** (verify these field name
 in the dashboard; the docs list: build command, deploy command, preview command,
 root directory, API token, build variables and secrets):
 
-| Worker | Build command | Deploy command |
-|---|---|---|
-| `hushvault-api-dev` | `pnpm install --frozen-lockfile && pnpm run verify` | `pnpm run deploy:dev` |
-| `hushvault-api` | `pnpm install --frozen-lockfile && pnpm run verify` | `pnpm run deploy:production` |
-| `hushvault-web-dev` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:dev` |
-| `hushvault-web` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:production` |
+| Worker | Root directory | Branch | Build command | Deploy command |
+|---|---|---|---|---|
+| `hushvault-api-dev` | `apps/api` | `dev` | `pnpm install --frozen-lockfile && pnpm run verify` | `pnpm run deploy:dev:code-only` |
+| `hushvault-api` | `apps/api` | `main` | `pnpm install --frozen-lockfile && pnpm run verify` | `pnpm run deploy:production:code-only` |
+| `hushvault-web-dev` | `apps/web` | `dev` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:dev` |
+| `hushvault-web` | `apps/web` | `main` | `pnpm install --frozen-lockfile && pnpm run verify && pnpm run build:cf` | `pnpm run deploy:production` |
+
+**The API deploy commands are the `:code-only` ones on purpose. A build must never
+apply migrations.** Two independent reasons, the second learned the hard way:
+
+1. The build token does not have D1 (see "The deploy token and D1 migrations" below),
+   so the migrate step would fail the build and nothing would deploy.
+2. **A migration that removes something has to be applied *after* its deploy, not
+   before** — `0017_drop_secret_history.sql` drops a table the previously deployed
+   Worker still queries, so applying it as part of the same build would have broken
+   `PATCH`/`DELETE /api/secrets/:id`, `DELETE /api/projects/:id` and the rotation cron
+   for the seconds-to-minutes until the new code went live. Coupling schema to the
+   push removes the human's chance to order those two steps. See "## Migrations".
+
+So: pushes deploy code; a person applies migrations with
+`pnpm --filter @hushvault/api db:migrate:dev` / `db:migrate:production`, before or
+after the deploy as that migration requires.
 
 - `verify` (API) runs type-check and the unit tests for the API, the packages it
   depends on, and the GitHub Action in `apps/secrets-action`; (web) type-check, lint
@@ -75,6 +91,26 @@ root directory, API token, build variables and secrets):
   no Worker of its own, so its tests ride the API `verify` and only run when the API
   build does. Without that watch path, an action-only change ships untested.
 - Web only: set the **build variable** `NEXT_PUBLIC_API_URL` (inlined at build time).
+  It is a **build** variable, not a runtime one: an unset value silently bakes
+  `http://127.0.0.1:8787` into both the client bundle and the CSP `connect-src`, and the
+  deployed dashboard then cannot reach the API at all. Verified by building locally: with
+  the variable set, the origin appears in `.open-next/assets/_next/static/chunks/*.js`
+  and in `connect-src` inside `.open-next/middleware/handler.mjs`.
+- **The dashboard Worker name must match the `name` in the Wrangler config at the root
+  directory, or the build fails**
+  (<https://developers.cloudflare.com/workers/ci-cd/builds/>, "Caution"). With Wrangler
+  environments the deploy command carries `--env`, and the documented pattern is one
+  Worker per environment named `<name>-<env>`
+  (<https://developers.cloudflare.com/workers/ci-cd/builds/advanced-setups/#wrangler-environments>).
+  This repo does not follow that naming everywhere: `apps/api/wrangler.toml` is
+  `name = "hushvault-api"` with `[env.dev] name = "hushvault-api-dev"`, and
+  `apps/web/wrangler.toml` is `name = "hushvault-web-local"` with
+  `[env.dev] name = "hushvault-web-dev"` and `[env.production] name = "hushvault-web"`.
+  The top-level web name is deliberately a local-only name so that a bare
+  `wrangler deploy` cannot clobber production. Whether the build's name check reads the
+  top-level `name` or the one the `--env` flag resolves to is **not verified**. If the
+  first build fails on a name mismatch, that is the cause, and the fix is to set the
+  top-level `name` to the Worker being connected rather than to drop `--env`.
 - Node: Workers Builds defaults to Node 24.18.0 and preinstalls 22.23.2 and 24.18.0;
   `.nvmrc` in this repo pins major `22`. The API tests use `node:sqlite`
   (Node >= 22.13).
@@ -116,14 +152,62 @@ IDs into the matching `[env.*]` block. Never share a D1 or KV between dev and pr
 
 ### 2. Create the four Workers and connect the repo
 
-For each row of the table above: **Workers & Pages > Create application > Import a
-repository**, pick this repo, and name the Worker **exactly** as in the table. Then
-set root directory, production branch, build/deploy commands, watch paths and
-build variables as described above. (Dashboard flow per
-<https://developers.cloudflare.com/workers/ci-cd/builds/>; I could not drive the
-dashboard, so the click path is unverified.)
+**State as of 2026-10-06 (issue #93): no Worker is building from Git.** Every deployment
+on all four Workers reads `Source: Unknown (deployment)` or `Secret Change` in
+`wrangler deployments list --env <env>` — not one is Workers-Builds-sourced, and pushes to
+`dev` and `main` through `f3929dc` produced no build. The Workers were created by
+`wrangler deploy`, not by "Import a repository", so the Git connection the rest of this
+section describes has never existed. Both environments' APIs were deployed by hand on
+2026-10-06; both dashboards are still the 2026-10-02 build.
 
-Create the `dev` branch first (`git branch dev main && git push origin dev`).
+**Connecting the repository cannot be scripted, and cannot be done from a Claude Code
+session.** It needs the Cloudflare dashboard's GitHub (or GitLab) authorization flow,
+which links a Git account to the Cloudflare account and installs the Cloudflare app on
+the repository; an account-scoped API token cannot stand in for that. The click path is
+below, and it is the only way in.
+
+Two credential limits found while deploying by hand, worth knowing before trusting a
+build token:
+
+- `POST /accounts/<account>/workers/assets/upload` → **401** with the token available to
+  this session, so the web Workers (static assets via OpenNext) could not be deployed at
+  all. Workers Builds' own generated token includes Workers Scripts edit, which covers
+  asset upload; a hand-made token needs it too.
+- `PUT /zones/<zone>/workers/routes` → **"No access to the specified resource."** The API
+  Worker's code uploaded and deployed, but the `api.hushvault.dev` custom-domain route
+  could not be reconciled. A build token needs **Zone > Workers Routes > Edit** for the
+  zone, which is in the default generated token's list but must be present on any
+  replacement.
+
+All four Workers already exist, so this is the **connect an existing Worker** flow, not
+"Import a repository" (that one creates a new Worker and would collide on the name):
+
+1. **Workers & Pages** > select the Worker > **Settings** > **Builds** > **Connect**, and
+   authorize GitHub for the `hushvaultdev` account on the first Worker (the later three
+   reuse the authorization).
+2. Set **Git branch** to the row's branch, **Root directory** to the row's directory, and
+   the **build** and **deploy** commands exactly as in the table — including `--env`,
+   which the `deploy:*` scripts already carry.
+3. Add the **build watch paths** from the bullets above, and for the web Workers the
+   build variable `NEXT_PUBLIC_API_URL`.
+4. Push a commit to that branch to trigger the first build.
+
+Order they are worth connecting in: `hushvault-web-dev` first. The web Workers are the
+ones that cannot be deployed by hand from here at all, `dev` is the safe place to find
+out whether the name check and the pnpm-workspace install behave, and `main` and `dev`
+currently point at the same commit as the deployed API, so a first build there changes
+nothing but proves the pipeline.
+
+Two things to watch on that first build, neither verified in this repo:
+
+- **The pnpm workspace install.** The build command runs in **Root directory**
+  (`apps/web`), while the lockfile and `pnpm-workspace.yaml` are at the repository root.
+  `pnpm install --frozen-lockfile` from a package directory walks up to the workspace
+  root, so it should install the whole workspace — but whether Workers Builds' own
+  dependency detection interferes is untested. If it fails, make the build command
+  `cd ../.. && pnpm install --frozen-lockfile && pnpm --filter @hushvault/web run verify
+  && pnpm --filter @hushvault/web run build:cf`.
+- **The Worker name check** described above.
 
 ### 3. Set secrets (per environment, different values)
 

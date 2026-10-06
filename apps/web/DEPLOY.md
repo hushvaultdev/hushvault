@@ -30,6 +30,25 @@ OpenNext is the documented path for an existing Next 15 app with dynamic routes
 
 Worker names must match `apps/web/wrangler.toml` exactly. Root directory: `apps/web`.
 
+## Deploying by hand (and why it currently fails)
+
+`pnpm --filter @hushvault/web run build:cf` works anywhere, but
+`opennextjs-cloudflare deploy` needs to upload the static assets, and that call
+(`POST /accounts/<account>/workers/assets/upload`) is rejected with **401** by a token
+without Workers Scripts edit. As of 2026-10-06 neither web Worker has been deployed since
+2026-10-02 for this reason (issue #93), while both API Workers have. The dashboard
+therefore does not yet have the organisation switcher, members page or accept-invite page,
+even though the API behind them is live.
+
+Pass `NEXT_PUBLIC_API_URL` when building by hand — it is inlined at build time, and
+unset it bakes `http://127.0.0.1:8787` into the bundle and the CSP:
+
+```bash
+NEXT_PUBLIC_API_URL=https://api-beta.hushvault.dev pnpm --filter @hushvault/web run build:cf
+# then check it took:
+grep -rl api-beta.hushvault.dev apps/web/.open-next/assets/_next/static/chunks/*.js
+```
+
 ## Manual steps
 
 1. Create the two Workers via Workers & Pages > Import a repository (see DEPLOYMENT.md step 2).
