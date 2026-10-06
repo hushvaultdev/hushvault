@@ -1,0 +1,22 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    // This package's tests read files OUTSIDE the package: the copy lint scans the README,
+    // docs/INTEGRATIONS.md and every web source file for claims about integrations that are not
+    // shipped. Without these inputs turbo hashes only packages/shared, so a false claim added in
+    // apps/web leaves a stale PASS in the cache. That is exactly what happened on 2026-10-06:
+    // `pnpm --filter @hushvault/api run verify` reported green locally from cache while the
+    // Workers build, with a cold cache, failed on it.
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/README.md",
+        "$TURBO_ROOT$/docs/INTEGRATIONS.md",
+        "$TURBO_ROOT$/apps/web/src/**"
+      ]
+    }
+  }
+}
