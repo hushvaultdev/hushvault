@@ -485,7 +485,12 @@ orgMemberRoutes.get('/:id/members', requireAuth, requireHuman, requireOrgRole('v
 const NOT_LAST_OWNER = "(role <> 'owner' OR EXISTS ("
   + " SELECT 1 FROM members m2 WHERE m2.org_id = ? AND m2.role = 'owner' AND m2.user_id <> ?))"
 
-const LAST_OWNER_REFUSAL = {
+/**
+ * Exported so the whole-account deletion path (routes/account.ts, issue #81) refuses with the SAME
+ * rule and message when a departing user is the last owner of a shared organisation, rather than
+ * drifting a second copy of the wording.
+ */
+export const LAST_OWNER_REFUSAL = {
   error: 'LAST_OWNER',
   message: 'An organisation must keep an owner. Make someone else an owner first.',
 } as const

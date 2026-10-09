@@ -135,6 +135,7 @@ A window is aligned to the clock, so a caller can obtain up to 2× the limit acr
 | `auth-refresh` | `POST /api/auth/{refresh,logout}` | IP | 60 | 503 |
 | `auth-forgot` | `POST /api/auth/forgot-password`, verification resend | IP | 5 | 503 |
 | `auth-token-submit` | `POST /api/auth/{verify-email,reset-password}` | IP | 10 | 503 |
+| `account-delete` | `DELETE /api/account` | IP | 5 | 503 |
 | `org-create` | `POST /api/orgs` | IP | 5 | 503 |
 | `org-switch` | `POST /api/orgs/:id/switch` | IP | 60 | 503 |
 | `invite-create` | `POST /api/orgs/:id/invites` | **organisation** (the one in the path) | 20 | 503 |
@@ -348,6 +349,45 @@ Referer; the web pages POST it. Verification links last 24 h, reset links 60 min
 Configuration: `MAIL_FROM`, the `EMAIL` send_email binding (Cloudflare Email Service; without it mail is not sent
 and the flows still return their normal responses), `EMAIL_DAILY_BUDGET` (global sends per day, default 200) and
 `REQUIRE_VERIFIED_EMAIL` (when set, API-key creation and share-link creation both require a verified email).
+
+### DELETE /api/account
+
+Self-service account deletion / GDPR erasure. **Self-service only**: it deletes the CALLER's own
+account. There is no admin-initiated deletion of another user — that is not built.
+
+Auth: Bearer (user JWT) + a re-authentication step. `requireHuman`, so an **API key is refused**
+(`403 FORBIDDEN`) — a credential must not be able to delete its owner's account. Limited to 5/min
+per IP (`account-delete`, fails closed). The body re-confirms identity before anything is deleted:
+
+| Account type | Body | Refusal if missing/wrong |
+|--------------|------|--------------------------|
+| Password account | `{ "password": <current password> }` | `403 REAUTH_REQUIRED` (absent) / `403 REAUTH_FAILED` (wrong) |
+| OAuth-only account (no password) | `{ "confirmEmail": <your account email> }` (case-insensitive) | `403 REAUTH_REQUIRED` |
+
+What it does, after re-auth succeeds, for each organisation the caller belongs to:
+
+- **Sole member** → the organisation is erased: D1 cascades its projects, environments, secrets,
+  members, org-scoped API keys and refresh tokens, audit log, invitations, integration connections,
+  sync targets and their ledger/runs/outbox, and OIDC rules. The organisation's **KV secret blobs
+  are swept in the request** (a separate store no D1 cascade reaches), so no encrypted secret is
+  left orphaned.
+- **Shared, caller is the last owner** → the **whole deletion is refused** `409 LAST_OWNER` and
+  nothing is touched. Make someone else an owner first.
+- **Shared, caller is not the last owner** → only the caller's membership is removed (with their
+  refresh tokens and API keys for the account), and a `user.delete` audit row is written to that
+  organisation.
+
+The FK fix is in the application, not a migration: `integration_connections.created_by`,
+`sync_targets.created_by` and `oidc_repo_rules.created_by` reference `users(id)` with no
+`ON DELETE`, so they are nulled for the caller in the same `batch()` as the delete — the
+`NO ACTION` foreign key stays a safety property (see `.claude/rules/database-schema.md`).
+
+`200` `{ "data": { "deleted": true, "orgsErased": <count> } }`. The deletion is irreversible: it
+destroys every secret the erased organisations hold and their KV ciphertext, every integration
+connection (each the only copy of an outbound credential), all sync targets — so any secrets
+HushVault wrote to a provider are stranded there and can no longer be cleaned up remotely — and all
+OIDC rules (CI loses access). See `docs/OPERATIONS.md` § GDPR erasure for scope and what it does
+NOT reach.
 
 
 ## Organisations
@@ -1001,7 +1041,7 @@ Written by the API today: `auth.login`, `auth.login.github`, `auth.login.google`
 `org.switch_in`, `org.switch_out`, `org.invite.create`, `org.invite.sent`, `org.invite.revoke`,
 `org.invite.accept`, `org.member.role_change`, `org.member.remove`, `org.member.leave`, `project.create`,
 `project.update`, `project.delete`, `environment.create`, `secret.read`, `secret.read_bulk`, `secret.create`,
-`secret.update`, `secret.delete`, `share.create`. Not audited: registration, listing endpoints, share views.
+`secret.update`, `secret.delete`, `share.create`, `user.delete`. Not audited: registration, listing endpoints, share views.
 
 The invitation and membership rows carry `resource_type` `org_invite` (resource id `inv_...`) or `member`
 (resource id the member's `usr_...`), and `org.invite.sent` is the only one with `actor_type: system` — it
@@ -1016,6 +1056,12 @@ server-set keys. The populated ones today:
 - `org.invite.create` → `{ "role": <invited role> }`.
 - `org.invite.accept` → `{ "role": <role actually granted> }` (the existing role if the caller was
   already a member).
+- `user.delete` → `{ "self": true, "orgs_erased": <count> }` — self-service account deletion
+  (`DELETE /api/account`, issue #81). `resource_type` is `user` and `resource_id` is the deleted
+  user's id as a literal string; `actor_id` is `null` on the stored row, because deleting the user
+  nulls it (`audit_log.actor_id` is `ON DELETE SET NULL`), which is why the id is also carried in
+  `resource_id`. Written only to organisations that SURVIVE the deletion — an erased sole-member
+  org's audit log is cascaded away with it.
 
 Every other action leaves `metadata` `null`. It never carries a secret value, token, key or
 caller-supplied free text — the rule is `.claude/rules/audit-log.md`.
