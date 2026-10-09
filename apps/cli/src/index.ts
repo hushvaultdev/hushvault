@@ -2,6 +2,7 @@
 
 import { Command } from 'commander'
 import { loginCommand } from './commands/login.js'
+import { orgsCommand } from './commands/orgs.js'
 import { initCommand } from './commands/init.js'
 import { runCommand } from './commands/run.js'
 import { getCommand } from './commands/get.js'
@@ -19,6 +20,7 @@ program
   .alias('hv')
 
 program.addCommand(loginCommand)
+program.addCommand(orgsCommand)
 program.addCommand(initCommand)
 program.addCommand(runCommand)
 program.addCommand(getCommand)

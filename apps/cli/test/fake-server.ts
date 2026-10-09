@@ -19,6 +19,16 @@ export class FakeServer {
     { id: 'sec_2', project_id: 'prj_1', env_id: 'env_stg', name: 'OWN', value: 'own-val' },
   ]
   n = 0
+  /** Organisations the signed-in user belongs to; `currentOrgId` is the one the credential acts in. */
+  orgs: { id: string; name: string; slug: string; plan: string; role: string }[] = [
+    { id: 'org_1', name: 'Acme Inc', slug: 'acme', plan: 'pro', role: 'admin' },
+    { id: 'org_2', name: 'Side Project', slug: 'side', plan: 'free', role: 'member' },
+  ]
+  currentOrgId = 'org_1'
+  /** Incremented every time a switch rotates the refresh family, so tests can see the new token. */
+  switchCount = 0
+  /** When true, every switch answers 403 NOT_A_MEMBER (simulates a membership removed mid-flight). */
+  rejectSwitch = false
   /** Sync targets. Extra fields (apiToken, value, providerBody) simulate an over-sharing API; the CLI must never print them. */
   targets: Record<string, unknown>[] = [
     {
@@ -56,9 +66,34 @@ export class FakeServer {
 
     if (p === '/api/auth/login' && method === 'POST') {
       if (body.password !== 'pw') return this.json(401, { error: 'UNAUTHORIZED', message: 'Invalid credentials' })
-      return this.json(200, { data: { token: 'jwt-token', userId: 'usr_1', orgId: 'org_1', role: 'admin' } })
+      // The refresh token is returned only to the CLI (browsers get an HttpOnly cookie instead).
+      const refreshToken = headers['X-HushVault-Client'] === 'cli' ? 'refresh-login' : undefined
+      return this.json(200, { data: { token: 'jwt-token', userId: 'usr_1', orgId: this.currentOrgId, role: 'admin', refreshToken } })
     }
     if (!headers['Authorization']) return this.json(401, { error: 'UNAUTHORIZED', message: 'Missing token' })
+
+    if (p === '/api/orgs' && method === 'GET') {
+      const data = this.orgs.map((o) => ({ ...o, current: o.id === this.currentOrgId }))
+      return this.json(200, { data, currentOrgId: this.currentOrgId })
+    }
+    const sw = /^\/api\/orgs\/([^/]+)\/switch$/.exec(p)
+    if (sw && method === 'POST') {
+      // Switching is a human-only action: an API key (hv_...) is refused.
+      if (headers['Authorization']!.startsWith('Bearer hv_')) {
+        return this.json(403, { error: 'REQUIRES_HUMAN', message: 'An API key cannot switch organisations' })
+      }
+      const targetId = decodeURIComponent(sw[1]!)
+      const org = this.orgs.find((o) => o.id === targetId)
+      if (!org || this.rejectSwitch) return this.json(403, { error: 'NOT_A_MEMBER', message: 'You are not a member of that organisation' })
+      this.currentOrgId = targetId
+      this.switchCount += 1
+      // Login-shaped body; refreshToken is present because the CLI sends X-HushVault-Client: cli.
+      const refresh = headers['X-HushVault-Client'] === 'cli' ? `refresh-${targetId}-${this.switchCount}` : undefined
+      return this.json(200, {
+        data: { token: `access-${targetId}-${this.switchCount}`, orgId: targetId, role: org.role, userId: 'usr_1', refreshToken: refresh },
+      })
+    }
+
     // Management endpoints are JWT-only: API keys (hv_...) get 403.
     if (p.startsWith('/api/integrations')) {
       if (headers['Authorization']!.startsWith('Bearer hv_')) return this.json(403, { error: 'FORBIDDEN', message: 'API keys cannot manage integrations' })

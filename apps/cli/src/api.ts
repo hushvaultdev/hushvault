@@ -77,6 +77,16 @@ export interface ShareResult {
   url: string
 }
 
+export interface OrgRow {
+  id: string
+  name: string
+  slug: string
+  plan: string
+  role: string
+  /** True for the organisation the current credential acts in. */
+  current: boolean
+}
+
 // Sync DTOs mirror the contract in packages/shared/src/integrations.ts (SyncTargetDto, SyncPlanDto,
 // SyncRunDto). The CLI does not depend on @hushvault/shared, so the field names are copied here.
 // They carry names and counts only: never secret values or provider credentials.
@@ -132,6 +142,11 @@ export interface ClientOptions {
   token?: string | undefined
   /** Called once on a 401 for a keychain session; returns a fresh access token or null. */
   refresh?: (() => Promise<string | null>) | undefined
+  /**
+   * Name of the organisation the credential acts in. Only used to make a 404 diagnosable:
+   * a project or secret that "does not exist" may exist in an organisation you are NOT acting in.
+   */
+  orgLabel?: string | undefined
 }
 
 type Query = Record<string, string | undefined>
@@ -156,11 +171,13 @@ export class ApiClient {
   private readonly baseUrl: string
   private token: string | undefined
   private readonly refreshHook: (() => Promise<string | null>) | undefined
+  private readonly orgLabel: string | undefined
 
   constructor(options: ClientOptions) {
     this.baseUrl = normalizeApiUrl(options.apiUrl)
     this.token = options.token
     this.refreshHook = options.refresh
+    this.orgLabel = options.orgLabel
   }
 
   async request<T>(method: string, path: string, opts: { query?: Query; body?: unknown } = {}, retried = false): Promise<T> {
@@ -205,8 +222,14 @@ export class ApiClient {
       // Only the API's own `error` / `message` fields are surfaced, never the raw body.
       const obj = (typeof json === 'object' && json !== null ? json : {}) as Record<string, unknown>
       const code = typeof obj['error'] === 'string' ? obj['error'] : `HTTP_${res.status}`
-      const message =
+      let message =
         typeof obj['message'] === 'string' ? obj['message'].slice(0, MAX_MESSAGE) : res.statusText || `Request failed (${res.status})`
+      // A "no such project/secret" 404 is the worst version of the multi-org bug: the record can
+      // exist in an organisation the stored credential is NOT acting in. Name the current org so
+      // that case is diagnosable. Org names are not secret.
+      if (res.status === 404 && this.orgLabel) {
+        message += ` (current organisation: ${this.orgLabel}; if it exists in another organisation, run \`hushvault orgs use <id|slug>\` to switch)`
+      }
       throw new ApiError(res.status, code, message, code === 'SYNC_BLOCKED' ? obj['plan'] : undefined)
     }
 
@@ -228,6 +251,22 @@ export class ApiClient {
   /** Rotate a refresh token. Sent in the body (never a cookie), so no CSRF surface. */
   refreshSession(refreshToken: string): Promise<LoginResult> {
     return this.request('POST', '/api/auth/refresh', { body: { refreshToken } }, true)
+  }
+
+  /** Organisations the caller belongs to; each row flags whether the credential acts in it. */
+  listOrgs(): Promise<OrgRow[]> {
+    return this.request('GET', '/api/orgs')
+  }
+
+  /**
+   * Switch the session's organisation. Requires a signed-in human (not an API key). The refresh
+   * token (when known) is sent in the body so the server can revoke it; the response is login-shaped
+   * and carries a NEW refreshToken because the request identifies itself as the CLI. The switch
+   * rotates the refresh family, so the old refresh token is dead the moment this resolves.
+   */
+  switchOrg(id: string, refreshToken?: string): Promise<LoginResult> {
+    const body = refreshToken !== undefined ? { refreshToken } : {}
+    return this.request('POST', `/api/orgs/${encodeURIComponent(id)}/switch`, { body })
   }
 
   listProjects(): Promise<ProjectRow[]> {

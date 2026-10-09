@@ -40,7 +40,8 @@ export async function resolveApiUrl(explicit?: string, projectApiUrl?: string): 
  */
 export async function createAuthedClient(apiUrl: string): Promise<ApiClient> {
   const token = await getAuthToken()
-  if (process.env['HUSHVAULT_TOKEN']) return new ApiClient({ apiUrl, token })
+  const orgLabel = (await getGlobalConfig())['currentOrg']
+  if (process.env['HUSHVAULT_TOKEN']) return new ApiClient({ apiUrl, token, orgLabel })
   const refresh = async (): Promise<string | null> => {
     const stored = await getRefreshToken()
     if (!stored) return null
@@ -53,7 +54,7 @@ export async function createAuthedClient(apiUrl: string): Promise<ApiClient> {
       return null
     }
   }
-  return new ApiClient({ apiUrl, token, refresh })
+  return new ApiClient({ apiUrl, token, refresh, orgLabel })
 }
 
 /** Load .hushvault.json (walking up from cwd) and an authenticated client. */
@@ -102,5 +103,6 @@ export async function loadClient(cwd = process.cwd()): Promise<ApiClient> {
   const found = await findProjectConfig(cwd)
   const token = await getAuthToken()
   const apiUrl = await resolveApiUrl(undefined, found?.config.apiUrl)
-  return new ApiClient({ apiUrl, token })
+  const orgLabel = (await getGlobalConfig())['currentOrg']
+  return new ApiClient({ apiUrl, token, orgLabel })
 }
