@@ -1,0 +1,13 @@
+-- Issue #96: audit_log records THAT a role changed, not what it changed to.
+--
+-- Adds one nullable column so a role change can file the value it changed to, not merely who and
+-- whom. metadata holds a small, bounded, NON-SECRET JSON object of fixed keys set by the server —
+-- never a secret value, a DEK, a token, a key, or caller-supplied free text. The rule that keeps it
+-- that way is .claude/rules/audit-log.md; the column is trivial without it.
+--
+-- ADDITIVE and applied in the USUAL order — BEFORE the deploy. No statement in the currently
+-- deployed Worker names this column, and the writer leaves it NULL for every action it does not
+-- populate, so the old code keeps working unchanged against the migrated database. SQLite has no
+-- ADD COLUMN IF NOT EXISTS; wrangler's migration tracking runs this once (same as 0005/0007/0008).
+-- Not a reversal of order like 0017 — nothing is dropped or rebuilt.
+ALTER TABLE audit_log ADD COLUMN metadata TEXT;

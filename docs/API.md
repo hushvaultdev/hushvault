@@ -560,7 +560,8 @@ privileged; the dashboard hides the controls from non-admins but still shows the
 Auth, `admin` of `:id`. Scope `member-write` (per **organisation**). Body: `role`.
 
 `200` `{ "data": { "userId", "role" } }`. Setting the role it already has is a no-op: `200`, no write, no audit
-row. Audited `org.member.role_change` against `:id` (resource `member`/`:userId`).
+row. Audited `org.member.role_change` against `:id` (resource `member`/`:userId`), with
+`metadata` `{ "from": <old role>, "to": <new role> }`.
 
 Only an owner may grant the `owner` role or change an owner's. The last `owner` cannot be demoted.
 
@@ -904,7 +905,10 @@ An organisation can set a shorter override. New organisations are on `free`; the
 plan changes are manual today.
 
 Rows use the raw column names (snake_case): `id, org_id, actor_id, actor_type, action, resource_type,
-resource_id, ip, user_agent, timestamp`. `actor_type` is `user`, `api_key` or `system`.
+resource_id, ip, user_agent, metadata, timestamp`. `actor_type` is `user`, `api_key` or `system`.
+`metadata` is a JSON object string or `null` — a small, bounded, non-secret object of fixed
+server-set keys (never a secret value, token, key or caller free text; see `.claude/rules/audit-log.md`).
+Most actions leave it `null`; which ones populate it, and with what, is under § Audit actions.
 
 ### GET /api/audit
 
@@ -930,8 +934,10 @@ boundary before the call, as the dashboard's audit page does.
 - `json`: `Content-Type: application/json`, attachment `audit-log-YYYY-MM-DD.json`,
   body `{ "data": [rows], "total": n, "exportedAt": "..." }`.
 - `csv`: `text/csv; charset=utf-8`, attachment `audit-log-YYYY-MM-DD.csv`, CRLF line endings, header
-  `id,timestamp,action,actor_id,actor_type,resource_type,resource_id,ip,user_agent`. Fields beginning with
-  `= + - @` tab or CR get a leading `'` (spreadsheet formula-injection guard).
+  `id,timestamp,action,actor_id,actor_type,resource_type,resource_id,ip,user_agent,metadata`. The
+  `metadata` column is the JSON object string (quote-escaped as any field with `"` or `,` is), or
+  empty. Fields beginning with `= + - @` tab or CR get a leading `'` (spreadsheet formula-injection
+  guard).
 
 ### GET /api/audit/retention
 
@@ -999,9 +1005,20 @@ Written by the API today: `auth.login`, `auth.login.github`, `auth.login.google`
 
 The invitation and membership rows carry `resource_type` `org_invite` (resource id `inv_...`) or `member`
 (resource id the member's `usr_...`), and `org.invite.sent` is the only one with `actor_type: system` — it
-records the background send, which runs after the response is decided. `audit_log` has no metadata column, so
-a role change records **that** a role changed and against whom, not what it changed to; the new value is in
-the member list.
+records the background send, which runs after the response is decided.
+
+Some actions carry a `metadata` JSON object (issue #96) — a small, bounded, non-secret set of fixed
+server-set keys. The populated ones today:
+
+- `org.member.role_change` → `{ "from": <old role>, "to": <new role> }` — the row now records what a
+  role changed to, not only that it changed.
+- `org.member.remove` / `org.member.leave` → `{ "role": <role held when removed/left> }`.
+- `org.invite.create` → `{ "role": <invited role> }`.
+- `org.invite.accept` → `{ "role": <role actually granted> }` (the existing role if the caller was
+  already a member).
+
+Every other action leaves `metadata` `null`. It never carries a secret value, token, key or
+caller-supplied free text — the rule is `.claude/rules/audit-log.md`.
 
 An audit row's organisation comes from the **resource**, not from the actor's current session: a key
 revocation is filed against the key's organisation, `org.create` / `org.switch_in` / `org.switch_out` against the organisation
@@ -1026,8 +1043,6 @@ These are real quirks of the current API, documented rather than hidden:
   `details` object. The plan in `docs/plans/multi-org-and-invites.md` calls it `details.invitedEmail`, which
   is what it is from the dashboard's side — its `ApiError.details` is the whole error body — but it means the
   wire format has one error code with a field beside `error` and `message`. No other code does.
-- **A role change is not recoverable from the audit log alone.** `audit_log` has no metadata column, so
-  `org.member.role_change` says who changed whose role, not to what (issue #96).
 - **`is_computed`** is `0`/`1` in snake_case rows and a boolean elsewhere.
 - **Validation error shape** differs between routes (see [Conventions](#conventions)); the unknown-path 404
   has no `message`.

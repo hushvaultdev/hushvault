@@ -240,6 +240,10 @@ export const auditLog = sqliteTable('audit_log', {
   resourceId: text('resource_id'),
   ip: text('ip'),
   userAgent: text('user_agent'),
+  // Small, bounded, NON-SECRET JSON object of fixed server-set keys (migration 0019, issue #96).
+  // e.g. a role change stores {"from","to"}. Never a secret value, DEK, token, key or caller free
+  // text — see .claude/rules/audit-log.md. Nullable: most actions leave it NULL.
+  metadata: text('metadata'),
   timestamp: text('timestamp').notNull(),
 }, (t) => [
   index('audit_log_org_idx').on(t.orgId),

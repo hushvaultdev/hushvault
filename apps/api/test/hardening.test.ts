@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { app } from '../src/index'
-import { assertSecretSize, getRequestIp, redactPath, SecretTooLargeError } from '../src/lib/security'
+import { assertSecretSize, getRequestIp, redactPath, SecretTooLargeError, serialiseAuditMetadata, writeAuditLog } from '../src/lib/security'
 import { call, createTestEnv, seedApiKey, seedUser } from './helpers/env'
 
 app.get('/__test/too-large', () => { assertSecretSize('x'.repeat(70_000)) })
@@ -141,5 +141,43 @@ describe('getRequestIp', () => {
   it('ignores a spoofable x-forwarded-for', () => {
     expect(getRequestIp(withHeaders({ 'x-forwarded-for': '9.9.9.9' }))).toBeNull()
     expect(getRequestIp(withHeaders({ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '9.9.9.9' }))).toBe('203.0.113.7')
+  })
+})
+
+describe('audit metadata writer (issue #96, .claude/rules/audit-log.md)', () => {
+  it('serialises a bounded object to JSON and stores it, and omitted metadata is NULL', async () => {
+    const env = createTestEnv()
+    const { userId, orgId } = await seedUser(env)
+
+    await writeAuditLog(env, {
+      orgId, actorId: userId, actorType: 'user', action: 'org.member.role_change',
+      resourceType: 'member', resourceId: userId, metadata: { from: 'viewer', to: 'admin' },
+    })
+    await writeAuditLog(env, {
+      orgId, actorId: userId, actorType: 'user', action: 'project.create',
+      resourceType: 'project', resourceId: 'prj_x',
+    })
+
+    const withMeta = await env.DB.prepare("SELECT metadata FROM audit_log WHERE action = 'org.member.role_change'").first<{ metadata: string }>()
+    expect(JSON.parse(withMeta!.metadata)).toEqual({ from: 'viewer', to: 'admin' })
+    const without = await env.DB.prepare("SELECT metadata FROM audit_log WHERE action = 'project.create'").first<{ metadata: string | null }>()
+    expect(without!.metadata).toBeNull()
+  })
+
+  it('serialises only primitive values; null, undefined and an empty object behave', () => {
+    // The bounded shape the type allows: string, number, boolean, null.
+    expect(serialiseAuditMetadata({ a: 'x', b: 1, c: true, d: null })).toBe('{"a":"x","b":1,"c":true,"d":null}')
+    expect(serialiseAuditMetadata(null)).toBeNull()
+    expect(serialiseAuditMetadata(undefined)).toBeNull()
+    expect(serialiseAuditMetadata({})).toBe('{}')
+  })
+
+  it('rejects anything outside the bounded shape, so metadata cannot grow a nested place for a secret', () => {
+    // A nested object or array is the shape a secret value would eventually arrive wrapped in; the
+    // writer refuses it rather than stringify it. The TS type forbids these too — this is the
+    // runtime backstop at the one chokepoint every audit row flows through.
+    for (const bad of [{ nested: { deep: 'x' } }, { arr: [1, 2] }, { fn: () => 1 }, { big: 10n }] as unknown as Record<string, string>[]) {
+      expect(() => serialiseAuditMetadata(bad)).toThrow(TypeError)
+    }
   })
 })

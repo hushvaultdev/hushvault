@@ -161,6 +161,14 @@ async function auditFor(env: TestEnv, action: string) {
   return results
 }
 
+/** The `metadata` column for an action's rows, parsed (issue #96). Raw string, not NULL-coalesced,
+ * so a test can tell a stored `null` apart from an absent row. */
+async function auditMeta(env: TestEnv, action: string) {
+  const { results } = await env.DB.prepare('SELECT metadata FROM audit_log WHERE action = ? ORDER BY timestamp ASC')
+    .bind(action).all<{ metadata: string | null }>()
+  return results.map((r) => (r.metadata === null ? null : JSON.parse(r.metadata)))
+}
+
 async function members(env: TestEnv, orgId: string) {
   const { results } = await env.DB.prepare('SELECT user_id, role FROM members WHERE org_id = ? ORDER BY created_at ASC').bind(orgId).all()
   return results as { user_id: string; role: string }[]
@@ -215,6 +223,9 @@ describe('POST /api/orgs/:id/invites', () => {
     expect(await auditFor(env, 'org.invite.create')).toEqual([
       { org_id: admin.orgId, actor_id: admin.userId, actor_type: 'user', resource_type: 'org_invite', resource_id: res.body.data.invite.id },
     ])
+    // Issue #96: the invited role is in the trail, not only on the org_invites row the cron sweep
+    // later collects. A non-secret role name — never the token or the address.
+    expect(await auditMeta(env, 'org.invite.create')).toEqual([{ role: 'admin' }])
     expect(await auditFor(env, 'org.invite.sent')).toEqual([
       { org_id: admin.orgId, actor_id: null, actor_type: 'system', resource_type: 'org_invite', resource_id: res.body.data.invite.id },
     ])
@@ -494,6 +505,8 @@ describe('POST /api/invites/accept', () => {
     expect(await auditFor(env, 'org.invite.accept')).toEqual([
       { org_id: admin.orgId, actor_id: guest.userId, actor_type: 'user', resource_type: 'org_invite', resource_id: created.body.data.invite.id },
     ])
+    // Issue #96: the role actually granted. A non-secret role name.
+    expect(await auditMeta(env, 'org.invite.accept')).toEqual([{ role: 'admin' }])
 
     // The session is untouched: the guest's token still acts in their own organisation, and
     // nothing in the response is a new credential.
@@ -741,10 +754,26 @@ describe('PATCH /api/orgs/:id/members/:userId', () => {
     expect(await auditFor(env, 'org.member.role_change')).toEqual([
       { org_id: owner.orgId, actor_id: owner.userId, actor_type: 'user', resource_type: 'member', resource_id: target.userId },
     ])
+    // Issue #96: the row records what the role changed TO, not only that it changed.
+    expect(await auditMeta(env, 'org.member.role_change')).toEqual([{ from: 'viewer', to: 'admin' }])
 
     // A no-op change writes nothing and audits nothing.
     expect((await call(env, 'PATCH', `/api/orgs/${owner.orgId}/members/${target.userId}`, { token: owner.token, json: { role: 'admin' } })).status).toBe(200)
     expect(await auditFor(env, 'org.member.role_change')).toHaveLength(1)
+  })
+
+  it('records a non-secret {from,to} of role names only, and nothing from the request body', async () => {
+    const { env } = makeEnv()
+    const owner = await seedUser(env, { role: 'owner', emailVerified: true })
+    const target = await seedUser(env, { role: 'member', orgId: owner.orgId, email: 't2@x.test', emailVerified: true })
+
+    expect((await call(env, 'PATCH', `/api/orgs/${owner.orgId}/members/${target.userId}`, { token: owner.token, json: { role: 'admin' } })).status).toBe(200)
+    const [meta] = await auditMeta(env, 'org.member.role_change')
+    // The whole object: two keys, both role names from the fixed vocabulary — a bounded, non-secret
+    // shape (.claude/rules/audit-log.md). No email, id, token or other request-derived field leaks in.
+    expect(meta).toEqual({ from: 'member', to: 'admin' })
+    expect(Object.keys(meta).sort()).toEqual(['from', 'to'])
+    for (const v of Object.values(meta)) expect(['owner', 'admin', 'member', 'viewer']).toContain(v)
   })
 
   it('an admin can neither grant the owner role nor change an owner\'s', async () => {
@@ -902,6 +931,8 @@ describe('DELETE /api/orgs/:id/members/:userId', () => {
     expect(await auditFor(env, 'org.member.remove')).toEqual([
       { org_id: owner.orgId, actor_id: owner.userId, actor_type: 'user', resource_type: 'member', resource_id: target.userId },
     ])
+    // Issue #96: the role the removed member held. A non-secret role name.
+    expect(await auditMeta(env, 'org.member.remove')).toEqual([{ role: 'member' }])
   })
 
   it('a member may leave on their own, whatever their role', async () => {
@@ -913,6 +944,8 @@ describe('DELETE /api/orgs/:id/members/:userId', () => {
     expect(res.status).toBe(200)
     expect(await members(env, owner.orgId)).toEqual([{ user_id: owner.userId, role: 'owner' }])
     expect(await auditFor(env, 'org.member.leave')).toHaveLength(1)
+    // Issue #96: the role held when leaving. A non-secret role name.
+    expect(await auditMeta(env, 'org.member.leave')).toEqual([{ role: 'viewer' }])
   })
 
   it('but not somebody else, and an admin may not remove an owner', async () => {

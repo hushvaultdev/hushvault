@@ -140,3 +140,11 @@ rather than a secret whose ciphertext and wrapped DEK disagree (migration 0014).
 revisions stay in KV but are undecryptable: only the current wrapped DEK is kept, so no previous
 value is recoverable (issue #84 dropped `secret_history`; see docs/API.md). Do not add a table
 that retains superseded wrapped DEKs without also building the retention and purge for it.
+
+## `audit_log.metadata`
+
+`audit_log` has a nullable `metadata TEXT` column (JSON; migration 0019, issue #96). What may go in
+it is a security rule, not a schema convention, so it lives in its own file:
+**`.claude/rules/audit-log.md`**. In short: a small, bounded, non-secret object of fixed server-set
+keys, written only through the shared audit writer — never a secret value, token, key or
+caller-supplied free text.
