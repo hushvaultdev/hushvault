@@ -310,6 +310,15 @@ database with a D1-capable token, like `0006`.
 
 ## Migrations
 
+**Migration `0019_audit_metadata.sql`** (audit metadata, issue #96) is **additive and applied in the
+usual order — before the new code is deployed.** It adds one nullable column, `audit_log.metadata`
+(JSON `TEXT`, default NULL). It drops, renames and rebuilds nothing, and no statement in the
+currently deployed Worker names the column, so the old code keeps working unchanged against the
+migrated database; the new code leaves it NULL for every action it does not populate. Not a reversal
+of order like `0017`. The column holds a small, bounded, non-secret object of fixed server-set keys
+(a role change records `{ from, to }`) — the rule for it is `.claude/rules/audit-log.md`. Apply with
+`pnpm --filter @hushvault/api db:migrate:dev` (then `:production`).
+
 **Migration `0018_multi_org.sql`** (multi-org foundation, issue #82) is **additive and applied in the
 usual order — before the new code is deployed.** It adds `api_keys.org_id` and
 `refresh_tokens.org_id` (both nullable), the `org_invites` table, and four indexes. It drops,

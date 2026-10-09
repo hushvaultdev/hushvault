@@ -40,6 +40,9 @@ type AuditRow = {
   resource_id: string | null
   ip: string | null
   user_agent: string | null
+  // Bounded, non-secret JSON set by the server (migration 0019, issue #96), or null. Returned as
+  // the stored string; the dashboard parses it. See .claude/rules/audit-log.md.
+  metadata: string | null
   timestamp: string
 }
 
@@ -238,7 +241,7 @@ auditRoutes.get('/export', requireRole('admin'), auditExportRateLimit, zValidato
   const { clause, params } = buildFilters({ orgId: auth.orgId, retentionCutoff, from, to, action, actorId })
 
   const result = await c.env.DB.prepare(
-    `SELECT id, org_id, actor_id, actor_type, action, resource_type, resource_id, ip, user_agent, timestamp
+    `SELECT id, org_id, actor_id, actor_type, action, resource_type, resource_id, ip, user_agent, metadata, timestamp
      FROM audit_log WHERE ${clause}
      ORDER BY timestamp DESC, id DESC LIMIT ?`,
   )
@@ -302,7 +305,7 @@ auditRoutes.get('/', requireRole('admin'), auditReadRateLimit, zValidator('query
   }
 
   const result = await c.env.DB.prepare(
-    `SELECT id, org_id, actor_id, actor_type, action, resource_type, resource_id, ip, user_agent, timestamp
+    `SELECT id, org_id, actor_id, actor_type, action, resource_type, resource_id, ip, user_agent, metadata, timestamp
      FROM audit_log WHERE ${pageClauses.join(' AND ')}
      ORDER BY timestamp DESC, id DESC LIMIT ?`,
   )
@@ -327,6 +330,7 @@ const CSV_COLUMNS: Array<keyof AuditRow> = [
   'resource_id',
   'ip',
   'user_agent',
+  'metadata',
 ]
 
 // RFC 4180 field escaping plus spreadsheet formula-injection mitigation.

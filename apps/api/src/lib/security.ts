@@ -26,6 +26,14 @@ export function assertSecretSize(value: string): void {
   }
 }
 
+/**
+ * The bounded shape of `AuditEntry.metadata` (issue #96, .claude/rules/audit-log.md): a flat object
+ * of fixed server-set keys whose values are primitives only. Deliberately NOT `unknown` or a nested
+ * type — the type is the first line of the rule that audit metadata is small, non-secret and not
+ * caller-supplied free text. It is never the place a secret value, DEK, token or key is written.
+ */
+export type AuditMetadata = Record<string, string | number | boolean | null>
+
 export type AuditEntry = {
   orgId: string
   actorId?: string | null
@@ -35,6 +43,28 @@ export type AuditEntry = {
   resourceId?: string | null
   ip?: string | null
   userAgent?: string | null
+  /**
+   * Optional bounded context for this event — e.g. a role change stores `{ from, to }`. See
+   * `AuditMetadata`. Serialised as JSON for the `metadata` column; omitted/undefined stores NULL.
+   */
+  metadata?: AuditMetadata | null
+}
+
+/**
+ * Serialise `metadata` to the JSON string the column stores, or null for none. The runtime guard
+ * backs up the type for the one chokepoint every audit row flows through: a non-primitive value is
+ * a programming error (the type forbids it), and failing loudly here is better than letting a
+ * nested object — the shape a secret value would eventually arrive wrapped in — reach the trail.
+ * Values are never inspected for their content: the no-secret rule is a discipline the type and
+ * this guard support, not something they can prove.
+ */
+export function serialiseAuditMetadata(metadata: AuditMetadata | null | undefined): string | null {
+  if (metadata === null || metadata === undefined) return null
+  for (const value of Object.values(metadata)) {
+    const ok = value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    if (!ok) throw new TypeError('audit metadata values must be string, number, boolean or null')
+  }
+  return JSON.stringify(metadata)
 }
 
 /**
@@ -45,7 +75,7 @@ export type AuditEntry = {
  */
 export function auditLogStatement(env: Env, entry: AuditEntry) {
   return env.DB.prepare(
-    'INSERT INTO audit_log (id, org_id, actor_id, actor_type, action, resource_type, resource_id, ip, user_agent, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO audit_log (id, org_id, actor_id, actor_type, action, resource_type, resource_id, ip, user_agent, metadata, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).bind(
     `audit_${crypto.randomUUID().replace(/-/g, '')}`,
     entry.orgId,
@@ -57,6 +87,7 @@ export function auditLogStatement(env: Env, entry: AuditEntry) {
     entry.resourceId ?? null,
     entry.ip ?? null,
     entry.userAgent ?? null,
+    serialiseAuditMetadata(entry.metadata),
     new Date().toISOString(),
   )
 }

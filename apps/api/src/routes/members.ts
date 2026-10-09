@@ -222,6 +222,10 @@ orgMemberRoutes.post(
       action: 'org.invite.create',
       resourceType: 'org_invite',
       resourceId: inviteId,
+      // The role this address was invited at, known here from the request. Until acceptance the
+      // role lived only on the `org_invites` row, which the cron sweep collects after seven days
+      // (issue #96) — recording it keeps the trail answerable afterwards. A non-secret role name.
+      metadata: { role },
       ip: getRequestIp(c),
       userAgent: c.req.header('user-agent'),
     })
@@ -433,6 +437,9 @@ inviteRoutes.post('/accept', inviteAcceptRateLimit, requireAuth, requireHuman, z
     action: 'org.invite.accept',
     resourceType: 'org_invite',
     resourceId: invite.id,
+    // The role actually granted (`membership.role`), which is the EXISTING role when the caller was
+    // already a member — not necessarily `invite.role`. A non-secret role name (issue #96).
+    metadata: { role: membership.role },
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),
   })
@@ -544,6 +551,9 @@ orgMemberRoutes.patch(
       action: 'org.member.role_change',
       resourceType: 'member',
       resourceId: userId,
+      // The whole point of issue #96: the trail now says what the role changed to, not only that it
+      // changed. Both are non-secret role names from a fixed four-value vocabulary (`ROLES`).
+      metadata: { from: current.role, to: role },
       ip: getRequestIp(c),
       userAgent: c.req.header('user-agent'),
     })
@@ -621,6 +631,9 @@ orgMemberRoutes.delete('/:id/members/:userId', requireAuth, requireHuman, requir
     action: isSelf ? 'org.member.leave' : 'org.member.remove',
     resourceType: 'member',
     resourceId: userId,
+    // The role the person held when they were removed (or left), read above as `current.role` —
+    // known without an extra query. A non-secret role name; records which privilege was given up.
+    metadata: { role: current.role },
     ip: getRequestIp(c),
     userAgent: c.req.header('user-agent'),
   })

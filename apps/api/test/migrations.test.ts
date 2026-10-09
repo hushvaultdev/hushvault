@@ -20,6 +20,18 @@ describe('migrations', () => {
     expect(await cols('users')).toEqual(expect.arrayContaining(['provider', 'provider_id', 'email_verified', 'sessions_valid_after']))
     expect(await cols('api_keys')).toEqual(expect.arrayContaining(['revoked_at', 'revoked_reason']))
     expect(await cols('organisations')).toContain('audit_retention_days')
+    expect(await cols('audit_log')).toContain('metadata')
+  })
+
+  it('0019 adds audit_log.metadata as a nullable column with no default', async () => {
+    const env = createTestEnv()
+    const col = (await env.DB.prepare('PRAGMA table_info(audit_log)')
+      .all<{ name: string; type: string; notnull: number; dflt_value: string | null }>()).results
+      .find((c) => c.name === 'metadata')
+    // Nullable, no default: the previously deployed Worker INSERTs audit rows without naming the
+    // column (migration 0019 is additive and applied before the deploy), and every action the new
+    // code does not populate leaves it NULL.
+    expect(col).toMatchObject({ type: 'TEXT', notnull: 0, dflt_value: null })
   })
 
   it('rejects a duplicate secret name within one environment', async () => {
