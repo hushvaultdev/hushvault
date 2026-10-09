@@ -420,6 +420,19 @@ export const memberWriteRateLimit = createRateLimitMiddleware({
   keyFn: byPathOrganisation,
 })
 
+/**
+ * Account deletion (issue #81). Irreversible and rare, so it is capped tightly per IP and fails
+ * closed, like register: a 503 here costs the caller a retry, which is the right side to err on
+ * for a destructive endpoint. It runs after requireAuth/requireHuman, so an unauthenticated flood
+ * is already turned away by the coarse global net above it.
+ */
+export const accountDeleteRateLimit = createRateLimitMiddleware({
+  scope: 'account-delete',
+  limit: 5,
+  windowMs: 60_000,
+  failClosed: true,
+})
+
 // Token submissions (verify / reset): the tokens have 256 bits, so this only caps abuse of the DB.
 export const tokenSubmitRateLimit = createRateLimitMiddleware({
   scope: 'auth-token-submit',

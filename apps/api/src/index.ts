@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { HTTPException } from 'hono/http-exception'
+import { accountRoutes } from './routes/account'
 import { authRoutes } from './routes/auth'
 import { healthRoutes } from './routes/health'
 import { orgRoutes } from './routes/orgs'
@@ -135,6 +136,9 @@ app.get('/.well-known/security.txt', (c) => c.text([
 
 // Routes
 app.route('/api/auth', authRoutes)
+// Self-service account deletion / GDPR erasure (issue #81). Its own prefix: it is about the
+// person, not one organisation, and it deletes the caller's own account only.
+app.route('/api/account', accountRoutes)
 app.route('/health', healthRoutes)
 app.route('/api/orgs', orgRoutes)
 // Members and invitations share the /api/orgs prefix with the organisation context above (Hono

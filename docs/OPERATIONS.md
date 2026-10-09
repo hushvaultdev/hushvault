@@ -487,3 +487,41 @@ below it, per bucket, remembering that a completed reset costs two.
   invitation still returns `201`. There is no log line for it, because there is nothing wrong with
   the deployment other than the missing setting. Check it as step 0 in the list above when the
   environment is a new one.
+
+## 7. GDPR erasure (account deletion)
+
+Account deletion is **self-service**: the account owner calls `DELETE /api/account` (see
+`docs/API.md`). There is no operator or admin endpoint that deletes another user's account, and
+there is deliberately no SQL recipe here for doing it by hand — `DELETE FROM users` fails with
+`FOREIGN KEY constraint failed` on the three `created_by` columns (issue #81), and the endpoint is
+the only thing that nulls them, sweeps the KV blobs and keeps an organisation's last-owner
+invariant. Point the person at the endpoint rather than deleting rows.
+
+**What a deletion reaches.** For each organisation where the user is the **sole member**, the whole
+organisation is erased: D1 cascades projects → environments → secrets, members, org-scoped API keys
+and refresh tokens, audit log, invitations, integration connections → sync targets →
+items/runs/outbox, and OIDC rules; and the endpoint then deletes that organisation's encrypted
+secret blobs from `SECRETS_KV` in the same request (KV is a separate store that no D1 cascade
+reaches). For an organisation with **other members**, only the user's membership, refresh tokens
+and API keys are removed. The user row goes last, which cascades their remaining memberships and
+all their credentials.
+
+**What a deletion does NOT reach — state this when asked.**
+
+- **A shared secret the user did not solely own is not erased.** Deletion only sweeps KV blobs of
+  organisations that are themselves erased (sole-member). A secret in an organisation that survives
+  stays, by design — it belongs to the remaining members, not the departing user.
+- **Superseded KV blob revisions are not individually chased from this path.** The current blob of
+  every erased secret is deleted; any older `secret:{id}:{rev}` left by a value change is covered
+  because `allSecretBlobKeys` enumerates every revision up to the pointer. A truly orphaned blob
+  with no D1 row is left to the housekeeping sweep (§ 4), the same as every other delete path.
+- **`user.delete` audit rows in OTHER organisations still name the user.** The row records the
+  departure for the organisations that survive, with the user's id as a literal string in
+  `resource_id` (so it outlives the `actor_id` null-ing). This is retained audit history, not
+  erased — admins of a shared organisation keep the record that a member deleted their account.
+- **Refusal is total.** If the user is the last owner of any shared organisation, the request is
+  refused `409 LAST_OWNER` and nothing is deleted; they must transfer ownership first.
+
+Deletion is **irreversible** and reaches no backup: it destroys integration connections (each the
+only copy of an outbound credential) and sync targets, so any secrets HushVault had written to a
+provider are stranded on that provider and can no longer be reconciled or cleaned up remotely.
