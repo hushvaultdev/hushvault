@@ -479,3 +479,19 @@ export const orphanBlobCandidates = sqliteTable('orphan_blob_candidates', {
   kvKey: text('kv_key').primaryKey(),
   firstSeenAt: text('first_seen_at').notNull(),
 }, (t) => [index('orphan_blob_candidates_seen_idx').on(t.firstSeenAt)])
+
+/**
+ * A durable record that an account erasure happened (issue #81, migration 0020). Anchored to
+ * nothing — no foreign key — so it outlives the user and orgs it refers to, which is the whole
+ * point: a sole-member erasure takes its org's `audit_log` with it, so the only surviving trail of
+ * that deletion lives here. Holds only what demonstrates the act, never the personal data erased:
+ * the opaque user id (links to nothing once the user row is gone), a timestamp, a count, an enum.
+ * Never an email, name, IP or user agent — see 0020 and `.claude/rules/audit-log.md` in spirit.
+ */
+export const erasureLog = sqliteTable('erasure_log', {
+  id: text('id').primaryKey(),
+  erasedUserId: text('erased_user_id').notNull(),
+  erasedAt: text('erased_at').notNull(),
+  orgsErased: integer('orgs_erased').notNull().default(0),
+  actorType: text('actor_type').notNull(),
+}, (t) => [index('erasure_log_user_idx').on(t.erasedUserId), index('erasure_log_at_idx').on(t.erasedAt)])

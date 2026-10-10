@@ -490,7 +490,7 @@ below it, per bucket, remembering that a completed reset costs two.
 
 ## 7. GDPR erasure (account deletion)
 
-Account deletion is **self-service**: the account owner calls `DELETE /api/account` (see
+Account deletion is **self-service**: the account owner calls `DELETE /api/auth/account` (see
 `docs/API.md`). There is no operator or admin endpoint that deletes another user's account, and
 there is deliberately no SQL recipe here for doing it by hand — `DELETE FROM users` fails with
 `FOREIGN KEY constraint failed` on the three `created_by` columns (issue #81), and the endpoint is

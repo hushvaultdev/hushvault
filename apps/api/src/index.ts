@@ -136,9 +136,11 @@ app.get('/.well-known/security.txt', (c) => c.text([
 
 // Routes
 app.route('/api/auth', authRoutes)
-// Self-service account deletion / GDPR erasure (issue #81). Its own prefix: it is about the
-// person, not one organisation, and it deletes the caller's own account only.
-app.route('/api/account', accountRoutes)
+// Self-service account deletion / GDPR erasure (issue #81). Under /api/auth because it is an
+// account-lifecycle operation that re-authenticates the caller, like /api/auth/api-keys — the
+// router's `.delete('/')` therefore answers DELETE /api/auth/account. It deletes the caller's own
+// account only; there is no admin-initiated deletion of another user.
+app.route('/api/auth/account', accountRoutes)
 app.route('/health', healthRoutes)
 app.route('/api/orgs', orgRoutes)
 // Members and invitations share the /api/orgs prefix with the organisation context above (Hono

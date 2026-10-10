@@ -137,7 +137,16 @@ accountRoutes.delete(
 
     const ip = getRequestIp(c)
     const userAgent = c.req.header('user-agent') ?? null
+    const nowIso = new Date().toISOString()
     const statements = [
+      // 0. The durable erasure record (issue #81, migration 0020). This is the ONLY trail that
+      //    survives a sole-member erasure, whose org — and its audit_log — is deleted below. It is
+      //    anchored to no foreign key, so it outlives the user and orgs it names. It holds only what
+      //    shows the act happened (the opaque user id, which links to nothing once the user row is
+      //    gone, a timestamp, a count), never the personal data erased: no email, name, IP or UA.
+      c.env.DB.prepare(
+        'INSERT INTO erasure_log (id, erased_user_id, erased_at, orgs_erased, actor_type) VALUES (?, ?, ?, ?, ?)',
+      ).bind(`era_${crypto.randomUUID().replace(/-/g, '')}`, auth.userId, nowIso, soleMemberOrgIds.length, auth.actorType),
       // 1. SET NULL semantics for the three NO ACTION `created_by` refs (issue #81). Null every row
       //    this user created that will OUTLIVE them, so the final `DELETE FROM users` is not blocked.
       //    Rows inside erased orgs are removed by the org cascade below anyway, so nulling them first

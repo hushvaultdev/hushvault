@@ -45,7 +45,7 @@ HushVault's own controls cover: application-layer access control, encryption, au
 - Use `smart_placement` in wrangler.toml to hint EU data centers
 - Enterprise: dedicated Worker deployment in EU region
 
-**Data deletion:** `DELETE /api/account` purges all user data:
+**Data deletion:** `DELETE /api/auth/account` purges all user data:
 1. All secrets deleted from KV (by org prefix)
 2. All D1 rows deleted (cascade from organisations)
 3. Stripe customer data deleted via Stripe API

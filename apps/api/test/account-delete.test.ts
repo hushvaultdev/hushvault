@@ -1,4 +1,4 @@
-// Account deletion / GDPR erasure (issue #81), DELETE /api/account.
+// Account deletion / GDPR erasure (issue #81), DELETE /api/auth/account.
 //
 // The tests marked FALSIFICATION are the ones that define the issue. Each proves its guard by first
 // reproducing the failure the guard exists to stop, or by asserting the exact thing that must NOT
@@ -43,13 +43,13 @@ async function userExists(env: TestEnv, userId: string): Promise<boolean> {
   return (await env.DB.prepare('SELECT id FROM users WHERE id = ? LIMIT 1').bind(userId).first()) !== null
 }
 
-describe('DELETE /api/account — re-authentication', () => {
+describe('DELETE /api/auth/account — re-authentication', () => {
   it('refuses an API key (requireHuman), before touching anything', async () => {
     const env = createTestEnv()
     const user = await seedUser(env, { password: PASSWORD })
     const key = await seedApiKey(env, user.userId)
 
-    const res = await call(env, 'DELETE', '/api/account', { token: key.rawKey, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: key.rawKey, json: { password: PASSWORD } })
 
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('FORBIDDEN')
@@ -60,7 +60,7 @@ describe('DELETE /api/account — re-authentication', () => {
     const env = createTestEnv()
     const user = await seedUser(env, { password: PASSWORD })
 
-    const res = await call(env, 'DELETE', '/api/account', { token: user.token, json: {} })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: user.token, json: {} })
 
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('REAUTH_REQUIRED')
@@ -71,7 +71,7 @@ describe('DELETE /api/account — re-authentication', () => {
     const env = createTestEnv()
     const user = await seedUser(env, { password: PASSWORD })
 
-    const res = await call(env, 'DELETE', '/api/account', { token: user.token, json: { password: 'not the password' } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: user.token, json: { password: 'not the password' } })
 
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('REAUTH_FAILED')
@@ -82,7 +82,7 @@ describe('DELETE /api/account — re-authentication', () => {
     const env = createTestEnv()
     const user = await seedUser(env, { password: PASSWORD })
 
-    const res = await call(env, 'DELETE', '/api/account', { token: user.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: user.token, json: { password: PASSWORD } })
 
     expect(res.status).toBe(200)
     expect(res.body.data.deleted).toBe(true)
@@ -105,24 +105,24 @@ describe('DELETE /api/account — re-authentication', () => {
     const token = await signJwt({ sub: userId, orgId, role: 'owner' }, env.JWT_SECRET)
 
     // Wrong email: refused, nothing deleted.
-    const wrong = await call(env, 'DELETE', '/api/account', { token, json: { confirmEmail: 'someone@else.test' } })
+    const wrong = await call(env, 'DELETE', '/api/auth/account', { token, json: { confirmEmail: 'someone@else.test' } })
     expect(wrong.status).toBe(403)
     expect(wrong.body.error).toBe('REAUTH_REQUIRED')
     expect(await userExists(env, userId)).toBe(true)
 
     // A password is not a valid confirmation for an OAuth-only account.
-    const asPassword = await call(env, 'DELETE', '/api/account', { token, json: { password: PASSWORD } })
+    const asPassword = await call(env, 'DELETE', '/api/auth/account', { token, json: { password: PASSWORD } })
     expect(asPassword.status).toBe(403)
     expect(await userExists(env, userId)).toBe(true)
 
     // Correct email (case-insensitive): deleted.
-    const ok = await call(env, 'DELETE', '/api/account', { token, json: { confirmEmail: 'OAuth@Example.Test' } })
+    const ok = await call(env, 'DELETE', '/api/auth/account', { token, json: { confirmEmail: 'OAuth@Example.Test' } })
     expect(ok.status).toBe(200)
     expect(await userExists(env, userId)).toBe(false)
   })
 })
 
-describe('DELETE /api/account — the foreign-key fix (issue #81)', () => {
+describe('DELETE /api/auth/account — the foreign-key fix (issue #81)', () => {
   it('FALSIFICATION: a bare DELETE FROM users is blocked, and the endpoint deletes the same user', async () => {
     const env = createTestEnv()
     const user = await seedUser(env, { role: 'admin', password: PASSWORD })
@@ -139,7 +139,7 @@ describe('DELETE /api/account — the foreign-key fix (issue #81)', () => {
     expect(await userExists(env, user.userId)).toBe(true)
 
     // The endpoint nulls created_by in the same batch, so the delete succeeds.
-    const res = await call(env, 'DELETE', '/api/account', { token: user.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: user.token, json: { password: PASSWORD } })
     expect(res.status).toBe(200)
     expect(await userExists(env, user.userId)).toBe(false)
   })
@@ -153,7 +153,7 @@ describe('DELETE /api/account — the foreign-key fix (issue #81)', () => {
     const envId = await seedEnvironment(env, projectId)
     const ruleId = await seedOidcRule(env, owner.orgId, envId, leaver.userId)
 
-    const res = await call(env, 'DELETE', '/api/account', { token: leaver.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: leaver.token, json: { password: PASSWORD } })
     expect(res.status).toBe(200)
 
     // The org and the rule survive; created_by is now NULL rather than a dangling id.
@@ -164,7 +164,7 @@ describe('DELETE /api/account — the foreign-key fix (issue #81)', () => {
   })
 })
 
-describe('DELETE /api/account — organisations', () => {
+describe('DELETE /api/auth/account — organisations', () => {
   it('erases a sole-member org and its secrets from D1 AND KV', async () => {
     const env = createTestEnv()
     const user = await seedUser(env, { password: PASSWORD })
@@ -176,7 +176,7 @@ describe('DELETE /api/account — organisations', () => {
     const blobKey = `secret:${secretId}`
     expect(env.SECRETS_KV.store.has(blobKey)).toBe(true)
 
-    const res = await call(env, 'DELETE', '/api/account', { token: user.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: user.token, json: { password: PASSWORD } })
     expect(res.status).toBe(200)
     expect(res.body.data.orgsErased).toBe(1)
 
@@ -198,7 +198,7 @@ describe('DELETE /api/account — organisations', () => {
     const secretId = await seedSecret(env, projectId, envId, 'API_KEY', 'super-secret')
     const blobKey = `secret:${secretId}`
 
-    const res = await call(env, 'DELETE', '/api/account', { token: leaver.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: leaver.token, json: { password: PASSWORD } })
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: 'LAST_OWNER', message: 'An organisation must keep an owner. Make someone else an owner first.' })
 
@@ -213,6 +213,70 @@ describe('DELETE /api/account — organisations', () => {
     expect(audit?.n).toBe(0)
   })
 
+  it('refusal writes no erasure_log row either', async () => {
+    const env = createTestEnv()
+    const leaver = await seedUser(env, { role: 'owner', password: PASSWORD })
+    await seedUser(env, { role: 'member', orgId: leaver.orgId })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: leaver.token, json: { password: PASSWORD } })
+    expect(res.status).toBe(409)
+    const n = await env.DB.prepare('SELECT COUNT(*) AS n FROM erasure_log').first<{ n: number }>()
+    expect(n?.n).toBe(0)
+  })
+})
+
+// GDPR accountability (issue #81, migration 0020): the one trail that MUST survive the erasure,
+// because a sole-member deletion takes its org's audit_log with it. The record proves the act
+// without retaining the personal data the act removed.
+describe('DELETE /api/auth/account — durable erasure record', () => {
+  it('survives a sole-member erasure that leaves no org and no audit_log behind', async () => {
+    const env = createTestEnv()
+    const user = await seedUser(env, { password: PASSWORD })
+
+    expect((await call(env, 'DELETE', '/api/auth/account', { token: user.token, json: { password: PASSWORD } })).status).toBe(200)
+
+    // The org and its audit_log are gone — the only record of this deletion is erasure_log.
+    expect(await env.DB.prepare('SELECT id FROM organisations WHERE id = ? LIMIT 1').bind(user.orgId).first()).toBeNull()
+    const row = await env.DB.prepare('SELECT * FROM erasure_log WHERE erased_user_id = ? LIMIT 1')
+      .bind(user.userId).first<Record<string, unknown>>()
+    expect(row).not.toBeNull()
+    expect(row?.['orgs_erased']).toBe(1)
+    expect(row?.['actor_type']).toBe('user')
+    expect(typeof row?.['erased_at']).toBe('string')
+  })
+
+  it('records the act but none of the personal data the act removed', async () => {
+    const env = createTestEnv()
+    const user = await seedUser(env, { email: 'erase-me@example.test', password: PASSWORD })
+    const ua = 'hv-test-agent/1.0'
+
+    expect((await call(env, 'DELETE', '/api/auth/account', {
+      token: user.token, json: { password: PASSWORD }, headers: { 'user-agent': ua, 'cf-connecting-ip': '203.0.113.9' },
+    })).status).toBe(200)
+
+    const row = await env.DB.prepare('SELECT * FROM erasure_log WHERE erased_user_id = ? LIMIT 1')
+      .bind(user.userId).first<Record<string, unknown>>()
+    expect(row).not.toBeNull()
+    // The whole row, serialised, must not carry the email, the user agent or the IP.
+    const serialised = JSON.stringify(row)
+    expect(serialised).not.toContain('erase-me@example.test')
+    expect(serialised).not.toContain(ua)
+    expect(serialised).not.toContain('203.0.113.9')
+    // Its only columns are the act, not the subject.
+    expect(Object.keys(row ?? {}).sort()).toEqual(['actor_type', 'erased_at', 'erased_user_id', 'id', 'orgs_erased'])
+  })
+
+  it('also records a shared-org deletion (orgs_erased 0)', async () => {
+    const env = createTestEnv()
+    const owner = await seedUser(env, { role: 'owner' })
+    const leaver = await seedUser(env, { role: 'member', orgId: owner.orgId, password: PASSWORD })
+
+    expect((await call(env, 'DELETE', '/api/auth/account', { token: leaver.token, json: { password: PASSWORD } })).status).toBe(200)
+
+    const row = await env.DB.prepare('SELECT orgs_erased FROM erasure_log WHERE erased_user_id = ? LIMIT 1')
+      .bind(leaver.userId).first<{ orgs_erased: number }>()
+    expect(row?.orgs_erased).toBe(0)
+  })
+
   it('a non-last-owner membership in a shared org is removed; the org and other members survive', async () => {
     const env = createTestEnv()
     // Two owners: the leaver is NOT the last owner, so deletion proceeds and the org survives.
@@ -222,7 +286,7 @@ describe('DELETE /api/account — organisations', () => {
     const envId = await seedEnvironment(env, projectId)
     const secretId = await seedSecret(env, projectId, envId, 'KEEP_ME', 'still-here')
 
-    const res = await call(env, 'DELETE', '/api/account', { token: leaver.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: leaver.token, json: { password: PASSWORD } })
     expect(res.status).toBe(200)
     expect(res.body.data.orgsErased).toBe(0)
 
@@ -235,7 +299,7 @@ describe('DELETE /api/account — organisations', () => {
   })
 })
 
-describe('DELETE /api/account — the audit row (Decision B)', () => {
+describe('DELETE /api/auth/account — the audit row (Decision B)', () => {
   it('lands in surviving orgs with the literal user id in resource_id, and survives the user delete', async () => {
     const env = createTestEnv()
     const leaver = await seedUser(env, { role: 'member', password: PASSWORD })
@@ -245,7 +309,7 @@ describe('DELETE /api/account — the audit row (Decision B)', () => {
     await addMembership(env, { userId: leaver.userId, orgId: sharedTwo, role: 'admin' })
     await seedUser(env, { role: 'owner', orgId: sharedTwo })
 
-    const res = await call(env, 'DELETE', '/api/account', { token: leaver.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: leaver.token, json: { password: PASSWORD } })
     expect(res.status).toBe(200)
     expect(await userExists(env, leaver.userId)).toBe(false)
 
@@ -271,7 +335,7 @@ describe('DELETE /api/account — the audit row (Decision B)', () => {
     const env = createTestEnv()
     const user = await seedUser(env, { password: PASSWORD })
 
-    const res = await call(env, 'DELETE', '/api/account', { token: user.token, json: { password: PASSWORD } })
+    const res = await call(env, 'DELETE', '/api/auth/account', { token: user.token, json: { password: PASSWORD } })
     expect(res.status).toBe(200)
 
     const audit = await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'user.delete'").first<{ n: number }>()

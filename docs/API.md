@@ -135,7 +135,7 @@ A window is aligned to the clock, so a caller can obtain up to 2× the limit acr
 | `auth-refresh` | `POST /api/auth/{refresh,logout}` | IP | 60 | 503 |
 | `auth-forgot` | `POST /api/auth/forgot-password`, verification resend | IP | 5 | 503 |
 | `auth-token-submit` | `POST /api/auth/{verify-email,reset-password}` | IP | 10 | 503 |
-| `account-delete` | `DELETE /api/account` | IP | 5 | 503 |
+| `account-delete` | `DELETE /api/auth/account` | IP | 5 | 503 |
 | `org-create` | `POST /api/orgs` | IP | 5 | 503 |
 | `org-switch` | `POST /api/orgs/:id/switch` | IP | 60 | 503 |
 | `invite-create` | `POST /api/orgs/:id/invites` | **organisation** (the one in the path) | 20 | 503 |
@@ -350,7 +350,7 @@ Configuration: `MAIL_FROM`, the `EMAIL` send_email binding (Cloudflare Email Ser
 and the flows still return their normal responses), `EMAIL_DAILY_BUDGET` (global sends per day, default 200) and
 `REQUIRE_VERIFIED_EMAIL` (when set, API-key creation and share-link creation both require a verified email).
 
-### DELETE /api/account
+### DELETE /api/auth/account
 
 Self-service account deletion / GDPR erasure. **Self-service only**: it deletes the CALLER's own
 account. There is no admin-initiated deletion of another user — that is not built.
@@ -1057,7 +1057,7 @@ server-set keys. The populated ones today:
 - `org.invite.accept` → `{ "role": <role actually granted> }` (the existing role if the caller was
   already a member).
 - `user.delete` → `{ "self": true, "orgs_erased": <count> }` — self-service account deletion
-  (`DELETE /api/account`, issue #81). `resource_type` is `user` and `resource_id` is the deleted
+  (`DELETE /api/auth/account`, issue #81). `resource_type` is `user` and `resource_id` is the deleted
   user's id as a literal string; `actor_id` is `null` on the stored row, because deleting the user
   nulls it (`audit_log.actor_id` is `ON DELETE SET NULL`), which is why the id is also carried in
   `resource_id`. Written only to organisations that SURVIVE the deletion — an erased sole-member
