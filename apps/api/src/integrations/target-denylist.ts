@@ -6,7 +6,8 @@ import type { Env } from '../index'
 /** Scripts that may never be a sync target, whatever the env var says (HushVault's own Workers). */
 export const DEFAULT_DENIED_SCRIPTS: readonly string[] = ['hushvault-api', 'hushvault-api-dev', 'hushvault-web', 'hushvault-web-dev', 'hushvault-web-local']
 
-type DenyEnv = Pick<Env, 'HUSHVAULT_SYNC_DENY_SCRIPTS' | 'HUSHVAULT_SYNC_DENY_ACCOUNT_IDS'>
+type DenyEnv = Pick<Env, 'HUSHVAULT_SYNC_DENY_SCRIPTS' | 'HUSHVAULT_SYNC_DENY_ACCOUNT_IDS' | 'ENVIRONMENT'>
+type AccountDenyEnv = Pick<Env, 'HUSHVAULT_SYNC_DENY_ACCOUNT_IDS' | 'ENVIRONMENT'>
 
 function list(raw: string | undefined): string[] {
   return (raw ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
@@ -26,12 +27,25 @@ export function deniedAccountIds(env: Pick<Env, 'HUSHVAULT_SYNC_DENY_ACCOUNT_IDS
   return new Set(list(env?.HUSHVAULT_SYNC_DENY_ACCOUNT_IDS))
 }
 
-export function isDeniedAccount(env: Pick<Env, 'HUSHVAULT_SYNC_DENY_ACCOUNT_IDS'> | undefined, accountId: unknown): boolean {
+/**
+ * FAIL CLOSED in production (issue #41, 2026-10-11 security review): without account ids the
+ * denylist is name-only, so any secret on a HushVault-account Worker outside DEFAULT_DENIED_SCRIPTS
+ * would be overwritable by a target. An empty HUSHVAULT_SYNC_DENY_ACCOUNT_IDS in production is
+ * therefore treated as "deny every account" — misconfiguration stops sync writes instead of
+ * silently weakening the control. The var is committed in wrangler.toml for every deployed env.
+ */
+export function accountDenylistMisconfigured(env: AccountDenyEnv | undefined): boolean {
+  return env?.ENVIRONMENT === 'production' && deniedAccountIds(env).size === 0
+}
+
+export function isDeniedAccount(env: AccountDenyEnv | undefined, accountId: unknown): boolean {
+  if (accountDenylistMisconfigured(env)) return true
   return typeof accountId === 'string' && deniedAccountIds(env).has(accountId.toLowerCase())
 }
 
 /** True when the target's resource or its connection's config points at a denied script or account. */
 export function isTargetDenied(env: DenyEnv | undefined, resource: Record<string, unknown>, connectionConfig?: Record<string, unknown>): boolean {
+  if (accountDenylistMisconfigured(env)) return true
   const script = resource['scriptName']
   if (typeof script === 'string' && isDeniedScript(env, script)) return true
   if (isDeniedAccount(env, resource['accountId'])) return true

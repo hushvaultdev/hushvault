@@ -44,6 +44,10 @@ compatibility_flags = ["no_nodejs_compat", "no_nodejs_compat_v2"]
 [vars]
 ENVIRONMENT = "development"
 WEB_APP_URL = "http://localhost:3000"
+# Cloudflare account that hosts HushVault's own Workers: sync may never write into it
+# (issue #41). In production an EMPTY list fails closed (all accounts denied), so keep
+# this set in every deployed env block below.
+HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = "f10f2a6538d8f765e028672a37b224e2"
 
 [[d1_databases]]
 binding = "DB"
@@ -90,6 +94,8 @@ WEB_APP_URL = "https://beta.hushvault.dev"
 # deployment demands the production audience and rejects every token. Override only with
 # GITHUB_OIDC_AUDIENCE, and only if a different audience is deliberately required.
 API_PUBLIC_URL = "https://api-beta.hushvault.dev"
+# See top-level [vars]: the account hosting HushVault's own Workers is never a sync target.
+HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = "f10f2a6538d8f765e028672a37b224e2"
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -147,6 +153,9 @@ MAIL_FROM = "no-reply@hushvault.dev"
 WEB_APP_URL = "https://hushvault.dev"
 # See the note in [env.dev.vars]: this is the default GitHub OIDC audience.
 API_PUBLIC_URL = "https://api.hushvault.dev"
+# See top-level [vars]. REQUIRED here: with ENVIRONMENT = "production" an empty account
+# denylist fails closed and refuses every sync target/connection (issue #41).
+HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = "f10f2a6538d8f765e028672a37b224e2"
 
 [[env.production.d1_databases]]
 binding = "DB"

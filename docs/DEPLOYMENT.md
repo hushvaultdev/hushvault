@@ -242,7 +242,7 @@ because they were previously documented only inside an integration guide):
 | `GITHUB_OIDC_ISSUER`, `GITHUB_OIDC_JWKS_URL` | Override GitHub's defaults. Leave unset in normal use. |
 | `ENCRYPTION_ACTIVE_KEY_VERSION` | Which key-ring version new writes use. See docs/ENCRYPTION.md. |
 | `ENFORCE_AAD` | Refuses rows still on the pre-AAD blob format. **Check `legacyEncVersionRows` on `GET /api/security/key-rotation` is 0 before turning this on** — otherwise every read of an affected environment fails as a unit. |
-| `HUSHVAULT_SYNC_DENY_SCRIPTS`, `HUSHVAULT_SYNC_DENY_ACCOUNT_IDS` | Extra sync targets that may never be written. |
+| `HUSHVAULT_SYNC_DENY_SCRIPTS`, `HUSHVAULT_SYNC_DENY_ACCOUNT_IDS` | Extra sync targets that may never be written. `HUSHVAULT_SYNC_DENY_ACCOUNT_IDS` must list the Cloudflare account hosting HushVault's own Workers and is committed in `wrangler.toml` for every env; **in production an empty list fails closed** — every sync target, connection, preview and run is refused (`TARGET_NOT_ALLOWED`) until it is set (issue #41). |
 
 **Rotating `JWT_SECRET`** also invalidates every sync fingerprint (they are derived from it), so
 the next run of each target re-pushes every value it manages. That is safe — it can never turn

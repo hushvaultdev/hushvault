@@ -555,4 +555,34 @@ describe('account denylist (HUSHVAULT_SYNC_DENY_ACCOUNT_IDS)', () => {
     const res = await createTarget(w.token, createBody(w, 'hushvault-web-local'))
     expect([res.status, res.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
   })
+
+  it('FAILS CLOSED: production with an empty account denylist refuses every target, connection, preview and run', async () => {
+    const w = await setupSyncWorld(env)
+    const previousEnvironment = env.ENVIRONMENT
+    try {
+      env['ENVIRONMENT'] = 'production'
+      delete env['HUSHVAULT_SYNC_DENY_ACCOUNT_IDS']
+      // creating anything new is refused
+      const target = await createTarget(w.token, createBody(w, 'worker-b'))
+      expect([target.status, target.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
+      const conn = await call(env, 'POST', '/api/integrations/connections', { token: w.token, json: { provider: 'fake-sync', label: 'closed', credential: 'long-enough-credential', config: { accountId: 'f'.repeat(32) } } })
+      expect([conn.status, conn.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
+      // existing targets stop at the engine too: nothing reaches the provider
+      const preview = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/preview`, { token: w.token })
+      expect([preview.status, preview.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
+      const run = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+      expect([run.status, run.body.error]).toEqual([422, 'TARGET_NOT_ALLOWED'])
+      expect(fake.listCalls).toBe(0)
+      expect(fake.pushCalls).toHaveLength(0)
+      // setting the var restores normal behavior (the fixture account is not in the list)
+      env['HUSHVAULT_SYNC_DENY_ACCOUNT_IDS'] = 'f'.repeat(32)
+      expect((await createTarget(w.token, createBody(w, 'worker-b'))).status).toBe(201)
+      // development (local and the deployed dev env) is unchanged: empty list denies nothing
+      env['ENVIRONMENT'] = 'development'
+      delete env['HUSHVAULT_SYNC_DENY_ACCOUNT_IDS']
+      expect((await call(env, 'POST', `/api/integrations/targets/${w.targetId}/preview`, { token: w.token })).status).toBe(200)
+    } finally {
+      env['ENVIRONMENT'] = previousEnvironment
+    }
+  })
 })

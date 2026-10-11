@@ -62,7 +62,8 @@ A plan with names over these limits is a blocker (`TOO_MANY_ITEMS`, `VALUE_TOO_L
 - HushVault's own Workers can never be targets: `hushvault-api`, `hushvault-api-dev`, `hushvault-web`, `hushvault-web-dev`,
   `hushvault-web-local`, plus any names in the `HUSHVAULT_SYNC_DENY_SCRIPTS` var (comma separated; it can only add to the built-in list).
   `HUSHVAULT_SYNC_DENY_ACCOUNT_IDS` (comma separated Cloudflare account ids) additionally refuses any target or connection in those
-  accounts. Enforced **both in the routes** (target create/update, connection create, preview, run) **and inside the sync engine** (plan and
+  accounts; it is set in `wrangler.toml` to the account hosting HushVault's own Workers, and in production an **empty** list fails
+  closed (every account denied) rather than silently reducing the control to the name list. Enforced **both in the routes** (target create/update, connection create, preview, run) **and inside the sync engine** (plan and
   run, so a scheduled retry or a var changed after the target was created cannot bypass it); the engine outcome is `TARGET_NOT_ALLOWED`,
   which marks the target `needs_attention`.
 - The credential, secret values and Cloudflare response bodies are never logged, stored or returned; failures are mapped to fixed codes
