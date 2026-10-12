@@ -31,6 +31,15 @@ export const INTEGRATIONS: readonly IntegrationInfo[] = [
     issue: 41,
   },
   {
+    id: 'gitlab',
+    name: 'GitLab',
+    mark: 'GL',
+    status: 'planned',
+    directions: ['push'],
+    summary: 'Planned: one-way push of an environment to a gitlab.com project’s CI/CD variables (single environment scope); the provider is implemented but not yet verified against a live GitLab project.',
+    issue: 99,
+  },
+  {
     id: 'github-actions',
     name: 'GitHub Actions',
     mark: 'GH',
