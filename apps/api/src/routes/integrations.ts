@@ -1,5 +1,5 @@
 import { zValidator } from '@hono/zod-validator'
-import { FREE_PLAN_MAX_SYNC_TARGETS, INTEGRATIONS, type SyncErrorCode } from '@hushvault/shared/integrations'
+import { INTEGRATIONS, type SyncErrorCode } from '@hushvault/shared/integrations'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
@@ -10,6 +10,7 @@ import { isDeniedAccount, isTargetDenied } from '../integrations/target-denylist
 import { SyncEngineError, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
 import { isSyncProvider } from '../integrations/sync-types'
 import { createPrefixedId } from '../lib/auth'
+import { loadSyncLimits, maxSyncTargetsCaseSql } from '../lib/plan-limits'
 import { loadWriteRing } from '../lib/key-rotation'
 import { getRequestIp, logKeyRingError, writeAuditLog } from '../lib/security'
 import { integrationPreviewRateLimit, integrationRunRateLimit, integrationWriteRateLimit, requireAuth, requireCurrentAdmin, requireHuman, requireRole } from '../middleware/auth'
@@ -309,17 +310,22 @@ integrationsRouter.post('/targets', ...adminOnly, integrationWriteRateLimit, zVa
 
   const id = createPrefixedId('ist')
   const now = new Date().toISOString()
-  // The free-plan cap is enforced inside the INSERT, so concurrent requests cannot exceed it.
+  // The per-plan cap is enforced inside the INSERT, so concurrent requests cannot exceed it. The
+  // cap comes from a CASE over the org's plan (plan-limits.ts), built from server constants only.
   try {
     await c.env.DB.prepare(
-      "INSERT INTO sync_targets (id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, sync_on_change, schedule_minutes, fingerprint_salt, status, created_by, created_at, updated_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ? WHERE (SELECT plan FROM organisations WHERE id = ?) <> 'free' OR (SELECT COUNT(*) FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL) < ?",
-    ).bind(id, auth.orgId, body.projectId, body.envId, conn.id, conn.provider, JSON.stringify(checked.resource), JSON.stringify(cleanFilter(body.nameFilter)), body.deleteRemoved ? 1 : 0, body.autoSync?.onChange ? 1 : 0, body.autoSync?.scheduleMinutes ?? null, newFingerprintSalt(), auth.userId, now, now, auth.orgId, auth.orgId, FREE_PLAN_MAX_SYNC_TARGETS).run()
+      'INSERT INTO sync_targets (id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, sync_on_change, schedule_minutes, fingerprint_salt, status, created_by, created_at, updated_at)'
+      + ' SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'active\', ?, ?, ?'
+      + ' WHERE (SELECT COUNT(*) FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL) < '
+      + maxSyncTargetsCaseSql('SELECT plan FROM organisations WHERE id = ?'),
+    ).bind(id, auth.orgId, body.projectId, body.envId, conn.id, conn.provider, JSON.stringify(checked.resource), JSON.stringify(cleanFilter(body.nameFilter)), body.deleteRemoved ? 1 : 0, body.autoSync?.onChange ? 1 : 0, body.autoSync?.scheduleMinutes ?? null, newFingerprintSalt(), auth.userId, now, now, auth.orgId, auth.orgId).run()
   } catch {
     return c.json({ error: 'INTERNAL_ERROR', message: 'Could not create the sync target' }, 500)
   }
   const target = await loadSyncTarget(c.env, id, auth.orgId)
   if (!target) {
-    return c.json({ error: 'PLAN_LIMIT', message: `The Free plan allows ${FREE_PLAN_MAX_SYNC_TARGETS} sync targets; upgrade to add more` }, 409)
+    const limits = await loadSyncLimits(c.env, auth.orgId)
+    return c.json({ error: 'PLAN_LIMIT', message: `This plan allows ${limits.maxSyncTargets} sync targets; an operator can raise the organisation's plan to add more` }, 409)
   }
   await audit(c, auth, 'sync.target.create', id, 'sync_target')
   return c.json({ data: await toSyncTargetDto(c.env, target) }, 201)

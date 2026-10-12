@@ -176,7 +176,7 @@ describe('create / list / patch / delete', () => {
 })
 
 describe('free plan cap', () => {
-  it('allows exactly FREE_PLAN_MAX_SYNC_TARGETS targets, even under concurrency; paid plans are unlimited', async () => {
+  it('allows exactly FREE_PLAN_MAX_SYNC_TARGETS targets, even under concurrency; a higher plan lifts the cap', async () => {
     expect(FREE_PLAN_MAX_SYNC_TARGETS).toBe(2)
     const w = await setupOrg()
     const results = await Promise.all(['a', 'b', 'c', 'd'].map((n) => createTarget(w.token, createBody(w, `worker-${n}`))))
@@ -186,10 +186,14 @@ describe('free plan cap', () => {
     expect(refused[0]?.body.error).toBe('PLAN_LIMIT')
     expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_targets WHERE org_id = ?').bind(w.orgId).first<{ n: number }>())?.n).toBe(2)
 
+    // Raising the plan lifts the cap past the free limit (pro allows 25): the two creates that were
+    // refused above now succeed. This is the path that closes the "no way past 2 targets" dead-end.
     await env.DB.prepare("UPDATE organisations SET plan = 'pro' WHERE id = ?").bind(w.orgId).run()
     expect((await createTarget(w.token, createBody(w, 'worker-e'))).status).toBe(201)
     expect((await createTarget(w.token, createBody(w, 'worker-f'))).status).toBe(201)
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_targets WHERE org_id = ?').bind(w.orgId).first<{ n: number }>())?.n).toBe(4)
   })
+
 
   it('counts per organisation', async () => {
     const a = await setupOrg()

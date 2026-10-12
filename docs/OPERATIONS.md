@@ -525,3 +525,31 @@ all their credentials.
 Deletion is **irreversible** and reaches no backup: it destroys integration connections (each the
 only copy of an outbound credential) and sync targets, so any secrets HushVault had written to a
 provider are stranded on that provider and can no longer be reconciled or cleaned up remotely.
+
+## 8. Setting an organisation's plan
+
+Billing is **not live**, so there is deliberately **no self-service upgrade endpoint** — an API that
+let an owner set their own plan to a paid tier would be handing out paid limits for free. Until
+billing ships, an operator raises a client's plan directly in D1. This is the supported path for
+onboarding a client who needs more than the free tier's **2 sync targets** (issue #98).
+
+The plan column is `organisations.plan`, constrained to `free | pro | team | enterprise`. The sync
+limits each tier unlocks are in `apps/api/src/lib/plan-limits.ts` (`SYNC_PLAN_LIMITS`): free 2
+targets / 60 auto-runs per hour, pro 25 / 600, team 100 / 2000, enterprise unlimited. Audit-log
+retention per tier is separate (`audit-retention.ts`).
+
+```bash
+# Find the org id (an operator query; never expose org listings through the API for this).
+wrangler d1 execute DB --remote --env production \
+  --command "SELECT id, name, slug, plan FROM organisations WHERE slug = '<client-slug>'"
+
+# Raise the plan. Use migrations apply for schema changes only; a one-off value change is fine via
+# execute because it is idempotent (setting plan = 'team' twice is the same as once).
+wrangler d1 execute DB --remote --env production \
+  --command "UPDATE organisations SET plan = 'team' WHERE id = '<org-id>'"
+```
+
+The new limits take effect on the next request and the next cron tick — no deploy, because every
+sync limit reads the plan column live. There is no audit row for an operator plan change yet; note
+it in the client's onboarding ticket. Lowering a plan never deletes existing targets over the new
+cap; it only refuses new ones until the count is back under the cap.
