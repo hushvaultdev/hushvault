@@ -82,19 +82,41 @@ async function workerSecretNames() {
 
 const sameSet = (a, b) => a.length === b.length && a.every((x, i) => x === b[i])
 
+// Reset the throwaway Worker to zero secrets so pre-existing names can't be misread as conflicts.
+async function resetWorkerSecrets() {
+  const names = await workerSecretNames()
+  if (names.length === 0) return []
+  const secrets = Object.fromEntries(names.map((n) => [n, null]))
+  const res = await fetch(`${CF_BASE}/accounts/${CF_ACCOUNT_ID}/workers/scripts/${CF_SCRIPT}/secrets-bulk`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${CF_API_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ secrets }),
+    signal: AbortSignal.timeout(30000),
+  })
+  if (!res.ok) throw new Error(`reset failed: HTTP ${res.status}`)
+  return names
+}
+
+const runCounts = (r) => `status=${r.json?.data?.status} code=${r.json?.data?.errorCode ?? 'none'} ${JSON.stringify(r.json?.data?.counts ?? {})}`
+
 async function main() {
   say('==================== HushVault Phase 1 live E2E drill ====================')
   say(`API: ${HV_API}   Worker: ${CF_SCRIPT}   account: ${CF_ACCOUNT_ID.slice(0, 6)}…`)
   say(`run id: ${rnd}   at: ${new Date().toISOString()}`)
 
-  // Pre-flight: the Cloudflare token can see the Worker's secrets at all.
-  step(0, 'Pre-flight: Cloudflare token can read the target Worker secrets')
+  // Pre-flight: the Cloudflare token can read AND reset the Worker's secrets, so the drill starts
+  // from a known-empty state (otherwise pre-existing names are correctly treated as conflicts and
+  // mask the create path).
+  step(0, 'Pre-flight: read + reset the target Worker to zero secrets')
   let before
-  try { before = await workerSecretNames() } catch (e) {
-    check('CF token reads Worker secrets', false, String(e.message))
+  try {
+    const cleared = await resetWorkerSecrets()
+    before = await workerSecretNames()
+    check('CF token reads + resets Worker secrets', before.length === 0, `cleared [${cleared.join(', ') || 'none'}], now [${before.join(', ') || 'empty'}]`)
+  } catch (e) {
+    check('CF token reads + resets Worker secrets', false, String(e.message))
     return finish()
   }
-  check('CF token reads Worker secrets', true, `starting names: [${before.join(', ') || 'none'}]`)
 
   // 1. Register a throwaway org (owner JWT).
   step(1, 'Register throwaway org + owner')
@@ -154,18 +176,20 @@ async function main() {
   // 7. Run: push creates.
   step(7, 'Run — push creates')
   const run1 = await hv('POST', `/api/integrations/targets/${targetId}/run`)
-  check('run 200', run1.status === 200, `HTTP ${run1.status} status=${run1.json?.data?.status}`)
-  check('run status succeeded', run1.json?.data?.status === 'succeeded', JSON.stringify(run1.json?.data?.counts ?? {}))
+  check('run 200', run1.status === 200, `HTTP ${run1.status} ${runCounts(run1)}`)
+  check('run status succeeded', run1.json?.data?.status === 'succeeded', runCounts(run1))
+  check('run created 3', (run1.json?.data?.counts?.created ?? 0) === 3, runCounts(run1))
   const afterCreate = await workerSecretNames()
-  const expectCreate = [...before, 'E2E_ALPHA', 'E2E_BETA', 'E2E_GAMMA'].sort()
-  check('Worker now has the 3 pushed names (ground truth)', sameSet(afterCreate, expectCreate), `[${afterCreate.join(', ')}]`)
+  const expectCreate = ['E2E_ALPHA', 'E2E_BETA', 'E2E_GAMMA'].sort()
+  check('Worker now has exactly the 3 pushed names (ground truth)', sameSet(afterCreate, expectCreate), `[${afterCreate.join(', ')}]`)
 
   // 8. Change a value, run again: update, name set unchanged.
   step(8, 'Change one secret value, run — push update')
   const upd = await hv('PATCH', `/api/secrets/${secretIds.E2E_ALPHA}`, { value: 'alpha-2' })
   check('secret value updated', upd.status === 200, `HTTP ${upd.status}`)
   const run2 = await hv('POST', `/api/integrations/targets/${targetId}/run`)
-  check('update run succeeded', run2.json?.data?.status === 'succeeded', JSON.stringify(run2.json?.data?.counts ?? {}))
+  check('update run succeeded', run2.json?.data?.status === 'succeeded', runCounts(run2))
+  check('update run updated 1', (run2.json?.data?.counts?.updated ?? 0) === 1, runCounts(run2))
   check('Worker name set unchanged after update', sameSet(await workerSecretNames(), expectCreate))
 
   // 9. Delete a secret in HushVault, run: with deleteRemoved default off, the name should remain.
@@ -173,7 +197,7 @@ async function main() {
   const del = await hv('DELETE', `/api/secrets/${secretIds.E2E_GAMMA}`)
   check('secret deleted in HushVault', del.status === 200 || del.status === 204, `HTTP ${del.status}`)
   const run3 = await hv('POST', `/api/integrations/targets/${targetId}/run`)
-  check('run after delete succeeded', run3.json?.data?.status === 'succeeded', JSON.stringify(run3.json?.data?.counts ?? {}))
+  check('run after delete succeeded', run3.json?.data?.status === 'succeeded', runCounts(run3))
   const afterForget = await workerSecretNames()
   check('forgotten name is NOT deleted on Worker (deleteRemoved off)', afterForget.includes('E2E_GAMMA'), `[${afterForget.join(', ')}]`)
 
@@ -182,9 +206,10 @@ async function main() {
   const patch = await hv('PATCH', `/api/integrations/targets/${targetId}`, { deleteRemoved: true })
   check('target patched deleteRemoved=true', patch.status === 200, `HTTP ${patch.status}`)
   const run4 = await hv('POST', `/api/integrations/targets/${targetId}/run`)
-  check('prune run succeeded', run4.json?.data?.status === 'succeeded', JSON.stringify(run4.json?.data?.counts ?? {}))
+  check('prune run succeeded', run4.json?.data?.status === 'succeeded', runCounts(run4))
+  check('prune run deleted 1', (run4.json?.data?.counts?.deleted ?? 0) === 1, runCounts(run4))
   const afterPrune = await workerSecretNames()
-  check('E2E_GAMMA now removed from Worker', !afterPrune.includes('E2E_GAMMA'), `[${afterPrune.join(', ')}]`)
+  check('E2E_GAMMA now removed from Worker (ground truth)', !afterPrune.includes('E2E_GAMMA'), `[${afterPrune.join(', ')}]`)
   check('E2E_ALPHA + E2E_BETA still present', afterPrune.includes('E2E_ALPHA') && afterPrune.includes('E2E_BETA'))
 
   // 11. Failure path: point a new target at a nonexistent Worker, run should fail cleanly.

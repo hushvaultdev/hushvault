@@ -165,7 +165,9 @@ describe('push', () => {
     expect(result).toEqual({ ok: true, results: [{ name: 'API_KEY', ok: true }, { name: 'OLD', ok: true }] })
     expect(calls).toHaveLength(1)
     expect(calls[0]?.method).toBe('PATCH')
-    expect(calls[0]?.url).toBe(`${CLOUDFLARE_API_BASE}/accounts/${ACCOUNT}/workers/scripts/my-worker/secrets`)
+    // The bulk mutate endpoint is `.../secrets-bulk`, distinct from the `.../secrets` list path
+    // (verified live 2026-10-12, issue #41: PATCH on `.../secrets` returns 10405 and writes nothing).
+    expect(calls[0]?.url).toBe(`${CLOUDFLARE_API_BASE}/accounts/${ACCOUNT}/workers/scripts/my-worker/secrets-bulk`)
     expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({ secrets: { API_KEY: { type: 'secret_text', name: 'API_KEY', text: VALUE }, OLD: null } })
     expect(JSON.stringify(result)).not.toContain('CANARY')
   })
@@ -279,7 +281,7 @@ describe('push', () => {
 
   it('URL-encodes path segments (they are already restricted to safe characters)', async () => {
     await provider.push({ ...input(sets(1)), resource: { accountId: ACCOUNT, scriptName: 'My_Worker-1' } })
-    expect(calls[0]?.url).toBe(`${CLOUDFLARE_API_BASE}/accounts/${ACCOUNT}/workers/scripts/My_Worker-1/secrets`)
+    expect(calls[0]?.url).toBe(`${CLOUDFLARE_API_BASE}/accounts/${ACCOUNT}/workers/scripts/My_Worker-1/secrets-bulk`)
     expect(new URL(calls[0]?.url ?? '').host).toBe('api.cloudflare.com')
   })
 })

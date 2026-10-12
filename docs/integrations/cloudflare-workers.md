@@ -75,20 +75,19 @@ A plan with names over these limits is a blocker (`TOO_MANY_ITEMS`, `VALUE_TOO_L
 
 ## Verified vs unverified
 
-Verified from Cloudflare documentation (changelog <https://developers.cloudflare.com/changelog/post/2026-06-03-bulk-secrets-api/> of 2026-06-03, and the wrangler `secret bulk` docs <https://developers.cloudflare.com/workers/wrangler/commands/workers/#secret-bulk>). The changelog states the body shape, `null` deletes, unchanged omitted names and the 100-operation limit; it does **not** state the HTTP verb, response shape or list pagination:
+Verified **live against a real Worker** (2026-10-12, issue #41) and from the Cloudflare API reference (<https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/secrets/methods/bulk_update/>):
 
-- A bulk secrets endpoint exists under `workers/scripts/{script_name}/secrets`; body `{ "secrets": { NAME: { type, name, text } | null } }`;
-  `null` deletes; omitted names are unchanged; at most 100 operations per request.
+- The bulk mutate endpoint is `PATCH /accounts/{id}/workers/scripts/{script_name}/secrets-bulk` (RFC 7396 merge patch); body `{ "secrets": { NAME: { type, name, text } | null } }`;
+  `null` deletes; omitted names are unchanged; at most 100 operations per request. It is a **distinct path** from the list endpoint: `PATCH` on `.../secrets` (no `-bulk`) returns `10405 "Method not allowed for this authentication scheme"` and writes nothing — this was the Phase 1 bug.
+- Listing is `GET .../secrets`, returning names and types only, never values.
 - Listing returns names and types only, never values.
 - Variable limits (64 Free / 128 Paid, 5 KB each), error codes 10054 and 10055; rate limit of 1200 requests per 5 minutes; the standard
   v4 error envelope; Workers codes 10007, 10016, 10021, 10026, 10035.
 
 **Not verified** (handled defensively in the code; confirm against a real account before treating this as available):
 
-1. The HTTP verb of the bulk endpoint. The provider sends `PATCH` only (see Safety); if Cloudflare expects another verb every push fails with `PROVIDER_ERROR` until the code is changed after verification.
-2. The bulk response shape. A 2xx is success unless the JSON says `success: false`; per-secret results are not available, so a rejected
-   request fails every name in that request.
-3. The list endpoint path (`GET .../secrets`), its envelope (`result` as an array of `{ name, type }`) and pagination. Pagination is **not implemented**: the list call fails closed (`PROVIDER_ERROR`) when `result_info` shows more than one page (`total_pages > 1`, `total_count` larger than the page, or a non-empty cursor). A response without `result_info` is accepted as complete, which is itself unverified.
+1. The bulk response shape on *partial* failure. Live testing showed a whole-chunk rejection on a validation error (one oversize value failed the entire request; nothing in it landed), and a 2xx returns the full resulting secret map. The provider still treats any 2xx as all-ok and does not yet read that map to confirm per-name landing — a refinement tracked for a later phase. A 2xx with `success: false` is treated as failure.
+2. List pagination. The list call (`GET .../secrets`, `result` as an array of `{ name, type }`) fails closed (`PROVIDER_ERROR`) when `result_info` shows more than one page (`total_pages > 1`, `total_count` larger than the page, or a non-empty cursor). A response without `result_info` is accepted as complete, which is itself unverified.
 4. The verify endpoints: the provider tries `GET /accounts/{id}/tokens/verify` and falls back to `GET /user/tokens/verify`. Verifying a
    token does not prove it can edit Worker secrets, so a connection can verify and a run can still fail with `PROVIDER_AUTH`.
 5. The token permission name and whether listing works with a read-only permission.

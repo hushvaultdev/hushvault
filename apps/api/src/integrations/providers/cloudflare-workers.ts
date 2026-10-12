@@ -2,10 +2,12 @@
 // (type secret_text), one way. Calls ONE fixed host; user input only ever becomes URL-encoded identifier path
 // segments that passed a strict regex. Never logs or returns the credential, secret values or provider bodies.
 //
-// UNVERIFIED against the live API (see docs/integrations/cloudflare-workers.md): the bulk endpoint's HTTP verb,
-// the list response envelope, the verify endpoints and per-endpoint status codes. Each is handled defensively.
-// The bulk request is PATCH only. There is deliberately NO fallback to PUT: if PUT replaces the whole secret set,
-// a fallback could delete every secret that is not in the request.
+// VERIFIED live against a real Worker (2026-10-12, issue #41): the bulk mutate endpoint is
+// `PATCH /accounts/{id}/workers/scripts/{script}/secrets-bulk` (RFC 7396 merge patch, null deletes,
+// omitted names untouched, <=100 ops). The list endpoint is `GET .../secrets`. These are DISTINCT
+// paths — PATCH on `.../secrets` returns 10405 and writes nothing, which is the bug this corrected.
+// Still handled defensively. The bulk request is PATCH only: there is deliberately NO fallback to a
+// per-secret PUT, which replaces the whole set and would delete every secret not in the request.
 import type { VerifyResult } from '../provider'
 import type { FailureInfo, ItemResult, ProviderErrorCode, PushInput, PushResult, SyncOp, SyncProvider } from '../sync-types'
 
@@ -113,10 +115,22 @@ function parseResource(resource: unknown): Record<string, string> | null {
   return { accountId: accountId.toLowerCase(), scriptName }
 }
 
+// GET list of a script's secrets (names + types only). Used by verify and listNames.
 function secretsPath(resource: Record<string, string>): string | null {
   const parsed = parseResource(resource)
   if (!parsed) return null
   return `/accounts/${enc(parsed['accountId'] ?? '')}/workers/scripts/${enc(parsed['scriptName'] ?? '')}/secrets`
+}
+
+// Bulk create/update/delete endpoint (RFC 7396 merge patch). This is a DISTINCT endpoint from the
+// list path above: it is `.../secrets-bulk`, not `.../secrets`. PATCH on `.../secrets` returns
+// 10405 "Method not allowed for this authentication scheme" and nothing is written (verified live
+// against a real Worker, 2026-10-12, issue #41). A value of null deletes a name; omitted names are
+// left unchanged; up to 100 operations per request.
+function secretsBulkPath(resource: Record<string, string>): string | null {
+  const parsed = parseResource(resource)
+  if (!parsed) return null
+  return `/accounts/${enc(parsed['accountId'] ?? '')}/workers/scripts/${enc(parsed['scriptName'] ?? '')}/secrets-bulk`
 }
 
 async function verifyOne(path: string, credential: string, signal: AbortSignal): Promise<'ok' | 'auth' | 'rate' | 'error'> {
@@ -236,7 +250,7 @@ export const cloudflareWorkersProvider: SyncProvider = {
   },
 
   async push(input: PushInput): Promise<PushResult> {
-    const path = secretsPath(input.resource)
+    const path = secretsBulkPath(input.resource)
     if (!path) return { ok: false, code: 'PROVIDER_VALIDATION' }
     const results: ItemResult[] = []
     let stop: Failure | null = null
