@@ -347,9 +347,19 @@ describe('limits and safety', () => {
     const audits = await env.DB.prepare("SELECT actor_type, action FROM audit_log WHERE action LIKE 'sync.run.%'").all<{ actor_type: string; action: string }>()
     expect(audits.results.length).toBeGreaterThan(0)
     expect(audits.results.every((a) => a.actor_type === 'system')).toBe(true)
+    // The transition into needs_attention writes exactly one owner-notification row (issue #98).
+    const notifyRows = await env.DB.prepare("SELECT resource_id FROM audit_log WHERE action = 'notify.sync_needs_attention'").all<{ resource_id: string }>()
+    expect((notifyRows.results ?? []).map((r) => r.resource_id)).toEqual([w.targetId])
+
     // A needs_attention target is no longer queued by changes.
     await env.DB.prepare('DELETE FROM sync_outbox').run()
     expect(await enqueueSyncForEnvironment(env as never, w.envId)).toBe(0)
+
+    // A manual re-run that stays parked does NOT notify again (no transition: it was already needs_attention).
+    const { runSync } = await import('../src/integrations/sync-engine')
+    await runSync(env as never, w.targetId, { trigger: 'manual', actorId: w.userId })
+    const after = await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'notify.sync_needs_attention'").first<{ n: number }>()
+    expect(after?.n).toBe(1)
   })
 
   it('no secret value or credential appears in the outbox, run rows, audit rows or logs', async () => {

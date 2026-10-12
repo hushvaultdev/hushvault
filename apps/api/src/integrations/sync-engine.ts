@@ -18,6 +18,7 @@
 import type { SyncAutoSync, SyncErrorCode, SyncNameFilter, SyncPlanDto, SyncRunDto, SyncRunStatus, SyncTargetDto, SyncTrigger } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
+import { notifySyncNeedsAttention } from '../lib/notify'
 import { readCredential } from '../lib/integration-credentials'
 import { resolveEnvironment } from '../lib/resolve-environment'
 import { writeAuditLog } from '../lib/security'
@@ -682,15 +683,29 @@ export async function runSync(env: Env, targetId: string, opts: RunOptions): Pro
       console.error(JSON.stringify({ level: 'error', event: 'sync.finish_failed' }))
     }
     result = { ...result, status: 'failed', errorCode: 'PROVIDER_ERROR', nextRetryAt: fallbackRetry }
-  } else {
+  }
+  let tookOver = false
+  if (committed !== null) {
     const last = committed[committed.length - 1] as { meta?: { changes?: number } } | undefined
     if (Number(last?.meta?.changes ?? 1) === 0) {
       // Someone else closed this run (its lease expired and a newer run took over): report what is stored.
+      tookOver = true
       const stored = await env.DB.prepare(`SELECT ${RUN_COLUMNS} FROM sync_runs WHERE id = ? LIMIT 1`).bind(runId).first<RunDbRow>()
       if (stored) result = toSyncRunDto(stored)
     }
   }
   await writeRunAudit(env, target, runId, result.status === 'succeeded' ? 'sync.run.succeeded' : 'sync.run.failed', actorType, actorId, meta)
+
+  // Notify owners only on the TRANSITION into needs_attention: the target was active before this run and this run
+  // (which still owns the write — not a takeover) flipped it. A target already parked is not re-notified, and a
+  // retry that stays failed-but-retryable does not notify. Never throws; carries no secret material (issue #98).
+  if (committed !== null && !tookOver && needsAttention && target.status === 'active') {
+    try {
+      await notifySyncNeedsAttention(env, { orgId: target.orgId, targetId: target.id, provider: target.provider, errorCode: result.errorCode ?? final.errorCode ?? 'PROVIDER_ERROR' })
+    } catch {
+      console.error(JSON.stringify({ level: 'error', event: 'sync.notify_failed' }))
+    }
+  }
   return result
 }
 
