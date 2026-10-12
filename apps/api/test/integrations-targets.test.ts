@@ -35,6 +35,24 @@ const createBody = (w: { projectId: string; envId: string; connectionId: string 
 
 const createTarget = (token: string, body: unknown) => call(env, 'POST', '/api/integrations/targets', { token, json: body })
 
+describe('coverage (environments without a target)', () => {
+  it('lists only environments that have no active target, and drops one once mapped', async () => {
+    const w = await setupOrg({ plan: 'pro' })
+    const env2 = await seedEnvironment(env, w.projectId, 'staging')
+    const coverage = () => call(env, 'GET', '/api/integrations/coverage', { token: w.token })
+
+    const before = await coverage()
+    const envIds = before.body.data.environmentsWithoutTarget.map((e: { envId: string }) => e.envId)
+    expect(envIds).toEqual(expect.arrayContaining([w.envId, env2]))
+
+    await createTarget(w.token, createBody(w, 'w1')) // maps w.envId
+    const after = await coverage()
+    const afterIds = after.body.data.environmentsWithoutTarget.map((e: { envId: string }) => e.envId)
+    expect(afterIds).toContain(env2)
+    expect(afterIds).not.toContain(w.envId)
+  })
+})
+
 describe('bulk target creation (idempotent onboarding)', () => {
   it('creates many in one call, returns exact duplicates as existing, and reports per-item errors by index', async () => {
     const w = await setupOrg({ plan: 'pro' })
@@ -102,7 +120,9 @@ describe('auth matrix', () => {
 
     const endpoints: Array<[string, string, unknown?]> = [
       ['POST', '/api/integrations/targets', createBody(w)],
+      ['POST', '/api/integrations/targets/bulk', { targets: [createBody(w)] }],
       ['GET', '/api/integrations/targets'],
+      ['GET', '/api/integrations/coverage'],
       ['PATCH', `/api/integrations/targets/${w.targetId}`, { deleteRemoved: true }],
       ['DELETE', `/api/integrations/targets/${w.targetId}`],
       ['POST', `/api/integrations/targets/${w.targetId}/preview`],

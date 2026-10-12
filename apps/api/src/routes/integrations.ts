@@ -405,6 +405,22 @@ integrationsRouter.post('/targets/bulk', ...adminOnly, integrationWriteRateLimit
   return c.json({ data: { created, existing, errors } }, 201)
 })
 
+// GET /api/integrations/coverage — environments in the org that have no active sync target yet.
+// Lets a multi-repo client audit onboarding ("which environments aren't mapped?") without paging every target.
+integrationsRouter.get('/coverage', ...adminOnly, async (c) => {
+  const auth = c.get('auth')
+  const rows = await c.env.DB.prepare(
+    'SELECT e.id AS env_id, e.name AS env_name, e.slug AS env_slug, p.id AS project_id, p.name AS project_name'
+    + ' FROM environments e INNER JOIN projects p ON p.id = e.project_id AND p.org_id = ?'
+    + ' WHERE NOT EXISTS (SELECT 1 FROM sync_targets t WHERE t.env_id = e.id AND t.org_id = ? AND t.deleted_at IS NULL)'
+    + ' ORDER BY p.name, e.name LIMIT 500',
+  ).bind(auth.orgId, auth.orgId).all<{ env_id: string; env_name: string; env_slug: string; project_id: string; project_name: string }>()
+  const environmentsWithoutTarget = (rows.results ?? []).map((r) => ({
+    envId: r.env_id, envName: r.env_name, envSlug: r.env_slug, projectId: r.project_id, projectName: r.project_name,
+  }))
+  return c.json({ data: { environmentsWithoutTarget } })
+})
+
 // GET /api/integrations/targets?limit=&cursor=
 // Keyset-paginated, newest first; each target's last run status resolves in the same query (no N+1).
 integrationsRouter.get('/targets', ...adminOnly, async (c) => {
