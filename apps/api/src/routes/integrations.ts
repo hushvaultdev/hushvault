@@ -7,7 +7,7 @@ import { encryptCredentialWithRing } from '../crypto/envelope'
 import { enqueueSyncForTarget } from '../integrations/sync-scheduler'
 import { getProvider, connectableProviderIds } from '../integrations/provider'
 import { isDeniedAccount, isTargetDenied } from '../integrations/target-denylist'
-import { SyncEngineError, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
+import { SyncEngineError, listSyncTargets, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
 import { isSyncProvider } from '../integrations/sync-types'
 import { createPrefixedId } from '../lib/auth'
 import { loadSyncLimits, maxSyncTargetsCaseSql } from '../lib/plan-limits'
@@ -348,16 +348,14 @@ integrationsRouter.post('/targets', ...adminOnly, integrationWriteRateLimit, zVa
   return c.json({ data: await toSyncTargetDto(c.env, target) }, 201)
 })
 
-// GET /api/integrations/targets
+// GET /api/integrations/targets?limit=&cursor=
+// Keyset-paginated, newest first; each target's last run status resolves in the same query (no N+1).
 integrationsRouter.get('/targets', ...adminOnly, async (c) => {
   const auth = c.get('auth')
-  const rows = await c.env.DB.prepare('SELECT id FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 200').bind(auth.orgId).all<{ id: string }>()
-  const data = []
-  for (const row of rows.results ?? []) {
-    const target = await loadSyncTarget(c.env, row.id, auth.orgId)
-    if (target) data.push(await toSyncTargetDto(c.env, target))
-  }
-  return c.json({ data })
+  const limitRaw = Number.parseInt(c.req.query('limit') ?? '', 10)
+  const limit = Number.isFinite(limitRaw) ? limitRaw : undefined
+  const { targets, nextCursor } = await listSyncTargets(c.env, auth.orgId, { limit, cursor: c.req.query('cursor') ?? null })
+  return c.json({ data: targets, nextCursor })
 })
 
 // PATCH /api/integrations/targets/:id - the connection cannot be changed

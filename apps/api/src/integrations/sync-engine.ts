@@ -216,10 +216,15 @@ export async function loadSyncTarget(env: Env, targetId: string, orgId?: string)
   return toTargetRow(row)
 }
 
-/** DTO for the API layer. lastRunStatus comes from the newest run. */
-export async function toSyncTargetDto(env: Env, target: SyncTargetRow): Promise<SyncTargetDto> {
-  const last = await env.DB.prepare('SELECT status FROM sync_runs WHERE target_id = ? ORDER BY started_at DESC, id DESC LIMIT 1')
-    .bind(target.id).first<{ status: SyncRunStatus }>()
+/**
+ * DTO for the API layer. lastRunStatus comes from the newest run. Pass `lastRunStatus` (including `null`) to use
+ * an already-fetched value and skip the per-target query — the list endpoint does this to avoid an N+1.
+ */
+export async function toSyncTargetDto(env: Env, target: SyncTargetRow, lastRunStatus?: SyncRunStatus | null): Promise<SyncTargetDto> {
+  const last = lastRunStatus !== undefined
+    ? lastRunStatus
+    : (await env.DB.prepare('SELECT status FROM sync_runs WHERE target_id = ? ORDER BY started_at DESC, id DESC LIMIT 1')
+      .bind(target.id).first<{ status: SyncRunStatus }>())?.status ?? null
   return {
     id: target.id,
     projectId: target.projectId,
@@ -232,10 +237,48 @@ export async function toSyncTargetDto(env: Env, target: SyncTargetRow): Promise<
     autoSync: target.autoSync,
     status: target.status,
     lastRunAt: target.lastRunAt,
-    lastRunStatus: last?.status ?? null,
+    lastRunStatus: last,
     createdAt: target.createdAt,
     updatedAt: target.updatedAt,
   }
+}
+
+export type SyncTargetPage = { targets: SyncTargetDto[]; nextCursor: string | null }
+
+/**
+ * One page of an organisation's live targets, newest first, with each target's latest run status resolved in the
+ * SAME query (a correlated subquery) rather than a per-row round trip — the list used to do two queries per target.
+ * Keyset pagination on (created_at, id): an opaque cursor marks the last row returned; `nextCursor` is null on the
+ * final page. `limit` is clamped to [1, 200].
+ */
+export async function listSyncTargets(env: Env, orgId: string, opts: { limit?: number; cursor?: string | null } = {}): Promise<SyncTargetPage> {
+  const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 50)), 200)
+  const binds: unknown[] = [orgId]
+  let where = 'org_id = ? AND deleted_at IS NULL'
+  if (opts.cursor) {
+    let decoded = ''
+    try { decoded = atob(opts.cursor.replace(/-/g, '+').replace(/_/g, '/')) } catch { decoded = '' }
+    const sep = decoded.lastIndexOf('|')
+    if (sep > 0) {
+      where += ' AND (created_at < ? OR (created_at = ? AND id < ?))'
+      const createdAt = decoded.slice(0, sep)
+      const id = decoded.slice(sep + 1)
+      binds.push(createdAt, createdAt, id)
+    }
+  }
+  const rows = await env.DB.prepare(
+    `SELECT ${TARGET_COLUMNS}, (SELECT status FROM sync_runs WHERE target_id = sync_targets.id ORDER BY started_at DESC, id DESC LIMIT 1) AS last_run_status`
+    + ` FROM sync_targets WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ?`,
+  ).bind(...binds, limit + 1).all<TargetDbRow & { last_run_status: SyncRunStatus | null }>()
+  const all = rows.results ?? []
+  const page = all.slice(0, limit)
+  const targets = await Promise.all(page.map((row) => toSyncTargetDto(env, toTargetRow(row), row.last_run_status)))
+  let nextCursor: string | null = null
+  if (all.length > limit && page.length > 0) {
+    const last = page[page.length - 1]!
+    nextCursor = btoa(`${last.created_at}|${last.id}`).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  }
+  return { targets, nextCursor }
 }
 
 const ZERO_COUNTS: SyncRunDto['counts'] = { created: 0, updated: 0, deleted: 0, skipped: 0, failed: 0 }

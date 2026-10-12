@@ -105,6 +105,35 @@ describe('create / list / patch / delete', () => {
     expect(audits.results).toEqual([{ action: 'sync.target.create', resource_id: res.body.data.id, resource_type: 'sync_target' }])
   })
 
+  it('GET /targets paginates by keyset (newest first) and resolves lastRunStatus without an N+1', async () => {
+    const w = await setupOrg({ plan: 'pro' })
+    const ids: string[] = []
+    for (const n of ['a', 'b', 'c', 'd', 'e']) ids.push((await createTarget(w.token, createBody(w, `worker-${n}`))).body.data.id)
+    // Give the newest target a run so lastRunStatus is populated (not just null).
+    const newest = ids[ids.length - 1]!
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, counts_json, started_at) VALUES ('isr_list', ?, 'manual', 'succeeded', 1, '{}', ?)")
+      .bind(newest, new Date().toISOString()).run()
+
+    const page1 = await call(env, 'GET', '/api/integrations/targets?limit=2', { token: w.token })
+    expect(page1.body.data).toHaveLength(2)
+    expect(page1.body.nextCursor).toBeTruthy()
+    expect(page1.body.data[0].id).toBe(newest) // newest first
+    expect(page1.body.data[0].lastRunStatus).toBe('succeeded')
+
+    const page2 = await call(env, 'GET', `/api/integrations/targets?limit=2&cursor=${encodeURIComponent(page1.body.nextCursor)}`, { token: w.token })
+    expect(page2.body.data).toHaveLength(2)
+    // No overlap between pages.
+    const p1ids = page1.body.data.map((t: { id: string }) => t.id)
+    const p2ids = page2.body.data.map((t: { id: string }) => t.id)
+    expect(p1ids.filter((id: string) => p2ids.includes(id))).toEqual([])
+
+    const page3 = await call(env, 'GET', `/api/integrations/targets?limit=2&cursor=${encodeURIComponent(page2.body.nextCursor)}`, { token: w.token })
+    expect(page3.body.data).toHaveLength(1) // 5 total
+    expect(page3.body.nextCursor).toBeNull()
+    // All five ids seen exactly once across the three pages.
+    expect([...p1ids, ...p2ids, ...page3.body.data.map((t: { id: string }) => t.id)].sort()).toEqual([...ids].sort())
+  })
+
   it('validates the body strictly', async () => {
     const w = await setupOrg()
     for (const bad of [
