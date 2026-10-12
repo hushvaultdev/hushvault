@@ -270,6 +270,37 @@ describe('retries', () => {
   })
 })
 
+describe('crashed-run recovery', () => {
+  it('sweeps an expired-lease run on a MANUAL-ONLY target: failed(TIMEOUT) + retry scheduled, not stuck running', async () => {
+    // A manual-only target (no schedule, no on-change) whose run crashed. runSync only sweeps on the next run
+    // for that target, which never comes — so without the tick-level sweep it stays "running" forever (issue #98).
+    const w = await setupSyncWorld(env)
+    const now = new Date()
+    const expired = new Date(now.getTime() - 60_000).toISOString()
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, counts_json, started_at, lease_until) VALUES ('isr_crash', ?, 'manual', 'running', 1, '{}', ?, ?)")
+      .bind(w.targetId, expired, expired).run()
+
+    await syncTick(env as never, now)
+
+    const row = await env.DB.prepare("SELECT status, error_code, next_retry_at, lease_until FROM sync_runs WHERE id = 'isr_crash'")
+      .first<{ status: string; error_code: string; next_retry_at: string | null; lease_until: string | null }>()
+    expect(row?.status).toBe('failed')
+    expect(row?.error_code).toBe('TIMEOUT')
+    expect(row?.lease_until).toBeNull()
+    expect(row?.next_retry_at).not.toBeNull() // retryFailed will recover it
+  })
+
+  it('does not touch a run whose lease is still valid', async () => {
+    const w = await setupSyncWorld(env)
+    const now = new Date()
+    const future = new Date(now.getTime() + 60_000).toISOString()
+    await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, counts_json, started_at, lease_until) VALUES ('isr_live', ?, 'manual', 'running', 1, '{}', ?, ?)")
+      .bind(w.targetId, now.toISOString(), future).run()
+    await syncTick(env as never, now)
+    expect((await env.DB.prepare("SELECT status FROM sync_runs WHERE id = 'isr_live'").first<{ status: string }>())?.status).toBe('running')
+  })
+})
+
 describe('limits and safety', () => {
   it('defers (does not drop) work when the organisation hit its automatic-run cap', async () => {
     const w = await setupSyncWorld(env)

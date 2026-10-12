@@ -35,6 +35,28 @@ const createBody = (w: { projectId: string; envId: string; connectionId: string 
 
 const createTarget = (token: string, body: unknown) => call(env, 'POST', '/api/integrations/targets', { token, json: body })
 
+describe('credential rotation recovers parked targets', () => {
+  it('reactivates needs_attention targets of the connection and re-enqueues the on-change ones', async () => {
+    const w = await setupOrg()
+    const onChange = await createTarget(w.token, createBody(w, 'worker-a', { autoSync: { onChange: true, scheduleMinutes: null } }))
+    const manual = await createTarget(w.token, createBody(w, 'worker-b'))
+    expect([onChange.status, manual.status]).toEqual([201, 201])
+    // Both parked as if the stored credential had been rejected.
+    await env.DB.prepare("UPDATE sync_targets SET status = 'needs_attention' WHERE connection_id = ?").bind(w.connectionId).run()
+    await env.DB.prepare('DELETE FROM sync_outbox').run()
+
+    const rotated = await call(env, 'PUT', `/api/integrations/connections/${w.connectionId}/credential`, { token: w.token, json: { credential: CREDENTIAL } })
+    expect(rotated.status).toBe(200)
+
+    // Both targets are active again.
+    const statuses = await env.DB.prepare('SELECT id, status FROM sync_targets WHERE connection_id = ?').bind(w.connectionId).all<{ id: string; status: string }>()
+    expect((statuses.results ?? []).every((r) => r.status === 'active')).toBe(true)
+    // Only the on-change target is re-enqueued; the manual-only one recovers on its next manual/scheduled run.
+    const enqueued = (await env.DB.prepare('SELECT target_id FROM sync_outbox WHERE done_at IS NULL').all<{ target_id: string }>()).results ?? []
+    expect(enqueued.map((r) => r.target_id)).toEqual([onChange.body.data.id])
+  })
+})
+
 describe('auth matrix', () => {
   it('only a human admin/owner with a current admin membership may use any target endpoint', async () => {
     const w = await setupSyncWorld(env)

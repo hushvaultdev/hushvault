@@ -6,7 +6,7 @@ import type { SyncTrigger } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
 import { logEvent } from '../lib/security'
 import { syncLimitsForPlan } from '../lib/plan-limits'
-import { MAX_SYNC_ATTEMPTS, loadSyncTarget, runSync } from './sync-engine'
+import { MAX_SYNC_ATTEMPTS, computeNextRetryAt, loadSyncTarget, runSync } from './sync-engine'
 
 /** Changes inside this window coalesce into one run. The cron sweeps every minute, so latency is about 30-90 s. */
 export const SYNC_DEBOUNCE_MS = 30_000
@@ -168,6 +168,28 @@ async function safeRun(env: Env, targetId: string, trigger: Exclude<SyncTrigger,
   }
 }
 
+/**
+ * Close runs abandoned by a crashed Worker (issue #98). runSync only sweeps an expired lease when a NEW run
+ * starts for the same target, so a MANUAL-ONLY target's crashed run would otherwise stay `running` forever —
+ * reported as "running" by toSyncTargetDto and never retried. This tick-level sweep recovers every target:
+ * an expired-lease queued/running run is marked failed(TIMEOUT) and given a retry time (null once attempts are
+ * spent), so retryFailed picks it up and the single-flight slot is freed. Cleanup, not new work: no run budget.
+ */
+async function sweepExpiredRuns(env: Env, now: Date, tally: SyncTickResult): Promise<void> {
+  const nowIso = now.toISOString()
+  const expired = await env.DB.prepare(
+    "SELECT id, attempt FROM sync_runs WHERE status IN ('queued', 'running') AND lease_until IS NOT NULL AND lease_until < ? ORDER BY lease_until LIMIT ?",
+  ).bind(nowIso, SELECT_LIMIT).all<{ id: string; attempt: number }>()
+  for (const row of expired.results ?? []) {
+    const nextRetryAt = computeNextRetryAt('TIMEOUT', row.attempt, now)
+    // Guard on still-running so this never races a run that is finishing normally.
+    const res = await env.DB.prepare(
+      "UPDATE sync_runs SET status = 'failed', error_code = 'TIMEOUT', finished_at = ?, next_retry_at = ?, lease_until = NULL WHERE id = ? AND status IN ('queued', 'running') AND lease_until IS NOT NULL AND lease_until < ?",
+    ).bind(nowIso, nextRetryAt, row.id, nowIso).run()
+    if (Number(res.meta.changes ?? 0) === 1) tally.failures += 1
+  }
+}
+
 /** Process due on-change rows: claim, run, complete only if no change landed meanwhile. */
 async function drainOutbox(env: Env, now: Date, tally: SyncTickResult, ctx: TickContext): Promise<void> {
   const nowIso = now.toISOString()
@@ -317,6 +339,13 @@ async function reportBacklog(env: Env, now: Date): Promise<void> {
 export async function syncTick(env: Env, now: Date = new Date()): Promise<SyncTickResult> {
   const tally: SyncTickResult = { changeRuns: 0, scheduleRuns: 0, retryRuns: 0, deferred: 0, failures: 0 }
   const ctx = newTickContext()
+  // Recover crashed runs first, so the slot they held is free and retryFailed can pick them up this same tick.
+  try {
+    await sweepExpiredRuns(env, now, tally)
+  } catch {
+    tally.failures += 1
+    console.error(JSON.stringify({ level: 'error', event: 'sync.tick_step_failed', step: 'sweepExpiredRuns' }))
+  }
   for (const step of [drainOutbox, retryFailed, runSchedules]) {
     try {
       await step(env, now, tally, ctx)

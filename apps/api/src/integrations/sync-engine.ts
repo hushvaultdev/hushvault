@@ -667,9 +667,21 @@ async function execute(
 
   const { plan, ops, forget } = planned
   counts.skipped = plan.skip.length + plan.conflict.length
-  // Limits are validated before any write. The shared contract has no SYNC_BLOCKED run code, so a blocked run
-  // is a non-retryable validation failure: it needs the owner to change the environment or the filter.
-  if (plan.blockers.length > 0) return failedOutcome('PROVIDER_VALIDATION')
+  // Blocked names (invalid name, empty/oversize value, over capacity) are already EXCLUDED from `ops` by the
+  // planner, so the valid subset can still be pushed. Count the blocked names as failed and record a
+  // (non-retryable) validation error, but do NOT abort — one bad value must not stop the other secrets from
+  // syncing (issue #98). With valid ops present this yields a `partial` run; with none, a `failed` run. Either
+  // way the validation error flags needs_attention so the owner fixes the bad name/value.
+  const blockedNames = new Set(plan.blockers.flatMap((b) => b.names))
+  const preErrors = new Set<SyncErrorCode>()
+  if (blockedNames.size > 0) {
+    counts.failed += blockedNames.size
+    preErrors.add('PROVIDER_VALIDATION')
+  }
+  // Nothing valid to push and nothing to forget: it is purely a validation failure, report it as such now.
+  if (ops.length === 0 && forget.length === 0) {
+    return blockedNames.size > 0 ? failedOutcome('PROVIDER_VALIDATION') : { status: 'succeeded', errorCode: null, errors: new Set() }
+  }
 
   const connection = await env.DB.prepare('SELECT config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1')
     .bind(target.connectionId, target.orgId).first<{ config_json: string }>()
@@ -679,7 +691,7 @@ async function execute(
   const credential = await readCredential(env, target.orgId, target.connectionId)
   if (credential === null) return failedOutcome('CREDENTIAL_UNAVAILABLE')
 
-  const errors = new Set<SyncErrorCode>()
+  const errors = new Set<SyncErrorCode>(preErrors)
   let retryAfterSeconds: number | undefined
   const note = (code: SyncErrorCode, retryAfter?: number): void => {
     errors.add(code)

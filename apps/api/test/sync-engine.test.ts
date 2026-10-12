@@ -42,6 +42,8 @@ async function target(world: { targetId: string }) {
 }
 const ledger = async (targetId: string) =>
   (await env.DB.prepare('SELECT name FROM sync_items WHERE target_id = ? ORDER BY name').bind(targetId).all<{ name: string }>()).results.map((r) => r.name)
+/** Every name sent to the provider across all push chunks. */
+const pushedNames = (): string[] => provider.pushCalls.flat().map((o) => o.name)
 const runRow = (id: string) => env.DB.prepare('SELECT * FROM sync_runs WHERE id = ?').bind(id).first<Record<string, unknown>>()
 
 describe('planning', () => {
@@ -136,7 +138,7 @@ describe('reserved bootstrap names', () => {
 })
 
 describe('provider limits are validated before any write', () => {
-  it('blocks with TOO_MANY_ITEMS / VALUE_TOO_LARGE / NAME_INVALID and makes zero push calls', async () => {
+  it('reports blockers but still pushes the valid, in-capacity subset; never sends a blocked name', async () => {
     provider = installFakeProvider({ maxItems: 3, maxNameLength: 8, maxValueBytes: 10 })
     const w = await setupSyncWorld(env, { secrets: { OK_ONE: 'a', OK_TWO: 'b', TOO_LONG_NAME: 'c', BIG: 'x'.repeat(11), 'MULTIé': 'z' } })
     const planned = await planSync(env, await target(w), provider)
@@ -147,11 +149,20 @@ describe('provider limits are validated before any write', () => {
     expect(codes['TOO_MANY_ITEMS']).toBeDefined()
     expect(planned.plan.create).not.toContain('BIG')
 
+    // One bad/over-capacity name no longer aborts the whole run: the valid subset is pushed, blockers are
+    // reported as failures, and the run is partial + needs_attention so the owner fixes them (issue #98).
     const run = await runSync(env, w.targetId, { trigger: 'manual' })
-    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION', nextRetryAt: null })
-    expect(provider.pushCalls).toHaveLength(0)
+    expect(run).toMatchObject({ status: 'partial', errorCode: 'PROVIDER_VALIDATION', nextRetryAt: null })
     expect((await target(w)).status).toBe('needs_attention')
-    expect(await ledger(w.targetId)).toEqual([])
+    // No blocked name was ever sent to the provider, nor ledgered.
+    for (const bad of ['BIG', 'MULTIé', 'TOO_LONG_NAME']) {
+      expect(pushedNames()).not.toContain(bad)
+      expect(await ledger(w.targetId)).not.toContain(bad)
+    }
+    // A valid, in-capacity name did sync.
+    expect(await ledger(w.targetId)).toContain('OK_ONE')
+    expect(run.counts.created).toBeGreaterThan(0)
+    expect(run.counts.failed).toBeGreaterThan(0)
   })
 
   it('chunks operations by limits.maxItems', async () => {
@@ -639,9 +650,12 @@ describe('unsafe names', () => {
     expect(invalid?.names).toEqual(expect.arrayContaining(['__proto__', 'constructor', 'prototype', 'Prototype']))
     expect(planned.plan.create).toEqual(['GOOD'])
     const run = await runSync(env, w.targetId, { trigger: 'manual' })
-    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION' })
-    expect(provider.pushCalls).toHaveLength(0)
-    expect(await ledger(w.targetId)).toEqual([])
+    // GOOD syncs; the unsafe names are reported as blockers, never sent, never ledgered.
+    expect(run).toMatchObject({ status: 'partial', errorCode: 'PROVIDER_VALIDATION' })
+    for (const bad of ['__proto__', 'constructor', 'prototype', 'Prototype']) {
+      expect(pushedNames()).not.toContain(bad)
+    }
+    expect(await ledger(w.targetId)).toEqual(['GOOD'])
   })
 })
 
@@ -653,8 +667,10 @@ describe('empty values', () => {
     expect(planned.plan.blockers).toEqual([{ code: 'EMPTY_VALUE', names: ['BLANK'] }])
     expect(planned.plan.create).toEqual(['FULL'])
     const run = await runSync(env, w.targetId, { trigger: 'manual' })
-    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION' })
-    expect(provider.pushCalls).toHaveLength(0)
+    // FULL syncs; BLANK is reported as an EMPTY_VALUE blocker, never sent.
+    expect(run).toMatchObject({ status: 'partial', errorCode: 'PROVIDER_VALIDATION' })
+    expect(pushedNames()).toEqual(['FULL'])
+    expect(await ledger(w.targetId)).toEqual(['FULL'])
   })
 })
 
@@ -788,8 +804,11 @@ describe('provider capacity', () => {
     expect(planned.plan.blockers).toEqual([{ code: 'TOO_MANY_ITEMS', names: ['B_NEW'] }])
     expect(planned.plan.create).toEqual(['A_NEW'])
     const run = await runSync(env, w.targetId, { trigger: 'manual' })
-    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_VALIDATION' })
-    expect(provider.pushCalls).toHaveLength(0)
+    // A_NEW fits and syncs; B_NEW is over the cap, reported and not sent. Partial, needs_attention.
+    expect(run).toMatchObject({ status: 'partial', errorCode: 'PROVIDER_VALIDATION' })
+    expect(pushedNames()).toEqual(['A_NEW'])
+    expect(pushedNames()).not.toContain('B_NEW')
+    expect(await ledger(w.targetId)).toEqual(['A_NEW'])
   })
 
   it('names we update (already there) cost nothing, deletes free capacity, and a full target with no creates is fine', async () => {

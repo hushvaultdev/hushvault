@@ -166,6 +166,23 @@ integrationsRouter.put('/connections/:id/credential', ...adminOnly, integrationW
     return c.json({ error: 'NOT_FOUND', message: 'Connection not found' }, 404)
   }
 
+  // Recovery (issue #98): a rejected credential is the common reason a target is parked `needs_attention`, and
+  // nothing retries a parked target by itself — so without this a credential fix leaves its targets stuck and
+  // every change made meanwhile is dropped (the outbox only enqueues active targets). Flip this connection's
+  // parked targets back to active and re-enqueue the on-change ones so they catch up; scheduled targets resume
+  // on their schedule. A target parked for an unrelated reason simply re-parks on its next run (self-correcting).
+  const parked = await c.env.DB.prepare(
+    "SELECT id, sync_on_change FROM sync_targets WHERE connection_id = ? AND org_id = ? AND status = 'needs_attention' AND deleted_at IS NULL",
+  ).bind(id, auth.orgId).all<{ id: string; sync_on_change: number }>()
+  if ((parked.results ?? []).length > 0) {
+    await c.env.DB.prepare(
+      "UPDATE sync_targets SET status = 'active', updated_at = ? WHERE connection_id = ? AND org_id = ? AND status = 'needs_attention' AND deleted_at IS NULL",
+    ).bind(now, id, auth.orgId).run()
+    for (const t of parked.results ?? []) {
+      if (t.sync_on_change === 1) await enqueueSyncForTarget(c.env, t.id)
+    }
+  }
+
   await audit(c, auth, 'integration.update', id)
   const updated = await c.env.DB.prepare(`SELECT ${METADATA_COLUMNS} FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1`).bind(id, auth.orgId).first<ConnectionRow>()
   return c.json({ data: updated ? metadata(updated) : null })
