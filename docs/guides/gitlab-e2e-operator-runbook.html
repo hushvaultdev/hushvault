@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HushVault Phase 3 — GitLab sync runbook</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1b1f24; --muted:#5b6672; --line:#e3e7ec;
+    --accent:#6b2fb3; --ok:#1a7f45; --warn:#9a6700; --bad:#b4232a;
+    --code-bg:#f0f2f5; --code-ink:#1b1f24; --kbd:#eceff3;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme=light]){
+      --bg:#0f1216; --card:#171b21; --ink:#e7ebf0; --muted:#9aa5b1; --line:#262c34;
+      --accent:#b998e6; --ok:#4cba72; --warn:#e0b341; --bad:#f06a70;
+      --code-bg:#11151a; --code-ink:#d7dee6; --kbd:#222933;
+    }
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:0 16px}
+  .wrap{max-width:860px;margin:0 auto;padding:40px 0 80px}
+  header h1{font-size:1.7rem;margin:0 0 6px;letter-spacing:-.01em}
+  header p.sub{color:var(--muted);margin:0 0 24px}
+  .banner{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--card);border-radius:10px;padding:16px 18px;margin:0 0 28px}
+  .banner strong{color:var(--accent)}
+  h2{font-size:1.2rem;margin:36px 0 12px;padding-top:12px;border-top:1px solid var(--line)}
+  h3{font-size:1.02rem;margin:22px 0 8px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:4px 18px;margin:14px 0}
+  p{margin:10px 0}
+  code{background:var(--code-bg);color:var(--code-ink);padding:.12em .4em;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;word-break:break-word}
+  pre{background:var(--code-bg);color:var(--code-ink);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86rem;line-height:1.5}
+  pre code{background:none;padding:0}
+  ol,ul{padding-left:22px}
+  li{margin:6px 0}
+  .pill{display:inline-block;font-size:.72rem;font-weight:600;padding:2px 9px;border-radius:999px;vertical-align:middle;letter-spacing:.02em}
+  .pill.done{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+  .pill.todo{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+  .step{border:1px solid var(--line);border-radius:10px;padding:2px 16px;margin:12px 0;background:var(--card)}
+  .step .exp{color:var(--muted);font-size:.92rem;border-left:3px solid var(--ok);padding-left:12px;margin:10px 0}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.9rem}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  .ok{color:var(--ok);font-weight:600}
+  .warn{color:var(--warn);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  .muted{color:var(--muted)}
+  .check{list-style:none;padding-left:0}
+  .check li{padding-left:30px;position:relative}
+  .check li::before{content:"";position:absolute;left:0;top:3px;width:18px;height:18px;border:2px solid var(--line);border-radius:5px}
+  footer{color:var(--muted);font-size:.84rem;margin-top:48px;border-top:1px solid var(--line);padding-top:16px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Phase 3 — GitLab secret sync</h1>
+  <p class="sub">What was built, and exactly what you need to do to finish it. Generated 2026-10-12.</p>
+</header>
+
+<div class="banner">
+  <p style="margin:6px 0"><strong>Status:</strong> Phase 3 is <strong>code-complete on the <code>dev</code> branch</strong> and deployed to the dev environment. The GitLab provider is registered and usable, but it stays at registry status <code>planned</code> — <em>not</em> <code>beta</code> — until <strong>you</strong> run one live end-to-end test against a real gitlab.com project. I can't run it: my container can't reach the dev API, and the GitLab token must stay on your machine.</p>
+</div>
+
+<h2>Your checklist</h2>
+<div class="card">
+<ul class="check">
+  <li><strong>1. Run the GitLab live E2E drill</strong> (Section 1) — the one thing that unblocks <code>beta</code>.</li>
+  <li><strong>2. After it passes: promote &amp; ship</strong> (Section 2) — flip to <code>beta</code>, merge <code>dev</code>→<code>main</code>.</li>
+  <li><strong>3. Delete the stale branches</strong> (Section 3) — I'm blocked by the proxy; you have GitHub write access.</li>
+  <li><strong>4. Point your local VS Code at <code>dev</code></strong> — it's on the old <code>feat/integrations-m5</code> branch; its "48↑" are already merged. Switch to <code>dev</code>, don't Sync.</li>
+</ul>
+</div>
+
+<h2>1 · Run the GitLab live E2E drill</h2>
+<p>This is the check the unit tests can't be: it drives a real sync and verifies every step against GitLab's own API. It mirrors the Phase 1 Cloudflare drill that caught a real endpoint bug.</p>
+
+<h3>Prerequisites — and how to get them if you don't have them</h3>
+<p class="muted">If you've never done this in GitLab, follow a, b, c. GitLab's menu labels shift slightly between versions — if a label differs, look for <strong>Access tokens</strong> under your profile (for a personal token) or under the project's <strong>Settings</strong>.</p>
+
+<div class="step">
+  <p><strong>a · A throwaway gitlab.com project</strong> (skip if you already have one to test in)</p>
+  <p>gitlab.com → the <strong>＋</strong> in the top bar → <strong>New project</strong> → <strong>Create blank project</strong> → name it e.g. <code>hushvault-e2e</code> → <strong>Create project</strong>. You're now its Owner, which is exactly the access the token needs.</p>
+</div>
+
+<div class="step">
+  <p><strong>b · The numeric project id → <code>GL_PROJECT_ID</code></strong> (the number, <em>not</em> the <code>group/name</code> path)</p>
+  <p>Open the project → <strong>Settings → General</strong> → at the top it shows <strong>Project ID: 12345</strong>. That number is your <code>GL_PROJECT_ID</code>.</p>
+  <p class="muted">It's also shown on the project's overview page just under the title, with a copy button (placement varies by version).</p>
+</div>
+
+<div class="step">
+  <p><strong>c · An access token → <code>GL_TOKEN</code></strong> — simplest reliable option is a <strong>Personal Access Token</strong> (works on any gitlab.com account)</p>
+  <ul>
+    <li>Top-right avatar → <strong>Edit profile</strong> → <strong>Access tokens</strong> (left sidebar) → <strong>Add new token</strong>.</li>
+    <li>Name it anything (e.g. <code>hushvault-e2e</code>); set a short expiry. <strong>Scopes: tick <code>api</code>.</strong> → <strong>Create personal access token</strong>.</li>
+    <li><strong>Copy the <code>glpat-…</code> value now</strong> — GitLab shows it only once. That's your <code>GL_TOKEN</code>.</li>
+    <li>Because you're the project <strong>Owner</strong>, this token already has the Maintainer-level rights the CI/CD variables API needs (managing variables requires Maintainer — a lower role returns 403).</li>
+  </ul>
+  <p class="muted"><strong>More-scoped alternative:</strong> project → <strong>Settings → Access tokens</strong> → create a <strong>Project Access Token</strong> with <strong>Role: Maintainer</strong> and scope <code>api</code>. Use that if your plan offers it — project access tokens aren't available on every gitlab.com Free plan, which is why the personal token is the sure path. Either works identically.</p>
+  <p class="warn">A personal token can reach everything your account can. Since this is a throwaway-project test, set a short expiry and delete the token afterwards (same <strong>Access tokens</strong> page → Revoke).</p>
+</div>
+
+<div class="step"><p><strong>d · A checkout of the repo on the <code>dev</code> branch, with Node 20+.</strong></p></div>
+
+<h3>Run it</h3>
+<pre><code>git fetch origin dev &amp;&amp; git checkout dev &amp;&amp; git pull
+
+export HV_API=https://api-beta.hushvault.dev   # dev API, no trailing slash
+export GL_TOKEN=&lt;your Maintainer + api access token&gt;
+export GL_PROJECT_ID=&lt;numeric project id&gt;
+export GL_SCOPE=e2e                            # a dedicated scope, NOT '*'
+
+node scripts/phase3-gitlab-e2e-drill.mjs</code></pre>
+<p class="muted">It only touches variables in the <code>e2e</code> environment scope, so your project's real <code>*</code> variables are left alone. It prints only keys, counts, statuses and HTTP codes — never a secret value or the token.</p>
+
+<h3>What each step does and the expected result</h3>
+<div class="step"><p><strong>0 · Pre-flight</strong> — reads and clears the <code>e2e</code> scope.</p><p class="exp">PASS: the token can list and delete variables in the scope; it now reports the scope empty.</p></div>
+<div class="step"><p><strong>1–5 · Set up</strong> — registers a throwaway org, project, environment, three secrets, a GitLab connection, and a sync target.</p><p class="exp">PASS on each: connection created &amp; verified (and the response carries no token), target created.</p></div>
+<div class="step"><p><strong>6 · Preview</strong> — dry run.</p><p class="exp">Plans 3 creates; nothing is written to GitLab yet (ground-truth check).</p></div>
+<div class="step"><p><strong>7 · Run (create)</strong> — pushes the three secrets.</p><p class="exp">Run <span class="ok">succeeded</span>, created 3. GitLab now has exactly those 3 keys in the scope, and the variable has <code>raw=true</code> (so a <code>$</code> in a value is stored literally).</p></div>
+<div class="step"><p><strong>8 · Change &amp; run (update)</strong> — edits one value.</p><p class="exp">Run succeeded, updated 1; the key set is unchanged.</p></div>
+<div class="step"><p><strong>9 · Delete a secret, run (deleteRemoved OFF)</strong>.</p><p class="exp">The key is <em>not</em> removed from GitLab — off by default protects manually-kept variables.</p></div>
+<div class="step"><p><strong>10 · Enable deleteRemoved, run (prune)</strong>.</p><p class="exp">Run succeeded, deleted 1; the removed key is gone from GitLab, the others remain.</p></div>
+<div class="step"><p><strong>11 · Masked variable</strong> — a masked target in a separate scope, one GitLab-valid value and one invalid.</p><p class="exp">The valid value lands with <code>masked=true</code>. The invalid one is reported as a <code>PROVIDER_VALIDATION</code> blocker and does <em>not</em> land — this is the step that reveals GitLab's live masking rules (which aren't in the API reference).</p></div>
+<div class="step"><p><strong>12 · Failure path</strong> — a nonexistent project id.</p><p class="exp">The run does not succeed (a clean <code>TARGET_NOT_FOUND</code>, not a crash).</p></div>
+<div class="step"><p><strong>13 · Cleanup</strong> — clears the <code>e2e</code> scope again.</p><p class="exp">Scope empty.</p></div>
+
+<p>At the end you want: <code>==================== ALL PASS : N passed, 0 failed ====================</code>. <strong>Paste the whole transcript into issue #99.</strong></p>
+
+<h3>If something fails</h3>
+<table>
+  <tr><th>Symptom</th><th>Likely cause / fix</th></tr>
+  <tr><td>Pre-flight fails to list/clear</td><td>Token lacks Maintainer on the project, or wrong <code>GL_PROJECT_ID</code>. Variables need Maintainer.</td></tr>
+  <tr><td>Connection step → <code>PROVIDER_AUTH</code></td><td>Token invalid or expired, or missing the <code>api</code> scope.</td></tr>
+  <tr><td>Run → <code>PROVIDER_AUTH</code></td><td>Token is valid but not Maintainer on that specific project.</td></tr>
+  <tr><td>Masked step: the "valid" value is rejected too</td><td>GitLab's masking rules changed/stricter than assumed. Note the exact value in #99 — that's the real rule we document. Not a provider bug.</td></tr>
+  <tr><td>Can't reach <code>HV_API</code></td><td>Confirm the dev deploy is live and the URL has no trailing slash.</td></tr>
+</table>
+
+<h2>2 · After it passes: promote &amp; ship</h2>
+<p>On a clean <code>ALL PASS</code>:</p>
+<ol>
+  <li>In <code>packages/shared/src/integrations.ts</code>, change the <code>gitlab</code> entry's <code>status</code> from <code>'planned'</code> to <code>'beta'</code> and reword <code>summary</code> as a shipped beta sentence (e.g. start it with "Beta:"). The promotion-gate test already passes — the provider module, test file and docs page exist.</li>
+  <li>Run <code>pnpm --filter @hushvault/shared test</code> and <code>pnpm type-check</code> to confirm green.</li>
+  <li>Commit, push <code>dev</code>, then merge <code>dev</code>→<code>main</code> (production deploys on push to <code>main</code>).</li>
+  <li>Record the drill transcript on issue #99 and close it. Hand over with: <em>"Start Phase 4 — GitHub Actions secrets push (#44)."</em></li>
+</ol>
+<p class="muted">Tell me "the drill passed, here's the transcript" and I'll make the promotion edit and the merge for you.</p>
+
+<h2>3 · Delete the stale branches (#101)</h2>
+<p>I tried every path (<code>git push --delete</code>, the GitHub refs API, re-attaching with push access) — all are blocked by this environment's proxy, which denies ref writes regardless of permission. Run from a normal clone with your own GitHub access:</p>
+<pre><code># 20 branches fully merged into main — safe to delete:
+git push origin --delete \
+  feat/email-endpoints feat/email-foundation feat/enable-email-send \
+  feat/integrations-m0 feat/integrations-m1 feat/integrations-m2m3 \
+  feat/integrations-m4 feat/integrations-m5 feat/key-rotation \
+  feat/phase-2-deploy-ratelimit fix/brutal-review fix/onboarding-cli-step \
+  fix/phase-0-core-loop fix/refresh-diagnostics fix/security-hardening-1 \
+  m2/engine m3/api m3/cli m3/web m4/web-cli</code></pre>
+<p>The 16 <code>claude/*</code> branches are 1–4 commits ahead of <code>main</code> — <strong>review before deleting</strong> (if a branch was squash-merged it's safe; if it has genuinely unmerged work it isn't). Full list and per-branch commands are in issue #101.</p>
+
+<h2>What was built (reference)</h2>
+<h3>Part A — provider interface v2</h3>
+<p>Reshaped the sync abstraction so a 2nd/3rd provider doesn't force a rework, with Cloudflare migrated onto it and no behaviour change: per-provider limits/timeouts/chunk size, <code>validateName</code>/<code>validateValue</code> hooks, a once-per-run <code>prepare()</code> session seam, typed resource options (<code>string|number|boolean</code>), and a one-target = one-scope identity model (no schema change). Also fixed two fail-closed bugs (corrupt connection config no longer silently disables the account/denylist checks; 404 gates read the row back instead of trusting <code>meta.changes</code>).</p>
+<h3>Part B — GitLab provider</h3>
+<p>Project <em>and</em> group CI/CD variables on gitlab.com, one way. Fixed host, SSRF-safe inputs, <code>raw=true</code> on every write, idempotent delete, Maintainer-proving verify, one target = one project/group + one scope. Usable from the API, the CLI (<code>hushvault sync add &lt;id&gt; --connection … [--gitlab-group] [--scope] [--masked] [--protected]</code>) and the dashboard (the target form switches fields by provider). 19 unit tests, docs page, live drill.</p>
+<h3>Verified vs not</h3>
+<table>
+  <tr><th>Verified (GitLab primary docs)</th><th>Not verified — deferred to your live drill</th></tr>
+  <tr><td>Endpoints, key rule <code>[A-Za-z0-9_]{1,255}</code>, <code>filter[environment_scope]</code>, Maintainer requirement, group endpoints (scopes are Premium)</td><td>GitLab's exact masked-value rules, the per-project variable count limit, value-size limit, group-token parity — all surface in the drill</td></tr>
+</table>
+
+<h3>Resolved since first draft</h3>
+<ul>
+  <li><strong>Name transform</strong> (e.g. <code>db-url</code> → <code>DB_URL</code>): after an adversarial review I <em>rejected</em> the auto-transform — a silent rename re-introduces the overwrite risk the engine exists to prevent, and a config toggle would become a destructive migration. Shipped the safe alternative instead: the preview now shows a <strong>rename suggestion</strong> (<code>db-url → db_url</code>, case preserved) on the <code>NAME_INVALID</code> blocker, in both the dashboard and <code>hushvault sync preview</code>. You rename the secret; HushVault never renames on its own.</li>
+</ul>
+<h3>Deferred (not blocking)</h3>
+<ul>
+  <li><strong>Group environment scopes</strong> need GitLab Premium/Ultimate — Free-tier groups use <code>*</code>.</li>
+</ul>
+
+<footer>
+  HushVault · Phase 3 (issue #99). Commits on <code>dev</code>: interface v2 (6) + GitLab provider + drill + build completion.
+  No secrets, tokens or model identifiers appear in this page or any committed artifact.
+</footer>
+</div>
+</body>
+</html>
