@@ -160,6 +160,9 @@ function EditTargetForm({
   onCancel: () => void
 }) {
   const isGitlab = target.provider === 'gitlab'
+  const isGithub = target.provider === 'github-actions'
+  const ghOwner = String(target.resource['owner'] ?? '')
+  const ghRepo = String(target.resource['repo'] ?? '')
   // Cloudflare resource values are strings; coerce defensively now that resource values may be string|number|boolean.
   const accountId = String(target.resource['accountId'] ?? '')
   const [scriptName, setScriptName] = useState(String(target.resource['scriptName'] ?? ''))
@@ -184,8 +187,10 @@ function EditTargetForm({
     const denyList = parseNameList(deny)
     const resource: Record<string, string | boolean> = isGitlab
       ? { [glIsGroup ? 'groupId' : 'projectId']: glId, environmentScope: glScope.trim() || '*', masked: glMasked, protected: glProtected }
-      : { ...target.resource, accountId, scriptName: scriptName.trim() }
-    const problem = (isGitlab ? null : validateScriptName(scriptName.trim())) ?? validateNameFilter(prefix.trim(), denyList)
+      : isGithub
+        ? { owner: ghOwner, repo: ghRepo }
+        : { ...target.resource, accountId, scriptName: scriptName.trim() }
+    const problem = (isGitlab || isGithub ? null : validateScriptName(scriptName.trim())) ?? validateNameFilter(prefix.trim(), denyList)
     if (problem) {
       setError(problem)
       return
@@ -222,6 +227,11 @@ function EditTargetForm({
             <input type="checkbox" checked={glProtected} onChange={(e) => setGlProtected(e.target.checked)} />
             <span><strong>Protected</strong></span>
           </label>
+        </>
+      ) : isGithub ? (
+        <>
+          <Field label="GitHub owner" name={`edit-ghowner-${target.id}`} value={ghOwner} onChange={() => {}} readOnly hint="Change this by removing the target and creating a new one." />
+          <Field label="Repository" name={`edit-ghrepo-${target.id}`} value={ghRepo} onChange={() => {}} readOnly />
         </>
       ) : (
         <Field label="Worker name" name={`edit-script-${target.id}`} value={scriptName} onChange={setScriptName} required />
@@ -423,6 +433,9 @@ function CreateTargetForm({
   const [glScope, setGlScope] = useState('*')
   const [glMasked, setGlMasked] = useState(false)
   const [glProtected, setGlProtected] = useState(false)
+  // GitHub Actions target fields.
+  const [ghOwner, setGhOwner] = useState('')
+  const [ghRepo, setGhRepo] = useState('')
   const [prefix, setPrefix] = useState('')
   const [deny, setDeny] = useState('')
   const [deleteRemoved, setDeleteRemoved] = useState(false)
@@ -469,6 +482,11 @@ function CreateTargetForm({
       const id = glId.trim()
       if (!/^[1-9][0-9]*$/.test(id)) resourceProblem = `Enter the numeric GitLab ${glIsGroup ? 'group' : 'project'} id.`
       resource = { [glIsGroup ? 'groupId' : 'projectId']: id, environmentScope: glScope.trim() || '*', masked: glMasked, protected: glProtected }
+    } else if (provider === 'github-actions') {
+      const owner = ghOwner.trim()
+      const repo = ghRepo.trim()
+      if (!owner || !repo) resourceProblem = 'Enter the GitHub owner and repository.'
+      resource = { owner, repo }
     } else {
       const accountId = connection && typeof connection.config['accountId'] === 'string' ? connection.config['accountId'] : ''
       resourceProblem = validateScriptName(scriptName.trim())
@@ -541,26 +559,38 @@ function CreateTargetForm({
           </select>
         </label>
 
-        {(connections.find((c) => c.id === connectionId)?.provider ?? '') === 'gitlab' ? (
-          <>
-            <label className={s('check')}>
-              <input type="checkbox" checked={glIsGroup} onChange={(e) => setGlIsGroup(e.target.checked)} />
-              <span><strong>Target a GitLab group</strong><span className={s('note')}>Off: a project. On: a group (its id).</span></span>
-            </label>
-            <Field label={glIsGroup ? 'GitLab group id' : 'GitLab project id'} name="glId" value={glId} onChange={setGlId} placeholder="12345" required hint="The numeric id (not the group/project path). Managing variables needs the Maintainer role." />
-            <Field label="Environment scope" name="glScope" value={glScope} onChange={setGlScope} placeholder="*" hint="GitLab environment_scope (default *). For a group, scopes need GitLab Premium/Ultimate." />
-            <label className={s('check')}>
-              <input type="checkbox" checked={glMasked} onChange={(e) => setGlMasked(e.target.checked)} />
-              <span><strong>Masked</strong><span className={s('note')}>GitLab hides masked values in job logs. GitLab rejects values that do not meet its masking rules.</span></span>
-            </label>
-            <label className={s('check')}>
-              <input type="checkbox" checked={glProtected} onChange={(e) => setGlProtected(e.target.checked)} />
-              <span><strong>Protected</strong><span className={s('note')}>Only exposed to pipelines on protected branches/tags.</span></span>
-            </label>
-          </>
-        ) : (
-          <Field label="Worker name" name="scriptName" value={scriptName} onChange={setScriptName} placeholder="my-worker" required hint="The Worker that receives the secrets. It must already exist." />
-        )}
+        {(() => {
+          const provider = connections.find((c) => c.id === connectionId)?.provider ?? ''
+          if (provider === 'gitlab') {
+            return (
+              <>
+                <label className={s('check')}>
+                  <input type="checkbox" checked={glIsGroup} onChange={(e) => setGlIsGroup(e.target.checked)} />
+                  <span><strong>Target a GitLab group</strong><span className={s('note')}>Off: a project. On: a group (its id).</span></span>
+                </label>
+                <Field label={glIsGroup ? 'GitLab group id' : 'GitLab project id'} name="glId" value={glId} onChange={setGlId} placeholder="12345" required hint="The numeric id (not the group/project path). Managing variables needs the Maintainer role." />
+                <Field label="Environment scope" name="glScope" value={glScope} onChange={setGlScope} placeholder="*" hint="GitLab environment_scope (default *). For a group, scopes need GitLab Premium/Ultimate." />
+                <label className={s('check')}>
+                  <input type="checkbox" checked={glMasked} onChange={(e) => setGlMasked(e.target.checked)} />
+                  <span><strong>Masked</strong><span className={s('note')}>GitLab hides masked values in job logs. GitLab rejects values that do not meet its masking rules.</span></span>
+                </label>
+                <label className={s('check')}>
+                  <input type="checkbox" checked={glProtected} onChange={(e) => setGlProtected(e.target.checked)} />
+                  <span><strong>Protected</strong><span className={s('note')}>Only exposed to pipelines on protected branches/tags.</span></span>
+                </label>
+              </>
+            )
+          }
+          if (provider === 'github-actions') {
+            return (
+              <>
+                <Field label="GitHub owner" name="ghOwner" value={ghOwner} onChange={setGhOwner} placeholder="acme" required hint="The user or organisation that owns the repository." />
+                <Field label="Repository" name="ghRepo" value={ghRepo} onChange={setGhRepo} placeholder="web" required hint="The repo whose Actions secrets receive the push. The token needs Secrets: write on it." />
+              </>
+            )
+          }
+          return <Field label="Worker name" name="scriptName" value={scriptName} onChange={setScriptName} placeholder="my-worker" required hint="The Worker that receives the secrets. It must already exist." />
+        })()}
         <Field label="Name prefix (optional)" name="prefix" value={prefix} onChange={setPrefix} placeholder="APP_" hint="Only secrets starting with this prefix are pushed." />
         <Field label="Never push these names (optional)" name="deny" value={deny} onChange={setDeny} placeholder="LOCAL_ONLY, DEBUG_TOKEN" hint="Comma separated. ENCRYPTION_MASTER_KEY, ENCRYPTION_KEY_V* and JWT_SECRET are never synced." />
 
