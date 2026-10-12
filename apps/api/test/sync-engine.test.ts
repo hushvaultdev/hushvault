@@ -216,6 +216,25 @@ describe('provider limits are validated before any write', () => {
     expect(provider.sessionsSeen).toEqual([session, session])
   })
 
+  it('does not call prepare() on a forget-only run (no ops to push) (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100 })
+    const w = await setupSyncWorld(env, { secrets: { KEEP: '1', DROPME: '2' } })
+    await runSync(env, w.targetId, { trigger: 'manual' }) // ledger now holds KEEP, DROPME
+    // Narrow the name filter so DROPME is no longer synced but is still in the environment -> forget, not delete.
+    await env.DB.prepare('UPDATE sync_targets SET name_filter_json = ?, delete_removed = 1 WHERE id = ?').bind(JSON.stringify({ prefix: 'KEEP' }), w.targetId).run()
+    let prepareCalls = 0
+    provider.prepare = async () => { prepareCalls += 1; return { ok: true, session: {} } }
+    provider.pushCalls.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run.status).toBe('succeeded')
+    expect(prepareCalls).toBe(0)
+    expect(provider.pushCalls).toHaveLength(0)
+    // DROPME is no longer in the ledger (forgotten), KEEP remains.
+    const names = await ledger(w.targetId)
+    expect(names).toContain('KEEP')
+    expect(names).not.toContain('DROPME')
+  })
+
   it('a prepare() failure aborts the run before any push (issue #99)', async () => {
     provider = installFakeProvider({ maxItems: 100 })
     provider.prepare = async () => ({ ok: false, code: 'PROVIDER_AUTH' })

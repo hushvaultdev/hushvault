@@ -782,8 +782,10 @@ async function execute(
   if (credential === null) return failedOutcome('CREDENTIAL_UNAVAILABLE')
 
   // Optional once-per-run provider setup (e.g. fetch a repo public key). A failure aborts before any push.
+  // Only when there is something to push: a forget-only run (ledger cleanup, no ops) needs no provider call, and
+  // must not be turned into a failed run by a prepare() error.
   let session: unknown
-  if (provider.prepare) {
+  if (provider.prepare && ops.length > 0) {
     const prepared = await callProvider(provider.limits.pushTimeoutMs ?? PUSH_TIMEOUT_MS, (signal) => provider.prepare!({ credential, config, resource: target.resource, signal }))
     if (!prepared.ok) return failedOutcome(prepared.code, undefined)
     if (!prepared.value.ok) {
