@@ -1,12 +1,12 @@
-# GitLab CI/CD variables (planned — not yet verified live)
+# GitLab CI/CD variables (beta)
 
-One-way push of a HushVault environment to the **project-level CI/CD variables** of one **gitlab.com** project, scoped to a single
-`environment_scope`. Provider id `gitlab`, module `apps/api/src/integrations/providers/gitlab.ts`. Overview: [../INTEGRATIONS.md](../INTEGRATIONS.md).
+One-way push of a HushVault environment to the **project- or group-level CI/CD variables** of one **gitlab.com** project (or group), scoped to a
+single `environment_scope`. Provider id `gitlab`, module `apps/api/src/integrations/providers/gitlab.ts`. Overview: [../INTEGRATIONS.md](../INTEGRATIONS.md).
 
-> **Status: planned.** The provider is implemented and unit-tested against the GitLab API as documented, and it is registered so it can be
-> connected, but it has **not** been verified against a live gitlab.com project. It stays `planned` in the integrations registry
-> (`packages/shared/src/integrations.ts`) until a live end-to-end run is recorded on issue #99; only then does it become `beta`. Self-managed
-> GitLab instances (custom base URLs) are out of scope — only `gitlab.com` is called (SSRF).
+> **Status: beta.** Verified live end-to-end against a real gitlab.com project on 2026-10-12 (issue #99, drill
+> `scripts/phase3-gitlab-e2e-drill.mjs`: 30/30 — connect, preview, create, update, deleteRemoved off/on prune, masked create, and a
+> bad-project failure, each checked against GitLab's own variables API). Self-managed GitLab instances (custom base URLs) are out of scope —
+> only `gitlab.com` is called (SSRF).
 
 ## Setup
 

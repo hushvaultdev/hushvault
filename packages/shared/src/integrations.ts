@@ -34,9 +34,9 @@ export const INTEGRATIONS: readonly IntegrationInfo[] = [
     id: 'gitlab',
     name: 'GitLab',
     mark: 'GL',
-    status: 'planned',
+    status: 'beta',
     directions: ['push'],
-    summary: 'Planned: one-way push of an environment to a gitlab.com project’s CI/CD variables (single environment scope); the provider is implemented but not yet verified against a live GitLab project.',
+    summary: 'Beta: one-way push of an environment to a gitlab.com project’s or group’s CI/CD variables (one environment scope per target, with masked/protected flags), verified live against a real GitLab project.',
     issue: 99,
   },
   {
