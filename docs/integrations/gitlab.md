@@ -21,6 +21,8 @@ One-way push of a HushVault environment to the **project-level CI/CD variables**
 4. Create a target: `POST /api/integrations/targets` with
    `{ projectId, envId, connectionId, resource: { projectId: "<numeric id>", environmentScope: "*", masked: false, protected: false } }`.
    `environmentScope` defaults to `*`, `masked` and `protected` default to `false`. One target = one project + one scope.
+   **Group variables:** use `resource: { groupId: "<numeric group id>", ... }` instead of `projectId` (exactly one of the two).
+   `environment_scope` on a *group's* variables is a GitLab **Premium/Ultimate** feature — on a Free-tier group leave it `*`.
 5. `POST /api/integrations/targets/:id/preview`, then `POST /api/integrations/targets/:id/run`.
 
 ## What is pushed

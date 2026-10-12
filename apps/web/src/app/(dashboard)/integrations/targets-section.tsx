@@ -150,9 +150,16 @@ function EditTargetForm({
   onSaved: (target: SyncTargetDto) => void
   onCancel: () => void
 }) {
+  const isGitlab = target.provider === 'gitlab'
   // Cloudflare resource values are strings; coerce defensively now that resource values may be string|number|boolean.
   const accountId = String(target.resource['accountId'] ?? '')
   const [scriptName, setScriptName] = useState(String(target.resource['scriptName'] ?? ''))
+  // GitLab resource fields (project/group id is immutable here — changing it is really a new target).
+  const glIsGroup = target.resource['groupId'] !== undefined
+  const glId = String(target.resource['groupId'] ?? target.resource['projectId'] ?? '')
+  const [glScope, setGlScope] = useState(String(target.resource['environmentScope'] ?? '*'))
+  const [glMasked, setGlMasked] = useState(target.resource['masked'] === true)
+  const [glProtected, setGlProtected] = useState(target.resource['protected'] === true)
   const [prefix, setPrefix] = useState(target.nameFilter.prefix ?? '')
   const [deny, setDeny] = useState((target.nameFilter.deny ?? []).join(', '))
   const [deleteRemoved, setDeleteRemoved] = useState(target.deleteRemoved)
@@ -166,7 +173,10 @@ function EditTargetForm({
     e.preventDefault()
     if (busy) return
     const denyList = parseNameList(deny)
-    const problem = validateScriptName(scriptName.trim()) ?? validateNameFilter(prefix.trim(), denyList)
+    const resource: Record<string, string | boolean> = isGitlab
+      ? { [glIsGroup ? 'groupId' : 'projectId']: glId, environmentScope: glScope.trim() || '*', masked: glMasked, protected: glProtected }
+      : { ...target.resource, accountId, scriptName: scriptName.trim() }
+    const problem = (isGitlab ? null : validateScriptName(scriptName.trim())) ?? validateNameFilter(prefix.trim(), denyList)
     if (problem) {
       setError(problem)
       return
@@ -176,7 +186,7 @@ function EditTargetForm({
     try {
       onSaved(
         await updateTarget(target.id, {
-          resource: { ...target.resource, accountId, scriptName: scriptName.trim() },
+          resource,
           nameFilter: { ...(prefix.trim() ? { prefix: prefix.trim() } : {}), ...(denyList.length > 0 ? { deny: denyList } : {}) },
           deleteRemoved,
           autoSync: { onChange: autoOnChange, scheduleMinutes: parseScheduleValue(autoSchedule) },
@@ -191,7 +201,22 @@ function EditTargetForm({
   return (
     <form ref={ref} tabIndex={-1} className={s('form')} onSubmit={(e) => void submit(e)} aria-label="Edit sync target">
       <p className={s('note')}>The connection cannot be changed. To use another connection, remove this target and create a new one.</p>
-      <Field label="Worker name" name={`edit-script-${target.id}`} value={scriptName} onChange={setScriptName} required />
+      {isGitlab ? (
+        <>
+          <Field label={glIsGroup ? 'GitLab group id' : 'GitLab project id'} name={`edit-glid-${target.id}`} value={glId} onChange={() => {}} readOnly hint="Change this by removing the target and creating a new one." />
+          <Field label="Environment scope" name={`edit-glscope-${target.id}`} value={glScope} onChange={setGlScope} />
+          <label className={s('check')}>
+            <input type="checkbox" checked={glMasked} onChange={(e) => setGlMasked(e.target.checked)} />
+            <span><strong>Masked</strong></span>
+          </label>
+          <label className={s('check')}>
+            <input type="checkbox" checked={glProtected} onChange={(e) => setGlProtected(e.target.checked)} />
+            <span><strong>Protected</strong></span>
+          </label>
+        </>
+      ) : (
+        <Field label="Worker name" name={`edit-script-${target.id}`} value={scriptName} onChange={setScriptName} required />
+      )}
       <Field label="Name prefix (optional)" name={`edit-prefix-${target.id}`} value={prefix} onChange={setPrefix} />
       <Field label="Never push these names (optional)" name={`edit-deny-${target.id}`} value={deny} onChange={setDeny} hint="Comma separated." />
       <label className={s('check')}>
@@ -383,6 +408,12 @@ function CreateTargetForm({
   const [envId, setEnvId] = useState('')
   const [connectionId, setConnectionId] = useState(connections[0]?.id ?? '')
   const [scriptName, setScriptName] = useState('')
+  // GitLab-specific target fields (shown only when the chosen connection is a GitLab connection).
+  const [glId, setGlId] = useState('')
+  const [glIsGroup, setGlIsGroup] = useState(false)
+  const [glScope, setGlScope] = useState('*')
+  const [glMasked, setGlMasked] = useState(false)
+  const [glProtected, setGlProtected] = useState(false)
   const [prefix, setPrefix] = useState('')
   const [deny, setDeny] = useState('')
   const [deleteRemoved, setDeleteRemoved] = useState(false)
@@ -420,11 +451,23 @@ function CreateTargetForm({
     e.preventDefault()
     if (busy) return
     const connection = connections.find((c) => c.id === connectionId)
-    const accountId = connection && typeof connection.config['accountId'] === 'string' ? connection.config['accountId'] : ''
+    const provider = connection?.provider ?? ''
     const denyList = parseNameList(deny)
+    // Build the provider-specific resource and validate it.
+    let resource: Record<string, string | boolean>
+    let resourceProblem: string | null = null
+    if (provider === 'gitlab') {
+      const id = glId.trim()
+      if (!/^[1-9][0-9]*$/.test(id)) resourceProblem = `Enter the numeric GitLab ${glIsGroup ? 'group' : 'project'} id.`
+      resource = { [glIsGroup ? 'groupId' : 'projectId']: id, environmentScope: glScope.trim() || '*', masked: glMasked, protected: glProtected }
+    } else {
+      const accountId = connection && typeof connection.config['accountId'] === 'string' ? connection.config['accountId'] : ''
+      resourceProblem = validateScriptName(scriptName.trim())
+      resource = { accountId, scriptName: scriptName.trim() }
+    }
     const problem =
       (!projectId || !envId || !connection ? 'Choose a project, an environment and a connection.' : null) ??
-      validateScriptName(scriptName.trim()) ??
+      resourceProblem ??
       validateNameFilter(prefix.trim(), denyList)
     if (problem) {
       setError(problem)
@@ -437,7 +480,7 @@ function CreateTargetForm({
         projectId,
         envId,
         connectionId,
-        resource: { accountId, scriptName: scriptName.trim() },
+        resource,
         nameFilter: { ...(prefix.trim() ? { prefix: prefix.trim() } : {}), ...(denyList.length > 0 ? { deny: denyList } : {}) },
         deleteRemoved,
         autoSync: { onChange: autoOnChange, scheduleMinutes: parseScheduleValue(autoSchedule) },
@@ -489,7 +532,26 @@ function CreateTargetForm({
           </select>
         </label>
 
-        <Field label="Worker name" name="scriptName" value={scriptName} onChange={setScriptName} placeholder="my-worker" required hint="The Worker that receives the secrets. It must already exist." />
+        {(connections.find((c) => c.id === connectionId)?.provider ?? '') === 'gitlab' ? (
+          <>
+            <label className={s('check')}>
+              <input type="checkbox" checked={glIsGroup} onChange={(e) => setGlIsGroup(e.target.checked)} />
+              <span><strong>Target a GitLab group</strong><span className={s('note')}>Off: a project. On: a group (its id).</span></span>
+            </label>
+            <Field label={glIsGroup ? 'GitLab group id' : 'GitLab project id'} name="glId" value={glId} onChange={setGlId} placeholder="12345" required hint="The numeric id (not the group/project path). Managing variables needs the Maintainer role." />
+            <Field label="Environment scope" name="glScope" value={glScope} onChange={setGlScope} placeholder="*" hint="GitLab environment_scope (default *). For a group, scopes need GitLab Premium/Ultimate." />
+            <label className={s('check')}>
+              <input type="checkbox" checked={glMasked} onChange={(e) => setGlMasked(e.target.checked)} />
+              <span><strong>Masked</strong><span className={s('note')}>GitLab hides masked values in job logs. GitLab rejects values that do not meet its masking rules.</span></span>
+            </label>
+            <label className={s('check')}>
+              <input type="checkbox" checked={glProtected} onChange={(e) => setGlProtected(e.target.checked)} />
+              <span><strong>Protected</strong><span className={s('note')}>Only exposed to pipelines on protected branches/tags.</span></span>
+            </label>
+          </>
+        ) : (
+          <Field label="Worker name" name="scriptName" value={scriptName} onChange={setScriptName} placeholder="my-worker" required hint="The Worker that receives the secrets. It must already exist." />
+        )}
         <Field label="Name prefix (optional)" name="prefix" value={prefix} onChange={setPrefix} placeholder="APP_" hint="Only secrets starting with this prefix are pushed." />
         <Field label="Never push these names (optional)" name="deny" value={deny} onChange={setDeny} placeholder="LOCAL_ONLY, DEBUG_TOKEN" hint="Comma separated. ENCRYPTION_MASTER_KEY, ENCRYPTION_KEY_V* and JWT_SECRET are never synced." />
 

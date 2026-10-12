@@ -309,6 +309,13 @@ export interface AddOptions extends SyncOptions {
   onChange?: boolean | undefined
   schedule?: string | undefined
   deleteRemoved?: boolean | undefined
+  /** GitLab: treat the positional id as a group id (default: a project id). */
+  gitlabGroup?: boolean | undefined
+  /** GitLab: environment_scope for the variables (default `*`). */
+  scope?: string | undefined
+  /** GitLab: create the variables as masked / protected. */
+  masked?: boolean | undefined
+  protected?: boolean | undefined
 }
 
 /**
@@ -329,16 +336,30 @@ export async function syncAddAction(script: string, opts: AddOptions, out: Out, 
     errOut(chalk.red(`✗ No connection ${safe(opts.connection)} in this organisation`))
     return EXIT_FAIL
   }
-  // Build the provider resource. Cloudflare Workers is keyed by (accountId, scriptName); the account must
-  // match the connection's, so take it from there rather than asking for it twice.
-  const resource: Record<string, string> = { scriptName: script }
+  // Build the provider resource from the positional id and the connection's provider.
+  //  - Cloudflare Workers: keyed by (accountId, scriptName); the account must match the connection's, so take it
+  //    from there rather than asking for it twice. <id> is the Worker script name.
+  //  - GitLab: <id> is the numeric project id (or group id with --gitlab-group); optional scope and flags.
+  const resource: Record<string, string | boolean> = {}
   if (connection.provider === 'cloudflare-workers') {
+    resource['scriptName'] = script
     const accountId = connection.config['accountId']
     if (!accountId) {
       errOut(chalk.red('✗ The connection has no accountId configured'))
       return EXIT_FAIL
     }
     resource['accountId'] = accountId
+  } else if (connection.provider === 'gitlab') {
+    if (!/^[1-9][0-9]*$/.test(script)) {
+      errOut(chalk.red('✗ For GitLab, the positional argument must be the numeric project id (or group id with --gitlab-group)'))
+      return EXIT_FAIL
+    }
+    resource[opts.gitlabGroup ? 'groupId' : 'projectId'] = script
+    if (opts.scope) resource['environmentScope'] = opts.scope
+    if (opts.masked) resource['masked'] = true
+    if (opts.protected) resource['protected'] = true
+  } else {
+    resource['scriptName'] = script
   }
   let autoSync: SyncAutoSync | undefined
   if (opts.onChange !== undefined || opts.schedule !== undefined) {
@@ -412,9 +433,13 @@ syncCommand
 syncCommand
   .command('add')
   .description('Create (idempotently) a sync target: map this project\'s environment to a connection\'s resource')
-  .argument('<script>', 'Provider resource name (Cloudflare Workers: the Worker script name)')
+  .argument('<resource>', 'Cloudflare Workers: the Worker script name. GitLab: the numeric project id (or group id with --gitlab-group)')
   .requiredOption('--connection <id>', 'Connection id (set up in the dashboard; see `sync list`)')
   .option('--env <env>', 'Environment slug or id (defaults to the project\'s default)')
+  .option('--gitlab-group', 'GitLab only: the id is a group id, not a project id')
+  .option('--scope <scope>', 'GitLab only: environment_scope for the variables (default *)')
+  .option('--masked', 'GitLab only: create the variables as masked')
+  .option('--protected', 'GitLab only: create the variables as protected')
   .option('--on-change', 'Sync automatically when a secret changes')
   .option('--schedule <minutes>', 'Also reconcile on a schedule: 15, 60, 360, 1440 or off')
   .option('--delete-removed', 'Delete names on the target when removed from the environment')

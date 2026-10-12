@@ -51,6 +51,17 @@ describe('parseConfig / parseResource / validateName', () => {
       .toEqual({ projectId: '42', environmentScope: 'review/*', masked: true, protected: true })
   })
 
+  it('accepts a group id (exactly one of projectId / groupId) and routes to the groups path', async () => {
+    expect(provider.parseResource({ groupId: '77' })).toEqual({ groupId: '77', environmentScope: '*', masked: false, protected: false })
+    // Both or neither is invalid.
+    expect(provider.parseResource({ projectId: '1', groupId: '2' })).toBeNull()
+    expect(provider.parseResource({ environmentScope: 'prod' })).toBeNull()
+    // A group target writes to /groups/:id/variables.
+    responder = () => json(200, { key: 'A' })
+    await provider.push({ credential: TOKEN, config: {}, resource: { groupId: '77', environmentScope: '*', masked: false, protected: false }, ops: [{ type: 'set', name: 'A', value: VALUE }], signal: signal() })
+    expect(calls[0]!.url).toBe(`${GITLAB_API_BASE}/groups/77/variables/A?filter%5Benvironment_scope%5D=*`)
+  })
+
   it('rejects non-numeric ids, SSRF-ish scopes, unknown keys and non-boolean flags', () => {
     for (const projectId of ['', 'abc', 'group/project', '12a', '0', '-1', '1'.repeat(20), 'https://evil.test']) {
       expect(provider.parseResource({ projectId }), projectId).toBeNull()

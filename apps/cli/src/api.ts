@@ -105,7 +105,7 @@ export interface SyncTarget {
   envId: string
   connectionId: string
   provider: string
-  resource: Record<string, string>
+  resource: Record<string, string | number | boolean>
   nameFilter: { prefix?: string; deny?: string[] }
   deleteRemoved: boolean
   /** Absent when talking to an API older than M4. */
@@ -126,7 +126,7 @@ export interface CreateTargetInput {
   projectId: string
   envId: string
   connectionId: string
-  resource: Record<string, string>
+  resource: Record<string, string | number | boolean>
   nameFilter?: { prefix?: string; deny?: string[] }
   deleteRemoved?: boolean
   autoSync?: SyncAutoSync

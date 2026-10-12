@@ -12,6 +12,7 @@ type FieldProps = {
   required?: boolean
   autoComplete?: string
   hint?: string
+  readOnly?: boolean
 }
 
 export function Field({
@@ -24,6 +25,7 @@ export function Field({
   required,
   autoComplete,
   hint,
+  readOnly,
 }: FieldProps) {
   return (
     <label className={s('field')}>
@@ -37,6 +39,7 @@ export function Field({
         placeholder={placeholder}
         required={required}
         autoComplete={autoComplete}
+        readOnly={readOnly}
       />
       {hint ? <span className={s('fieldHint')}>{hint}</span> : null}
     </label>

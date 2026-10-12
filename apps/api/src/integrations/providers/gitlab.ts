@@ -31,7 +31,8 @@ export const GITLAB_LIST_PER_PAGE = 100
 export const GITLAB_LIST_MAX_PAGES = 20
 
 // A GitLab numeric project id. Only numeric ids are accepted (a URL-encoded path would widen the attack surface).
-const PROJECT_ID = /^[1-9][0-9]{0,18}$/
+// A GitLab numeric project OR group id. Only numeric ids are accepted (a URL-encoded path would widen the attack surface).
+const NUMERIC_ID = /^[1-9][0-9]{0,18}$/
 // A CI/CD variable key: A-Z a-z 0-9 _ only, 1..255 chars (GitLab's documented rule).
 const VARIABLE_KEY = /^[A-Za-z0-9_]{1,255}$/
 // An environment_scope: a conservative subset of what GitLab accepts (names, wildcards, slashes). Never a URL.
@@ -117,20 +118,34 @@ async function isVariableNotFound(res: Response): Promise<boolean> {
   }
 }
 
-type GitlabResource = { projectId: string; environmentScope: string; masked: boolean; protected: boolean }
+// A target is EITHER a project or a group (its variables live at a different path): exactly one of projectId /
+// groupId is set. The shape echoes its own input keys so a stored resource re-parses identically (idempotent).
+// environment_scope on a GROUP's variables is a GitLab Premium/Ultimate feature; on Free-tier groups it is
+// effectively `*` (GitLab is the authority).
+type GitlabResource = { projectId?: string; groupId?: string; environmentScope: string; masked: boolean; protected: boolean }
 
 /**
- * Validate and normalise a resource into the provider's typed shape, or null when invalid. Used both at the API
- * boundary (`parseResource`, where its GitlabResource widens to SyncResourceSpec) and when a stored resource is
- * read back for listNames/push, so a corrupted `resource_json` can never reach a request.
+ * Validate and normalise a resource, or null when invalid. Used both at the API boundary (`parseResource`, where
+ * its GitlabResource widens to SyncResourceSpec) and when a stored resource is read back for listNames/push, so a
+ * corrupted `resource_json` can never reach a request. The output echoes the input key shape (projectId OR groupId)
+ * with defaults filled, so re-parsing a stored resource yields the same object. Exactly one of projectId / groupId
+ * (a numeric id) is required.
  */
 function parseResource(resource: unknown): GitlabResource | null {
   if (!isRecord(resource)) return null
-  const allowed = new Set(['projectId', 'environmentScope', 'masked', 'protected'])
+  const allowed = new Set(['projectId', 'groupId', 'environmentScope', 'masked', 'protected'])
   for (const key of Object.keys(resource)) if (!allowed.has(key)) return null
   const projectId = resource['projectId']
-  if (typeof projectId !== 'string' || !PROJECT_ID.test(projectId)) return null
-  const out: GitlabResource = { projectId, environmentScope: '*', masked: false, protected: false }
+  const groupId = resource['groupId']
+  const hasProject = projectId !== undefined
+  const hasGroup = groupId !== undefined
+  if (hasProject === hasGroup) return null // exactly one of projectId / groupId
+  const rawId = hasProject ? projectId : groupId
+  if (typeof rawId !== 'string' || !NUMERIC_ID.test(rawId)) return null
+  const out: GitlabResource = hasProject ? { projectId: rawId } as GitlabResource : { groupId: rawId } as GitlabResource
+  out.environmentScope = '*'
+  out.masked = false
+  out.protected = false
   const scope = resource['environmentScope']
   if (scope !== undefined) {
     if (typeof scope !== 'string' || !ENV_SCOPE.test(scope)) return null
@@ -146,8 +161,8 @@ function parseResource(resource: unknown): GitlabResource | null {
   return out
 }
 
-function variablesPath(projectId: string): string {
-  return `/projects/${enc(projectId)}/variables`
+function variablesPath(res: GitlabResource): string {
+  return res.groupId !== undefined ? `/groups/${enc(res.groupId)}/variables` : `/projects/${enc(res.projectId ?? '')}/variables`
 }
 
 function scopeQuery(scope: string): string {
@@ -157,11 +172,11 @@ function scopeQuery(scope: string): string {
 /** A single create/update. Tries update first (steady state), falling back to create when the variable is absent. */
 async function putOrPost(res: GitlabResource, op: Extract<SyncOp, { type: 'set' }>, credential: string, signal: AbortSignal): Promise<Failure | null> {
   const common = { value: op.value, environment_scope: res.environmentScope, masked: res.masked, protected: res.protected, raw: true }
-  const put = await glFetch('PUT', `${variablesPath(res.projectId)}/${enc(op.name)}?${scopeQuery(res.environmentScope)}`, credential, signal, common)
+  const put = await glFetch('PUT', `${variablesPath(res)}/${enc(op.name)}?${scopeQuery(res.environmentScope)}`, credential, signal, common)
   if (!put.ok) return { code: put.code, ...(put.maybeApplied ? { maybeApplied: true } : {}) }
   if (put.res.ok) return null
   if (put.res.status === 404 && (await isVariableNotFound(put.res))) {
-    const post = await glFetch('POST', variablesPath(res.projectId), credential, signal, { key: op.name, ...common })
+    const post = await glFetch('POST', variablesPath(res), credential, signal, { key: op.name, ...common })
     if (!post.ok) return { code: post.code, ...(post.maybeApplied ? { maybeApplied: true } : {}) }
     return post.res.ok ? null : mapStatus(post.res)
   }
@@ -170,7 +185,7 @@ async function putOrPost(res: GitlabResource, op: Extract<SyncOp, { type: 'set' 
 
 /** A single delete. A 404 (variable already gone) is success: deletes are idempotent. */
 async function deleteOne(res: GitlabResource, name: string, credential: string, signal: AbortSignal): Promise<Failure | null> {
-  const del = await glFetch('DELETE', `${variablesPath(res.projectId)}/${enc(name)}?${scopeQuery(res.environmentScope)}`, credential, signal)
+  const del = await glFetch('DELETE', `${variablesPath(res)}/${enc(name)}?${scopeQuery(res.environmentScope)}`, credential, signal)
   if (!del.ok) return { code: del.code, ...(del.maybeApplied ? { maybeApplied: true } : {}) }
   if (del.res.ok || del.res.status === 404) return null
   return mapStatus(del.res)
@@ -213,7 +228,7 @@ export const gitlabProvider: SyncProvider = {
     // Offset pagination; keep only this target's environment_scope. Fail closed if the scope spans more than the
     // bounded number of pages (planning against a truncated list would misclassify names as missing or as ours).
     for (let page = 1; page <= GITLAB_LIST_MAX_PAGES; page += 1) {
-      const fetched = await glFetch('GET', `${variablesPath(res.projectId)}?per_page=${GITLAB_LIST_PER_PAGE}&page=${page}`, input.credential, input.signal)
+      const fetched = await glFetch('GET', `${variablesPath(res)}?per_page=${GITLAB_LIST_PER_PAGE}&page=${page}`, input.credential, input.signal)
       if (!fetched.ok) return { ok: false, code: fetched.code }
       if (!fetched.res.ok) {
         const f = mapStatus(fetched.res)
