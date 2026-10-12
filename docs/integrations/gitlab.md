@@ -32,8 +32,9 @@ The environment as resolved by `GET /environments/:id/resolved` (branch inherita
 `ENCRYPTION_*`, `JWT_SECRET`, `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`). A variable key
 must match GitLab's rule `[A-Za-z0-9_]{1,255}` (letters, digits, underscore; a leading digit is allowed — unlike the Cloudflare provider),
 and may not be `__proto__`, `constructor` or `prototype`: those are `NAME_INVALID` blockers. Because GitLab keys forbid `-` and `.`, a
-HushVault secret named `db-url` is a `NAME_INVALID` blocker — rename it to `DB_URL` (an optional name transform is a separate, unresolved
-product decision; see issue #99). Empty values are an `EMPTY_VALUE` blocker. Every write sets **`raw=true`** so a value containing `$...` is
+HushVault secret named `db-url` is a `NAME_INVALID` blocker. The plan surfaces a **rename suggestion** for each such name
+(`db-url` → `db_url`, case preserved) in the preview (dashboard and `hushvault sync preview`); you rename the secret yourself —
+HushVault never silently renames or transforms a key (the auto-transform was rejected in review; see issue #99). Empty values are an `EMPTY_VALUE` blocker. Every write sets **`raw=true`** so a value containing `$...` is
 stored literally and never expanded by GitLab as a reference to another variable.
 
 Each variable is written to the target's one `environment_scope`. Updates use `PUT .../variables/:key?filter[environment_scope]=<scope>`;

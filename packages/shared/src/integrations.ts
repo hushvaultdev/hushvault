@@ -168,8 +168,13 @@ export interface SyncPlanDto {
   skip: string[]
   /** Target already has this name and HushVault never created it: left untouched. */
   conflict: string[]
-  /** Reasons a run cannot start (e.g. over the provider's limits). Empty when the plan is runnable. */
-  blockers: { code: SyncErrorCode | 'TOO_MANY_ITEMS' | 'VALUE_TOO_LARGE' | 'NAME_INVALID' | 'EMPTY_VALUE'; names: string[] }[]
+  /**
+   * Reasons a run cannot start (e.g. over the provider's limits). Empty when the plan is runnable.
+   * `suggestions` (NAME_INVALID only) maps an invalid HushVault secret name to a provider-valid name the user
+   * can rename it to (e.g. `db-url` -> `DB_URL` on GitLab). It is a hint for the UI/CLI, never an automatic rename:
+   * HushVault never silently changes which key it pushes.
+   */
+  blockers: { code: SyncErrorCode | 'TOO_MANY_ITEMS' | 'VALUE_TOO_LARGE' | 'NAME_INVALID' | 'EMPTY_VALUE'; names: string[]; suggestions?: Record<string, string> }[]
 }
 
 export interface SyncRunDto {

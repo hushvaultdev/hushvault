@@ -183,6 +183,20 @@ describe('provider limits are validated before any write', () => {
     expect(provider.pushCalls[1]!.every((o) => o.type === 'delete')).toBe(true)
   })
 
+  it('surfaces a provider suggestName as a NAME_INVALID hint, dropping suggestions that are not themselves valid (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100 })
+    // Default validateName rejects dashes. Suggest underscoring; but suggest an UNSAFE name for one case.
+    provider.suggestName = (name: string) => (name === 'BAD-NAME' ? 'constructor' : name.replace(/-/g, '_'))
+    const w = await setupSyncWorld(env, { secrets: { 'DB-URL': 'x', 'BAD-NAME': 'y', OK_ONE: 'z' } })
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    const nameInvalid = planned.plan.blockers.find((b) => b.code === 'NAME_INVALID')
+    expect(nameInvalid?.names).toEqual(['BAD-NAME', 'DB-URL'])
+    // DB-URL -> DB_URL is a valid suggestion; BAD-NAME -> constructor is dropped (nameOk rejects it).
+    expect(nameInvalid?.suggestions).toEqual({ 'DB-URL': 'DB_URL' })
+    expect(planned.plan.create).toEqual(['OK_ONE'])
+  })
+
   it('honours provider validateName / validateValue hooks, but still blocks prototype-polluting names (issue #99)', async () => {
     provider = installFakeProvider({ maxItems: 100, maxNameLength: 64, maxValueBytes: 1024 })
     // Custom provider rules: reject names starting with X_, and values shorter than 3 chars.

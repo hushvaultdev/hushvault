@@ -202,6 +202,15 @@ export const gitlabProvider: SyncProvider = {
     return VARIABLE_KEY.test(name)
   },
 
+  // Suggest a GitLab-valid key for a name GitLab would reject, WITHOUT changing case (GitLab keys allow a-z and a
+  // leading digit, so only the disallowed characters need fixing). Returns null when it is already valid or nothing
+  // sensible remains. The engine only surfaces this as a hint; it never renames on its own.
+  suggestName(name) {
+    if (VARIABLE_KEY.test(name)) return null
+    const cleaned = name.replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 255)
+    return cleaned.length > 0 && VARIABLE_KEY.test(cleaned) && cleaned !== name ? cleaned : null
+  },
+
   parseConfig(config) {
     // The connection is just the access token; there is no non-secret config. Reject anything else (no base URL).
     if (!isRecord(config) || Object.keys(config).length !== 0) return null

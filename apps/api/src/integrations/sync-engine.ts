@@ -445,7 +445,19 @@ export async function planSync(env: Env, target: SyncTargetRow, provider: SyncPr
   }
   const wantedNames = sorted(wanted.keys())
   const blockers: SyncPlanDto['blockers'] = []
-  if (invalidNames.length) blockers.push({ code: 'NAME_INVALID', names: sorted(invalidNames) })
+  if (invalidNames.length) {
+    // A hint only: for each invalid name, offer a provider-valid name the user could RENAME their secret to. The
+    // suggestion must itself be acceptable (nameOk, so never a reserved/unsafe or over-long name) and differ from
+    // the original. The engine never applies it — HushVault does not silently rename (issue #99, transform review).
+    const suggestions: Record<string, string> = {}
+    if (provider.suggestName) {
+      for (const name of invalidNames) {
+        const s = provider.suggestName(name)
+        if (s !== null && s !== name && nameOk(s)) suggestions[name] = s
+      }
+    }
+    blockers.push({ code: 'NAME_INVALID', names: sorted(invalidNames), ...(Object.keys(suggestions).length > 0 ? { suggestions } : {}) })
+  }
   if (emptyValues.length) blockers.push({ code: 'EMPTY_VALUE', names: sorted(emptyValues) })
   if (tooLarge.length) blockers.push({ code: 'VALUE_TOO_LARGE', names: sorted(tooLarge) })
   const blocked = new Set([...invalidNames, ...emptyValues, ...tooLarge])

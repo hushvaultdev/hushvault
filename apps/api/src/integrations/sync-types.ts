@@ -77,6 +77,12 @@ export interface SyncProvider extends IntegrationProvider {
    */
   validateName?(name: string): boolean
   /**
+   * For a name this provider would reject, suggest a valid name the user could rename their secret to (e.g.
+   * `db-url` -> `DB_URL`), or null when it cannot (already valid, or nothing sensible to suggest). This is a HINT
+   * surfaced on the NAME_INVALID blocker only; the engine never applies it — HushVault does not silently rename.
+   */
+  suggestName?(name: string): string | null
+  /**
    * A blocker code when `value` is unacceptable for `name`, else null. When absent the engine applies its default
    * (empty -> EMPTY_VALUE; UTF-8 byte length > maxValueBytes -> VALUE_TOO_LARGE). A GitLab masked value that is too
    * short, for instance, maps onto VALUE_TOO_LARGE's sibling at the provider's discretion.

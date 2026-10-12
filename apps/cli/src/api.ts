@@ -144,7 +144,7 @@ export interface SyncPlan {
   delete: string[]
   skip: string[]
   conflict: string[]
-  blockers: { code: string; names: string[] }[]
+  blockers: { code: string; names: string[]; suggestions?: Record<string, string> }[]
 }
 
 export interface SyncRun {

@@ -110,6 +110,15 @@ function PlanView({ plan }: { plan: SyncPlanDto }) {
             {plan.blockers.map((b) => (
               <li key={b.code}>
                 {blockerLabel(b.code)}: {b.names.join(', ') || 'see target configuration'}
+                {b.suggestions && Object.keys(b.suggestions).length > 0 ? (
+                  <ul>
+                    {Object.entries(b.suggestions).map(([bad, good]) => (
+                      <li key={bad}>
+                        Rename <code>{bad}</code> → <code>{good}</code>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
               </li>
             ))}
           </ul>

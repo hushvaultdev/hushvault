@@ -105,7 +105,10 @@ function viewPlan(p: unknown): SyncPlan {
     conflict: strings(o['conflict']),
     blockers: blockers.map((b) => {
       const bo = (typeof b === 'object' && b !== null ? b : {}) as Record<string, unknown>
-      return { code: safe(bo['code']), names: strings(bo['names']) }
+      const rawSug = typeof bo['suggestions'] === 'object' && bo['suggestions'] !== null ? (bo['suggestions'] as Record<string, unknown>) : {}
+      const suggestions: Record<string, string> = {}
+      for (const [k, v] of Object.entries(rawSug)) if (typeof v === 'string') suggestions[k] = v
+      return { code: safe(bo['code']), names: strings(bo['names']), ...(Object.keys(suggestions).length > 0 ? { suggestions } : {}) }
     }),
   }
 }
@@ -157,7 +160,12 @@ export function printPlan(plan: SyncPlan, out: Out): void {
   listNames('update', plan.update, out)
   listNames('delete', plan.delete, out)
   listNames('conflict (exists on target, not created by HushVault; left untouched)', plan.conflict, out)
-  for (const b of plan.blockers) listNames(`blocked: ${b.code}`, b.names, out)
+  for (const b of plan.blockers) {
+    listNames(`blocked: ${b.code}`, b.names, out)
+    if (b.suggestions && Object.keys(b.suggestions).length > 0) {
+      for (const [bad, good] of Object.entries(b.suggestions)) out(`    rename ${bad} → ${good}`)
+    }
+  }
   if (plan.blockers.length > 0 && plan.blockers.every((b) => b.names.length === 0)) {
     out(`  blocked: ${plan.blockers.map((b) => b.code).join(', ')}`)
   }

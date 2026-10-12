@@ -80,6 +80,16 @@ describe('parseConfig / parseResource / validateName', () => {
     for (const bad of ['', 'db-url', 'has.dot', 'has space', 'a'.repeat(256), 'é']) expect(provider.validateName!(bad), bad).toBe(false)
   })
 
+  it('suggestName fixes the charset without changing case, and returns null when already valid', () => {
+    expect(provider.suggestName!('db-url')).toBe('db_url')
+    expect(provider.suggestName!('my.key')).toBe('my_key')
+    expect(provider.suggestName!('has space')).toBe('has_space')
+    expect(provider.suggestName!('-lead-')).toBe('lead')
+    expect(provider.suggestName!('API_KEY')).toBeNull() // already valid
+    expect(provider.suggestName!('9lives')).toBeNull() // already valid (leading digit is allowed)
+    expect(provider.suggestName!('日本')).toBeNull() // nothing valid remains
+  })
+
   it('an unvalidated resource never reaches fetch', async () => {
     const res = await provider.listNames({ credential: TOKEN, config: {}, resource: { projectId: 'group/project' }, signal: signal() })
     expect(res).toEqual({ ok: false, code: 'PROVIDER_VALIDATION' })
