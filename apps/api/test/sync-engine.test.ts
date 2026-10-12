@@ -200,6 +200,33 @@ describe('provider limits are validated before any write', () => {
     expect(planned.plan.create).toEqual(['GOOD_ONE'])
   })
 
+  it('threads the prepare() session into every push call (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100, maxOpsPerChunk: 2 })
+    const session = { keyId: 'k-123' }
+    let prepareCalls = 0
+    provider.prepare = async () => { prepareCalls += 1; return { ok: true, session } }
+    const w = await setupSyncWorld(env, { secrets: { A: '1', B: '2', C: '3' } })
+    provider.pushCalls.length = 0
+    provider.sessionsSeen.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run.status).toBe('succeeded')
+    // prepare runs once per run, not once per chunk; its session reaches every push.
+    expect(prepareCalls).toBe(1)
+    expect(provider.pushCalls.length).toBe(2) // 3 sets at 2/chunk
+    expect(provider.sessionsSeen).toEqual([session, session])
+  })
+
+  it('a prepare() failure aborts the run before any push (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100 })
+    provider.prepare = async () => ({ ok: false, code: 'PROVIDER_AUTH' })
+    const w = await setupSyncWorld(env, { secrets: { A: '1' } })
+    provider.pushCalls.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_AUTH' })
+    expect(provider.pushCalls).toHaveLength(0)
+    expect(await ledger(w.targetId)).toHaveLength(0)
+  })
+
   it('chunks by limits.maxOpsPerChunk when set, independently of maxItems capacity (issue #99)', async () => {
     // Capacity is high (maxItems 100) so nothing is over capacity, but a no-bulk-style provider sends 2 ops/request.
     provider = installFakeProvider({ maxItems: 100, maxOpsPerChunk: 2 })

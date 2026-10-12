@@ -37,6 +37,17 @@ export interface ProviderLimits {
   pushTimeoutMs?: number
 }
 
+/**
+ * Opaque per-run state a provider computes once in `prepare()` and reads back in `push()`. The engine never
+ * inspects it; a provider casts it to its own type. GitHub, for example, fetches the repo/environment public key
+ * here so it is fetched once per run rather than once per chunk. Providers with no per-run state omit `prepare`.
+ */
+export type ProviderSession = unknown
+
+export type PrepareResult =
+  | { ok: true; session: ProviderSession }
+  | ({ ok: false; code: ProviderErrorCode } & FailureInfo)
+
 export interface PushInput {
   credential: string
   /** Non-secret connection config (identifiers only). */
@@ -44,6 +55,8 @@ export interface PushInput {
   /** Target resource identifiers, already validated by parseResource. */
   resource: Record<string, string>
   ops: SyncOp[]
+  /** The value returned by `prepare()` for this run, or undefined when the provider has no `prepare`. */
+  session?: ProviderSession
   signal: AbortSignal
 }
 
@@ -69,7 +82,13 @@ export interface SyncProvider extends IntegrationProvider {
   /** Returns the sanitized resource identifiers, or null when invalid. Identifiers only, never URLs. */
   parseResource(resource: unknown): Record<string, string> | null
   /** Names currently on the target (never values), for conflict detection. Null when the provider cannot list. */
-  listNames(input: Omit<PushInput, 'ops'>): Promise<{ ok: true; names: string[] } | ({ ok: false; code: ProviderErrorCode } & FailureInfo)>
+  listNames(input: Omit<PushInput, 'ops' | 'session'>): Promise<{ ok: true; names: string[] } | ({ ok: false; code: ProviderErrorCode } & FailureInfo)>
+  /**
+   * Optional once-per-run setup, called after listNames and before the first push. Its session is threaded into
+   * every push() call of the run. A failure aborts the run with the returned code (no push happens). Providers
+   * with no per-run state omit this and push() receives `session: undefined`.
+   */
+  prepare?(input: Omit<PushInput, 'ops' | 'session'>): Promise<PrepareResult>
   /** Apply a batch (the engine already chunks to `limits.maxItems`). Idempotent: deleting a missing name is ok. */
   push(input: PushInput): Promise<PushResult>
 }

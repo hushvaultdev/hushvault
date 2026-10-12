@@ -781,6 +781,18 @@ async function execute(
   const credential = await readCredential(env, target.orgId, target.connectionId)
   if (credential === null) return failedOutcome('CREDENTIAL_UNAVAILABLE')
 
+  // Optional once-per-run provider setup (e.g. fetch a repo public key). A failure aborts before any push.
+  let session: unknown
+  if (provider.prepare) {
+    const prepared = await callProvider(provider.limits.pushTimeoutMs ?? PUSH_TIMEOUT_MS, (signal) => provider.prepare!({ credential, config, resource: target.resource, signal }))
+    if (!prepared.ok) return failedOutcome(prepared.code, undefined)
+    if (!prepared.value.ok) {
+      const f = prepared.value
+      return failedOutcome(f.code, f.retryAfterSeconds)
+    }
+    session = prepared.value.session
+  }
+
   const errors = new Set<SyncErrorCode>(preErrors)
   let retryAfterSeconds: number | undefined
   const note = (code: SyncErrorCode, retryAfter?: number): void => {
@@ -821,7 +833,7 @@ async function execute(
     }
 
     const syncOps: SyncOp[] = chunk.map((o) => (o.type === 'set' ? { type: 'set', name: o.name, value: o.value } : { type: 'delete', name: o.name }))
-    const pushed = await callProvider(provider.limits.pushTimeoutMs ?? PUSH_TIMEOUT_MS, (signal) => provider.push({ credential, config, resource: target.resource, ops: syncOps, signal }))
+    const pushed = await callProvider(provider.limits.pushTimeoutMs ?? PUSH_TIMEOUT_MS, (signal) => provider.push({ credential, config, resource: target.resource, ops: syncOps, session, signal }))
     const result = pushed.ok ? pushed.value : pushed
     const statements: D1PreparedStatement[] = []
     if (!result.ok) {
