@@ -31,6 +31,15 @@ export const INTEGRATIONS: readonly IntegrationInfo[] = [
     issue: 41,
   },
   {
+    id: 'gitlab',
+    name: 'GitLab',
+    mark: 'GL',
+    status: 'beta',
+    directions: ['push'],
+    summary: 'Beta: one-way push of an environment to a gitlab.com project’s or group’s CI/CD variables (one environment scope per target, with masked/protected flags), verified live against a real GitLab project.',
+    issue: 99,
+  },
+  {
     id: 'github-actions',
     name: 'GitHub Actions',
     mark: 'GH',
@@ -123,14 +132,22 @@ export interface SyncAutoSync {
   scheduleMinutes: number | null
 }
 
+/**
+ * A single resource-identifier value. Strings for identifiers (account id, script name, project id); booleans and
+ * numbers for provider flags such as GitLab's `masked`/`protected`/`environment_scope`. Never a URL or host — a
+ * provider calls fixed API hosts, so a resource value can never steer a request (SSRF).
+ */
+export type SyncResourceValue = string | number | boolean
+export type SyncResourceSpec = Record<string, SyncResourceValue>
+
 export interface SyncTargetDto {
   id: string
   projectId: string
   envId: string
   connectionId: string
   provider: string
-  /** Provider-specific identifiers only, e.g. { accountId, scriptName } for Cloudflare Workers. */
-  resource: Record<string, string>
+  /** Provider-specific identifiers/flags only, e.g. { accountId, scriptName } for Cloudflare Workers. */
+  resource: SyncResourceSpec
   nameFilter: SyncNameFilter
   /** Automatic triggers (M4). Both default to off; a manual run always works. */
   autoSync: SyncAutoSync
@@ -151,8 +168,13 @@ export interface SyncPlanDto {
   skip: string[]
   /** Target already has this name and HushVault never created it: left untouched. */
   conflict: string[]
-  /** Reasons a run cannot start (e.g. over the provider's limits). Empty when the plan is runnable. */
-  blockers: { code: SyncErrorCode | 'TOO_MANY_ITEMS' | 'VALUE_TOO_LARGE' | 'NAME_INVALID' | 'EMPTY_VALUE'; names: string[] }[]
+  /**
+   * Reasons a run cannot start (e.g. over the provider's limits). Empty when the plan is runnable.
+   * `suggestions` (NAME_INVALID only) maps an invalid HushVault secret name to a provider-valid name the user
+   * can rename it to (e.g. `db-url` -> `DB_URL` on GitLab). It is a hint for the UI/CLI, never an automatic rename:
+   * HushVault never silently changes which key it pushes.
+   */
+  blockers: { code: SyncErrorCode | 'TOO_MANY_ITEMS' | 'VALUE_TOO_LARGE' | 'NAME_INVALID' | 'EMPTY_VALUE'; names: string[]; suggestions?: Record<string, string> }[]
 }
 
 export interface SyncRunDto {

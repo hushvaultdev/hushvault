@@ -15,7 +15,7 @@
 //  - The sync denylist (scripts and Cloudflare account ids) is enforced here as well as in the routes.
 //  - Provider failures are mapped to a SyncErrorCode; provider error bodies are never stored.
 //  - Fail closed: any resolution failure (e.g. a computed-secret error) aborts before a single provider call.
-import type { SyncAutoSync, SyncErrorCode, SyncNameFilter, SyncPlanDto, SyncRunDto, SyncRunStatus, SyncTargetDto, SyncTrigger } from '@hushvault/shared/integrations'
+import type { SyncAutoSync, SyncErrorCode, SyncNameFilter, SyncPlanDto, SyncResourceSpec, SyncRunDto, SyncRunStatus, SyncTargetDto, SyncTrigger } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { notifySyncNeedsAttention } from '../lib/notify'
@@ -152,7 +152,7 @@ export type SyncTargetRow = {
   envId: string
   connectionId: string
   provider: string
-  resource: Record<string, string>
+  resource: SyncResourceSpec
   /** The stored resource_json: ledger writes are guarded on it so a run cannot write after the resource changed. */
   resourceJson: string
   nameFilter: SyncNameFilter
@@ -188,6 +188,22 @@ function parseJson<T>(text: string, fallback: T): T {
   }
 }
 
+/**
+ * Strict parse of a connection's `config_json`: a plain JSON object, or null when the text is unparseable,
+ * null, an array or a primitive. Unlike `parseJson(..., {})` this NEVER falls back to `{}` on a parse failure —
+ * a corrupt config must fail the run closed (CREDENTIAL_UNAVAILABLE), because an empty config silently disables
+ * the account-match and account-denylist checks that gate which account a push may target (issue #99, fail-closed).
+ */
+function parseConfigJson(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
 function toTargetRow(row: TargetDbRow): SyncTargetRow {
   return {
     id: row.id,
@@ -196,7 +212,7 @@ function toTargetRow(row: TargetDbRow): SyncTargetRow {
     envId: row.env_id,
     connectionId: row.connection_id,
     provider: row.provider,
-    resource: parseJson<Record<string, string>>(row.resource_json, {}),
+    resource: parseJson<SyncResourceSpec>(row.resource_json, {}),
     resourceJson: row.resource_json,
     nameFilter: parseJson<SyncNameFilter>(row.name_filter_json, {}),
     deleteRemoved: row.delete_removed === 1,
@@ -404,19 +420,44 @@ export async function planSync(env: Env, target: SyncTargetRow, provider: SyncPr
     wanted.set(secret.name, secret.value ?? '')
   }
 
-  // Per-name blockers are checked before anything touches the provider.
+  // Per-name blockers are checked before anything touches the provider. A provider may override name/value
+  // validity (GitHub, GitLab); absent a hook the engine applies its defaults. Prototype-polluting names are
+  // rejected here unconditionally — the hook cannot opt back into them.
   const limits = provider.limits
+  const nameOk = (name: string): boolean =>
+    !UNSAFE_NAMES.has(name.toLowerCase())
+    && (provider.validateName ? provider.validateName(name) : NAME_PATTERN.test(name) && name.length <= limits.maxNameLength)
+  const valueBlocker = (name: string, value: string): 'EMPTY_VALUE' | 'VALUE_TOO_LARGE' | null =>
+    provider.validateValue
+      ? provider.validateValue(name, value)
+      : value === '' ? 'EMPTY_VALUE' : encoder.encode(value).byteLength > limits.maxValueBytes ? 'VALUE_TOO_LARGE' : null
   const invalidNames: string[] = []
   const tooLarge: string[] = []
   const emptyValues: string[] = []
   for (const [name, value] of wanted) {
-    if (UNSAFE_NAMES.has(name.toLowerCase()) || !NAME_PATTERN.test(name) || name.length > limits.maxNameLength) invalidNames.push(name)
-    else if (value === '') emptyValues.push(name) // whether the provider accepts an empty value is unverified: do not guess
-    else if (encoder.encode(value).byteLength > limits.maxValueBytes) tooLarge.push(name)
+    if (!nameOk(name)) {
+      invalidNames.push(name)
+      continue
+    }
+    const vb = valueBlocker(name, value) // whether the provider accepts an empty value is unverified: do not guess
+    if (vb === 'EMPTY_VALUE') emptyValues.push(name)
+    else if (vb === 'VALUE_TOO_LARGE') tooLarge.push(name)
   }
   const wantedNames = sorted(wanted.keys())
   const blockers: SyncPlanDto['blockers'] = []
-  if (invalidNames.length) blockers.push({ code: 'NAME_INVALID', names: sorted(invalidNames) })
+  if (invalidNames.length) {
+    // A hint only: for each invalid name, offer a provider-valid name the user could RENAME their secret to. The
+    // suggestion must itself be acceptable (nameOk, so never a reserved/unsafe or over-long name) and differ from
+    // the original. The engine never applies it — HushVault does not silently rename (issue #99, transform review).
+    const suggestions: Record<string, string> = {}
+    if (provider.suggestName) {
+      for (const name of invalidNames) {
+        const s = provider.suggestName(name)
+        if (s !== null && s !== name && nameOk(s)) suggestions[name] = s
+      }
+    }
+    blockers.push({ code: 'NAME_INVALID', names: sorted(invalidNames), ...(Object.keys(suggestions).length > 0 ? { suggestions } : {}) })
+  }
   if (emptyValues.length) blockers.push({ code: 'EMPTY_VALUE', names: sorted(emptyValues) })
   if (tooLarge.length) blockers.push({ code: 'VALUE_TOO_LARGE', names: sorted(tooLarge) })
   const blocked = new Set([...invalidNames, ...emptyValues, ...tooLarge])
@@ -424,12 +465,13 @@ export async function planSync(env: Env, target: SyncTargetRow, provider: SyncPr
   const connection = await env.DB.prepare('SELECT provider, config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1')
     .bind(target.connectionId, target.orgId).first<{ provider: string; config_json: string }>()
   if (!connection || connection.provider !== target.provider) return { ok: false, code: 'CREDENTIAL_UNAVAILABLE' }
-  const config = parseJson<Record<string, unknown>>(connection.config_json, {})
+  const config = parseConfigJson(connection.config_json)
+  if (config === null) return { ok: false, code: 'CREDENTIAL_UNAVAILABLE' }
   if (isTargetDenied(env, target.resource, config)) return { ok: false, code: 'TARGET_NOT_ALLOWED' }
   const credential = await readCredential(env, target.orgId, target.connectionId)
   if (credential === null) return { ok: false, code: 'CREDENTIAL_UNAVAILABLE' }
 
-  const listed = await callProvider(LIST_TIMEOUT_MS, (signal) => provider.listNames({ credential, config, resource: target.resource, signal }))
+  const listed = await callProvider(provider.limits.listTimeoutMs ?? LIST_TIMEOUT_MS, (signal) => provider.listNames({ credential, config, resource: target.resource, signal }))
   if (!listed.ok) return { ok: false, code: listed.code }
   if (!listed.value.ok) {
     const failure = listed.value
@@ -743,11 +785,27 @@ async function execute(
 
   const connection = await env.DB.prepare('SELECT config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1')
     .bind(target.connectionId, target.orgId).first<{ config_json: string }>()
-  const config = parseJson<Record<string, unknown>>(connection?.config_json ?? '{}', {})
-  // Defence in depth: the plan already checked, but the connection is re-read here.
+  const config = parseConfigJson(connection?.config_json ?? null)
+  // Defence in depth: the plan already checked, but the connection is re-read here. A missing or corrupt config
+  // fails closed (an empty config would disable the denylist's account match), matching planSync.
+  if (config === null) return failedOutcome('CREDENTIAL_UNAVAILABLE')
   if (isTargetDenied(env, target.resource, config)) return failedOutcome('TARGET_NOT_ALLOWED')
   const credential = await readCredential(env, target.orgId, target.connectionId)
   if (credential === null) return failedOutcome('CREDENTIAL_UNAVAILABLE')
+
+  // Optional once-per-run provider setup (e.g. fetch a repo public key). A failure aborts before any push.
+  // Only when there is something to push: a forget-only run (ledger cleanup, no ops) needs no provider call, and
+  // must not be turned into a failed run by a prepare() error.
+  let session: unknown
+  if (provider.prepare && ops.length > 0) {
+    const prepared = await callProvider(provider.limits.pushTimeoutMs ?? PUSH_TIMEOUT_MS, (signal) => provider.prepare!({ credential, config, resource: target.resource, signal }))
+    if (!prepared.ok) return failedOutcome(prepared.code, undefined)
+    if (!prepared.value.ok) {
+      const f = prepared.value
+      return failedOutcome(f.code, f.retryAfterSeconds)
+    }
+    session = prepared.value.session
+  }
 
   const errors = new Set<SyncErrorCode>(preErrors)
   let retryAfterSeconds: number | undefined
@@ -758,7 +816,7 @@ async function execute(
   const pushedAt = clock().toISOString()
   const resourceJson = target.resourceJson
   const guard = [target.id, resourceJson] as const
-  const chunkSize = Math.max(1, provider.limits.maxItems)
+  const chunkSize = Math.max(1, provider.limits.maxOpsPerChunk ?? provider.limits.maxItems)
   // Sets first, deletes last, so a failure mid-way never removes something before its replacement landed.
   const ordered = [...ops.filter((o) => o.type === 'set'), ...ops.filter((o) => o.type === 'delete')]
   let okItems = 0
@@ -789,7 +847,7 @@ async function execute(
     }
 
     const syncOps: SyncOp[] = chunk.map((o) => (o.type === 'set' ? { type: 'set', name: o.name, value: o.value } : { type: 'delete', name: o.name }))
-    const pushed = await callProvider(PUSH_TIMEOUT_MS, (signal) => provider.push({ credential, config, resource: target.resource, ops: syncOps, signal }))
+    const pushed = await callProvider(provider.limits.pushTimeoutMs ?? PUSH_TIMEOUT_MS, (signal) => provider.push({ credential, config, resource: target.resource, ops: syncOps, session, signal }))
     const result = pushed.ok ? pushed.value : pushed
     const statements: D1PreparedStatement[] = []
     if (!result.ok) {

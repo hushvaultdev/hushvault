@@ -182,6 +182,94 @@ describe('provider limits are validated before any write', () => {
     expect(provider.pushCalls[0]!.every((o) => o.type === 'set')).toBe(true)
     expect(provider.pushCalls[1]!.every((o) => o.type === 'delete')).toBe(true)
   })
+
+  it('surfaces a provider suggestName as a NAME_INVALID hint, dropping suggestions that are not themselves valid (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100 })
+    // Default validateName rejects dashes. Suggest underscoring; but suggest an UNSAFE name for one case.
+    provider.suggestName = (name: string) => (name === 'BAD-NAME' ? 'constructor' : name.replace(/-/g, '_'))
+    const w = await setupSyncWorld(env, { secrets: { 'DB-URL': 'x', 'BAD-NAME': 'y', OK_ONE: 'z' } })
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    const nameInvalid = planned.plan.blockers.find((b) => b.code === 'NAME_INVALID')
+    expect(nameInvalid?.names).toEqual(['BAD-NAME', 'DB-URL'])
+    // DB-URL -> DB_URL is a valid suggestion; BAD-NAME -> constructor is dropped (nameOk rejects it).
+    expect(nameInvalid?.suggestions).toEqual({ 'DB-URL': 'DB_URL' })
+    expect(planned.plan.create).toEqual(['OK_ONE'])
+  })
+
+  it('honours provider validateName / validateValue hooks, but still blocks prototype-polluting names (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100, maxNameLength: 64, maxValueBytes: 1024 })
+    // Custom provider rules: reject names starting with X_, and values shorter than 3 chars.
+    provider.validateName = (name: string) => !name.startsWith('X_')
+    provider.validateValue = (_name: string, value: string) => (value.length < 3 ? 'VALUE_TOO_LARGE' : null)
+    const w = await setupSyncWorld(env, { secrets: { GOOD_ONE: 'abcd', X_REJECTED: 'abcd', SHORT: 'ab' } })
+    // Seeded directly: `__proto__` in an object literal sets the prototype, not a key, so it can't go in `secrets`.
+    await seedSecret(env, w.projectId, w.envId, '__proto__', 'abcd')
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    const codes = Object.fromEntries(planned.plan.blockers.map((b) => [b.code, b.names]))
+    // X_REJECTED fails the custom name rule; __proto__ is blocked by the engine despite validateName allowing it.
+    expect(codes['NAME_INVALID']).toEqual(['X_REJECTED', '__proto__'])
+    expect(codes['VALUE_TOO_LARGE']).toEqual(['SHORT'])
+    expect(planned.plan.create).toEqual(['GOOD_ONE'])
+  })
+
+  it('threads the prepare() session into every push call (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100, maxOpsPerChunk: 2 })
+    const session = { keyId: 'k-123' }
+    let prepareCalls = 0
+    provider.prepare = async () => { prepareCalls += 1; return { ok: true, session } }
+    const w = await setupSyncWorld(env, { secrets: { A: '1', B: '2', C: '3' } })
+    provider.pushCalls.length = 0
+    provider.sessionsSeen.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run.status).toBe('succeeded')
+    // prepare runs once per run, not once per chunk; its session reaches every push.
+    expect(prepareCalls).toBe(1)
+    expect(provider.pushCalls.length).toBe(2) // 3 sets at 2/chunk
+    expect(provider.sessionsSeen).toEqual([session, session])
+  })
+
+  it('does not call prepare() on a forget-only run (no ops to push) (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100 })
+    const w = await setupSyncWorld(env, { secrets: { KEEP: '1', DROPME: '2' } })
+    await runSync(env, w.targetId, { trigger: 'manual' }) // ledger now holds KEEP, DROPME
+    // Narrow the name filter so DROPME is no longer synced but is still in the environment -> forget, not delete.
+    await env.DB.prepare('UPDATE sync_targets SET name_filter_json = ?, delete_removed = 1 WHERE id = ?').bind(JSON.stringify({ prefix: 'KEEP' }), w.targetId).run()
+    let prepareCalls = 0
+    provider.prepare = async () => { prepareCalls += 1; return { ok: true, session: {} } }
+    provider.pushCalls.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run.status).toBe('succeeded')
+    expect(prepareCalls).toBe(0)
+    expect(provider.pushCalls).toHaveLength(0)
+    // DROPME is no longer in the ledger (forgotten), KEEP remains.
+    const names = await ledger(w.targetId)
+    expect(names).toContain('KEEP')
+    expect(names).not.toContain('DROPME')
+  })
+
+  it('a prepare() failure aborts the run before any push (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100 })
+    provider.prepare = async () => ({ ok: false, code: 'PROVIDER_AUTH' })
+    const w = await setupSyncWorld(env, { secrets: { A: '1' } })
+    provider.pushCalls.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'failed', errorCode: 'PROVIDER_AUTH' })
+    expect(provider.pushCalls).toHaveLength(0)
+    expect(await ledger(w.targetId)).toHaveLength(0)
+  })
+
+  it('chunks by limits.maxOpsPerChunk when set, independently of maxItems capacity (issue #99)', async () => {
+    // Capacity is high (maxItems 100) so nothing is over capacity, but a no-bulk-style provider sends 2 ops/request.
+    provider = installFakeProvider({ maxItems: 100, maxOpsPerChunk: 2 })
+    const w = await setupSyncWorld(env, { secrets: { A: '1', B: '2', C: '3', D: '4', E: '5' } })
+    provider.pushCalls.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'succeeded', counts: { created: 5 } })
+    // 5 sets at 2 ops/chunk -> three requests: [2, 2, 1].
+    expect(provider.pushCalls.map((c) => c.length)).toEqual([2, 2, 1])
+  })
 })
 
 describe('partial failure and retry', () => {

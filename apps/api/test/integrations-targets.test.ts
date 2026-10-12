@@ -356,6 +356,42 @@ describe('own-worker denylist and the real Cloudflare provider', () => {
   })
 })
 
+describe('resource carries non-string flags (issue #99)', () => {
+  it('round-trips boolean/number resource values through create and the DTO', async () => {
+    const w = await setupOrg()
+    const res = await createTarget(w.token, createBody(w, 'worker-a', { resource: { scriptName: 'worker-a', masked: true, maxItems: 3 } }))
+    expect(res.status).toBe(201)
+    expect(res.body.data.resource).toEqual({ scriptName: 'worker-a', masked: true, maxItems: 3 })
+    const stored = await env.DB.prepare('SELECT resource_json FROM sync_targets WHERE id = ?').bind(res.body.data.id).first<{ resource_json: string }>()
+    expect(JSON.parse(stored!.resource_json)).toEqual({ scriptName: 'worker-a', masked: true, maxItems: 3 })
+  })
+})
+
+describe('corrupt connection config fails closed (issue #99)', () => {
+  it('refuses a new target with 422 when the connection config_json is unparseable', async () => {
+    const w = await setupOrg()
+    await env.DB.prepare('UPDATE integration_connections SET config_json = ? WHERE id = ?').bind('{not json', w.connectionId).run()
+    const res = await createTarget(w.token, createBody(w, 'worker-a'))
+    expect(res.status).toBe(422)
+    expect(res.body.error).toBe('CREDENTIAL_UNAVAILABLE')
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_targets').first<{ n: number }>())?.n).toBe(0)
+  })
+
+  it('fails a run with CREDENTIAL_UNAVAILABLE (no provider call) when config_json is corrupt', async () => {
+    const w = await setupSyncWorld(env, { secrets: { API_KEY: VALUE_CANARY } })
+    await env.DB.prepare('UPDATE integration_connections SET config_json = ? WHERE id = ?').bind('null', w.connectionId).run()
+    const run = await call(env, 'POST', `/api/integrations/targets/${w.targetId}/run`, { token: w.token })
+    // A pre-push failure keeps the mapped-HTTP-error contract (422), and nothing reaches the provider.
+    expect(run.status).toBe(422)
+    expect(run.body.error).toBe('CREDENTIAL_UNAVAILABLE')
+    expect(fake.listCalls).toBe(0)
+    expect(fake.pushCalls).toHaveLength(0)
+    // The failed run is still recorded in history.
+    const runs = await call(env, 'GET', `/api/integrations/targets/${w.targetId}/runs`, { token: w.token })
+    expect(runs.body.data[0]).toMatchObject({ status: 'failed', errorCode: 'CREDENTIAL_UNAVAILABLE' })
+  })
+})
+
 describe('preview and run end to end', () => {
   it('previews names only, runs, records history, then reports nothing to do', async () => {
     const w = await setupSyncWorld(env, { secrets: { API_KEY: VALUE_CANARY, DB_URL: `postgres://${VALUE_CANARY}`, JWT_SECRET: VALUE_CANARY } })

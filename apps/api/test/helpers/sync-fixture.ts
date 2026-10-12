@@ -15,6 +15,8 @@ export type FakeProvider = SyncProvider & {
   remote: Map<string, string>
   listCalls: number
   pushCalls: SyncOp[][]
+  /** The `session` value each push() call received (from prepare(), or undefined). */
+  sessionsSeen: unknown[]
   credentialsSeen: string[]
   /** Return a PushResult to override the normal behaviour for one push call. */
   script: Array<(input: PushInput) => PushResult | Promise<PushResult | undefined> | undefined>
@@ -32,6 +34,7 @@ export function makeFakeProvider(limits: Partial<ProviderLimits> = {}): FakeProv
     remote: new Map(),
     listCalls: 0,
     pushCalls: [],
+    sessionsSeen: [],
     credentialsSeen: [],
     script: [],
     listError: null,
@@ -47,6 +50,7 @@ export function makeFakeProvider(limits: Partial<ProviderLimits> = {}): FakeProv
     },
     async push(input) {
       provider.pushCalls.push(input.ops.map((o) => ({ ...o })))
+      provider.sessionsSeen.push(input.session)
       provider.credentialsSeen.push(input.credential)
       if (provider.gate) await provider.gate
       // A script entry may return a PushResult (sync or async) to override the call, or undefined (also from an
