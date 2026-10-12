@@ -188,6 +188,22 @@ function parseJson<T>(text: string, fallback: T): T {
   }
 }
 
+/**
+ * Strict parse of a connection's `config_json`: a plain JSON object, or null when the text is unparseable,
+ * null, an array or a primitive. Unlike `parseJson(..., {})` this NEVER falls back to `{}` on a parse failure —
+ * a corrupt config must fail the run closed (CREDENTIAL_UNAVAILABLE), because an empty config silently disables
+ * the account-match and account-denylist checks that gate which account a push may target (issue #99, fail-closed).
+ */
+function parseConfigJson(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
 function toTargetRow(row: TargetDbRow): SyncTargetRow {
   return {
     id: row.id,
@@ -424,7 +440,8 @@ export async function planSync(env: Env, target: SyncTargetRow, provider: SyncPr
   const connection = await env.DB.prepare('SELECT provider, config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1')
     .bind(target.connectionId, target.orgId).first<{ provider: string; config_json: string }>()
   if (!connection || connection.provider !== target.provider) return { ok: false, code: 'CREDENTIAL_UNAVAILABLE' }
-  const config = parseJson<Record<string, unknown>>(connection.config_json, {})
+  const config = parseConfigJson(connection.config_json)
+  if (config === null) return { ok: false, code: 'CREDENTIAL_UNAVAILABLE' }
   if (isTargetDenied(env, target.resource, config)) return { ok: false, code: 'TARGET_NOT_ALLOWED' }
   const credential = await readCredential(env, target.orgId, target.connectionId)
   if (credential === null) return { ok: false, code: 'CREDENTIAL_UNAVAILABLE' }
@@ -743,8 +760,10 @@ async function execute(
 
   const connection = await env.DB.prepare('SELECT config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1')
     .bind(target.connectionId, target.orgId).first<{ config_json: string }>()
-  const config = parseJson<Record<string, unknown>>(connection?.config_json ?? '{}', {})
-  // Defence in depth: the plan already checked, but the connection is re-read here.
+  const config = parseConfigJson(connection?.config_json ?? null)
+  // Defence in depth: the plan already checked, but the connection is re-read here. A missing or corrupt config
+  // fails closed (an empty config would disable the denylist's account match), matching planSync.
+  if (config === null) return failedOutcome('CREDENTIAL_UNAVAILABLE')
   if (isTargetDenied(env, target.resource, config)) return failedOutcome('TARGET_NOT_ALLOWED')
   const credential = await readCredential(env, target.orgId, target.connectionId)
   if (credential === null) return failedOutcome('CREDENTIAL_UNAVAILABLE')

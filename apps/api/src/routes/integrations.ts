@@ -160,10 +160,13 @@ integrationsRouter.put('/connections/:id/credential', ...adminOnly, integrationW
     return c.json({ error: 'INTERNAL_ERROR', message: 'Could not store the credential' }, 500)
   }
   const now = new Date().toISOString()
-  const written = await c.env.DB.prepare(
+  await c.env.DB.prepare(
     'UPDATE integration_connections SET encrypted_credential = ?, wrapped_dek = ?, key_version = ?, updated_at = ?, last_verified_at = ? WHERE id = ? AND org_id = ?',
   ).bind(sealed.encryptedCredential, sealed.wrappedDek, sealed.keyVersion, now, now, id, auth.orgId).run()
-  if (Number(written.meta.changes ?? 0) !== 1) {
+  // Confirm by reading the row back, not by trusting meta.changes (.claude/rules/database-schema.md). The row
+  // existed above, so a null here means a concurrent delete raced the rotation.
+  const stillThere = await c.env.DB.prepare('SELECT 1 AS ok FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1').bind(id, auth.orgId).first()
+  if (stillThere === null) {
     return c.json({ error: 'NOT_FOUND', message: 'Connection not found' }, 404)
   }
 
@@ -193,12 +196,15 @@ integrationsRouter.put('/connections/:id/credential', ...adminOnly, integrationW
 integrationsRouter.delete('/connections/:id', ...adminOnly, integrationWriteRateLimit, async (c) => {
   const auth = c.get('auth')
   const { id } = c.req.param()
-  // Revoking cascades to the connection's sync targets (migration 0011): list them first so each removal is audited.
-  const cascaded = await c.env.DB.prepare('SELECT id FROM sync_targets WHERE connection_id = ? AND org_id = ? AND deleted_at IS NULL').bind(id, auth.orgId).all<{ id: string }>()
-  const result = await c.env.DB.prepare('DELETE FROM integration_connections WHERE id = ? AND org_id = ?').bind(id, auth.orgId).run()
-  if (Number(result.meta.changes ?? 0) !== 1) {
+  // Confirm the connection exists (scoped to the org) before deleting, rather than inferring a 404 from
+  // meta.changes afterwards (.claude/rules/database-schema.md): a delete leaves no row to read back.
+  const exists = await c.env.DB.prepare('SELECT 1 AS ok FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1').bind(id, auth.orgId).first()
+  if (exists === null) {
     return c.json({ error: 'NOT_FOUND', message: 'Connection not found' }, 404)
   }
+  // Revoking cascades to the connection's sync targets (migration 0011): list them first so each removal is audited.
+  const cascaded = await c.env.DB.prepare('SELECT id FROM sync_targets WHERE connection_id = ? AND org_id = ? AND deleted_at IS NULL').bind(id, auth.orgId).all<{ id: string }>()
+  await c.env.DB.prepare('DELETE FROM integration_connections WHERE id = ? AND org_id = ?').bind(id, auth.orgId).run()
   for (const t of cascaded.results ?? []) await audit(c, auth, 'sync.target.delete', t.id, 'sync_target')
   await audit(c, auth, 'integration.revoke', id)
   return c.json({ data: { revoked: true } })
@@ -268,8 +274,16 @@ async function checkResource(env: Env, orgId: string, conn: ConnRow, raw: unknow
   if (!isSyncProvider(provider)) return { ok: false, status: 400, error: 'UNSUPPORTED_PROVIDER', message: 'This integration cannot be used as a sync target' }
   const resource = provider.parseResource(raw)
   if (!resource) return { ok: false, status: 400, error: 'VALIDATION_ERROR', message: 'Invalid target settings' }
-  let config: Record<string, unknown> = {}
-  try { config = JSON.parse(conn.config_json) as Record<string, unknown> } catch { config = {} }
+  // Unparseable config must fail closed: an empty `{}` would disable the account-match and denylist checks below
+  // (issue #99). A corrupt connection config is unusable, so refuse the target rather than silently skipping them.
+  let config: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(conn.config_json)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+    config = parsed as Record<string, unknown>
+  } catch {
+    return { ok: false, status: 422, error: 'CREDENTIAL_UNAVAILABLE', message: 'This connection is misconfigured; re-enter the credential before adding a target' }
+  }
   if (config['accountId'] !== undefined && resource['accountId'] !== undefined && config['accountId'] !== resource['accountId']) {
     return { ok: false, status: 400, error: 'VALIDATION_ERROR', message: 'Target account does not match the connection' }
   }
@@ -486,8 +500,11 @@ integrationsRouter.delete('/targets/:id', ...adminOnly, integrationWriteRateLimi
   const auth = c.get('auth')
   const { id } = c.req.param()
   const now = new Date().toISOString()
-  const result = await c.env.DB.prepare('UPDATE sync_targets SET deleted_at = ?, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL').bind(now, now, id, auth.orgId).run()
-  if (Number(result.meta.changes ?? 0) !== 1) return c.json(notFound('Sync target'), 404)
+  // Confirm a live target exists (scoped to the org) before soft-deleting, rather than inferring a 404 from
+  // meta.changes (.claude/rules/database-schema.md).
+  const live = await c.env.DB.prepare('SELECT 1 AS ok FROM sync_targets WHERE id = ? AND org_id = ? AND deleted_at IS NULL LIMIT 1').bind(id, auth.orgId).first()
+  if (live === null) return c.json(notFound('Sync target'), 404)
+  await c.env.DB.prepare('UPDATE sync_targets SET deleted_at = ?, updated_at = ? WHERE id = ? AND org_id = ? AND deleted_at IS NULL').bind(now, now, id, auth.orgId).run()
   // A deleted target must not be retried: drop any scheduled retry of its runs.
   await c.env.DB.prepare('UPDATE sync_runs SET next_retry_at = NULL WHERE target_id = ? AND next_retry_at IS NOT NULL').bind(id).run()
   await audit(c, auth, 'sync.target.delete', id, 'sync_target')
