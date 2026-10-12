@@ -138,11 +138,12 @@ whole link. Requires role `member` or higher. `share` does not need a `.hushvaul
 from one if found. The API builds the `<url>` host itself, and whether a web page for opening links is
 available depends on your deployment.
 
-### `hushvault sync <list|status|preview|run|auto>`
+### `hushvault sync <list|status|preview|run|add|auto>`
 
-Inspect and trigger one-way HushVault to target syncs (for example Cloudflare Workers secrets). Connections and
-targets are created and edited in the dashboard (Integrations); the CLI reads, previews and runs them and can change their auto-sync setting. These commands do not need
-`.hushvault.json`.
+Inspect, create and trigger one-way HushVault to target syncs (for example Cloudflare Workers secrets).
+*Connections* (which hold the provider credential) are created in the dashboard (Integrations); *targets* can be
+added from the CLI with `sync add` or in the dashboard. `sync add` needs `.hushvault.json` (it uses the current
+project and environment); the other commands do not.
 
 | Command | What it does |
 |---------|--------------|
@@ -150,7 +151,11 @@ targets are created and edited in the dashboard (Integrations); the CLI reads, p
 | `sync status <target>` | Target state, auto-sync setting and the latest run (status, counts, error code, next retry time) |
 | `sync preview <target>` | Shows what a run would create, update and delete; changes nothing |
 | `sync run <target>` | Prints the plan, then runs it |
+| `sync add <script> --connection <id> [--env <env>] [--on-change] [--schedule <min>] [--delete-removed]` | Creates a target mapping the project's environment to the connection's resource (`POST /api/integrations/targets/bulk`). Idempotent: re-running reports the target already exists instead of erroring. |
 | `sync auto <target> [--on-change\|--no-on-change] [--schedule <15\|60\|360\|1440\|off>]` | Changes automatic syncing (`PATCH /api/integrations/targets/:id`) |
+
+For scripting many targets at once, call `POST /api/integrations/targets/bulk` directly with a `{ targets: [...] }`
+body (up to 50 per call, one rate-limit token); it returns `{ created, existing, errors }` so a re-run is safe.
 
 `sync auto` needs at least one flag; an omitted flag keeps its current value. `--on-change` syncs within about
 1-2 minutes of a secret change in the environment or a parent it inherits from. `--schedule` also reconciles every

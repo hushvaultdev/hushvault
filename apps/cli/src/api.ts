@@ -115,6 +115,29 @@ export interface SyncTarget {
   lastRunStatus: SyncRunStatus | null
 }
 
+export interface SyncConnection {
+  id: string
+  provider: string
+  label: string
+  config: Record<string, string>
+}
+
+export interface CreateTargetInput {
+  projectId: string
+  envId: string
+  connectionId: string
+  resource: Record<string, string>
+  nameFilter?: { prefix?: string; deny?: string[] }
+  deleteRemoved?: boolean
+  autoSync?: SyncAutoSync
+}
+
+export interface BulkTargetResult {
+  created: SyncTarget[]
+  existing: SyncTarget[]
+  errors: { index: number; error: string; message: string }[]
+}
+
 export interface SyncPlan {
   create: string[]
   update: string[]
@@ -302,7 +325,17 @@ export class ApiClient {
   }
 
   listTargets(): Promise<SyncTarget[]> {
-    return this.request('GET', '/api/integrations/targets')
+    // Ask for the max page so `sync list` keeps showing every target (the API now defaults to 50).
+    return this.request('GET', '/api/integrations/targets', { query: { limit: '200' } })
+  }
+
+  listConnections(): Promise<SyncConnection[]> {
+    return this.request('GET', '/api/integrations/connections')
+  }
+
+  /** Create many targets idempotently: an exact (connection, resource) duplicate comes back under `existing`. */
+  bulkCreateTargets(targets: CreateTargetInput[]): Promise<BulkTargetResult> {
+    return this.request('POST', '/api/integrations/targets/bulk', { body: { targets } })
   }
 
   previewTarget(id: string): Promise<SyncPlan> {

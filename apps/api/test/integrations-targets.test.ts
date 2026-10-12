@@ -35,6 +35,40 @@ const createBody = (w: { projectId: string; envId: string; connectionId: string 
 
 const createTarget = (token: string, body: unknown) => call(env, 'POST', '/api/integrations/targets', { token, json: body })
 
+describe('bulk target creation (idempotent onboarding)', () => {
+  it('creates many in one call, returns exact duplicates as existing, and reports per-item errors by index', async () => {
+    const w = await setupOrg({ plan: 'pro' })
+    const bulk = (targets: unknown[]) => call(env, 'POST', '/api/integrations/targets/bulk', { token: w.token, json: { targets } })
+
+    // First run: three new targets.
+    const first = await bulk([createBody(w, 'w1'), createBody(w, 'w2'), createBody(w, 'w3')])
+    expect(first.status).toBe(201)
+    expect(first.body.data.created).toHaveLength(3)
+    expect(first.body.data.existing).toHaveLength(0)
+    expect(first.body.data.errors).toHaveLength(0)
+
+    // Re-run with an overlap + one new: the three repeats come back as existing, the new one is created.
+    const second = await bulk([createBody(w, 'w2'), createBody(w, 'w3'), createBody(w, 'w4')])
+    expect(second.body.data.created.map((t: { resource: { scriptName: string } }) => t.resource.scriptName)).toEqual(['w4'])
+    expect(second.body.data.existing).toHaveLength(2)
+
+    // Idempotent: total targets is 4, not 7.
+    expect((await env.DB.prepare('SELECT COUNT(*) AS n FROM sync_targets WHERE org_id = ?').bind(w.orgId).first<{ n: number }>())?.n).toBe(4)
+
+    // A bad item is reported by index without failing the good ones.
+    const mixed = await bulk([createBody(w, 'w5'), { ...createBody(w, 'w6'), connectionId: 'icn_missing' }])
+    expect(mixed.body.data.created.map((t: { resource: { scriptName: string } }) => t.resource.scriptName)).toEqual(['w5'])
+    expect(mixed.body.data.errors).toEqual([{ index: 1, error: 'NOT_FOUND', message: expect.any(String) }])
+  })
+
+  it('stops creating at the plan cap and reports PLAN_LIMIT for the overflow', async () => {
+    const w = await setupOrg() // free plan: 2 targets
+    const res = await call(env, 'POST', '/api/integrations/targets/bulk', { token: w.token, json: { targets: [createBody(w, 'a'), createBody(w, 'b'), createBody(w, 'c')] } })
+    expect(res.body.data.created).toHaveLength(2)
+    expect(res.body.data.errors).toEqual([{ index: 2, error: 'PLAN_LIMIT', message: expect.any(String) }])
+  })
+})
+
 describe('credential rotation recovers parked targets', () => {
   it('reactivates needs_attention targets of the connection and re-enqueues the on-change ones', async () => {
     const w = await setupOrg()

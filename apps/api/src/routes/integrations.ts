@@ -7,7 +7,8 @@ import { encryptCredentialWithRing } from '../crypto/envelope'
 import { enqueueSyncForTarget } from '../integrations/sync-scheduler'
 import { getProvider, connectableProviderIds } from '../integrations/provider'
 import { isDeniedAccount, isTargetDenied } from '../integrations/target-denylist'
-import { SyncEngineError, listSyncTargets, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
+import { SyncEngineError, type SyncTargetRow, listSyncTargets, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
+import type { SyncTargetDto } from '@hushvault/shared/integrations'
 import { isSyncProvider } from '../integrations/sync-types'
 import { createPrefixedId } from '../lib/auth'
 import { loadSyncLimits, maxSyncTargetsCaseSql } from '../lib/plan-limits'
@@ -259,7 +260,7 @@ function cleanFilter(f: z.infer<typeof nameFilterSchema> | undefined): { prefix?
 }
 
 type ConnRow = { id: string; provider: string; config_json: string }
-type ResourceCheck = { ok: true; resource: Record<string, string> } | { ok: false; status: 400 | 409 | 422; error: string; message: string }
+type ResourceCheck = { ok: true; resource: Record<string, string> } | { ok: false; status: 400 | 409 | 422; error: string; message: string; existingId?: string }
 
 /** Validate a resource for a connection: provider syntax, same account as the connection, denylist, no duplicate target. */
 async function checkResource(env: Env, orgId: string, conn: ConnRow, raw: unknown, excludeTargetId?: string): Promise<ResourceCheck> {
@@ -281,7 +282,7 @@ async function checkResource(env: Env, orgId: string, conn: ConnRow, raw: unknow
     if (row.id === excludeTargetId) continue
     try {
       if (canonicalResource(JSON.parse(row.resource_json) as Record<string, string>) === wanted) {
-        return { ok: false, status: 409, error: 'CONFLICT', message: 'A sync target for this resource already exists' }
+        return { ok: false, status: 409, error: 'CONFLICT', message: 'A sync target for this resource already exists', existingId: row.id }
       }
     } catch { /* an unparseable row cannot clash */ }
   }
@@ -310,42 +311,98 @@ const notFound = (what: string) => ({ error: 'NOT_FOUND', message: `${what} not 
 const busyBody = { error: 'BUSY', message: 'A sync is queued or running for this target; change its settings after it finishes' }
 const deniedBody = { error: 'TARGET_NOT_ALLOWED', message: 'This Worker cannot be used as a sync target' }
 
-// POST /api/integrations/targets
-integrationsRouter.post('/targets', ...adminOnly, integrationWriteRateLimit, zValidator('json', createTargetSchema, validationHook), async (c) => {
-  const auth = c.get('auth')
-  const body = c.req.valid('json')
+type CreateTargetSpec = z.infer<typeof createTargetSchema>
+type CreateOutcome =
+  | { kind: 'created'; target: SyncTargetRow }
+  | { kind: 'existing'; target: SyncTargetRow }
+  | { kind: 'plan_limit' }
+  | { kind: 'error'; status: 400 | 404 | 409 | 422 | 500; error: string; message: string }
 
-  const conn = await c.env.DB.prepare('SELECT id, provider, config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1').bind(body.connectionId, auth.orgId).first<ConnRow>()
-  if (!conn) return c.json(notFound('Connection'), 404)
-  const project = await c.env.DB.prepare('SELECT id FROM projects WHERE id = ? AND org_id = ? LIMIT 1').bind(body.projectId, auth.orgId).first()
-  if (!project) return c.json(notFound('Project'), 404)
-  const environment = await c.env.DB.prepare('SELECT id FROM environments WHERE id = ? AND project_id = ? LIMIT 1').bind(body.envId, body.projectId).first()
-  if (!environment) return c.json(notFound('Environment'), 404)
+/**
+ * Validate and create one sync target, shared by the single and bulk endpoints. Idempotent by (connection,
+ * resource): an exact duplicate returns the EXISTING target (`existing`) rather than erroring, so re-running an
+ * onboarding script is safe. The per-plan cap is enforced inside the INSERT (atomic under concurrency); hitting
+ * it yields `plan_limit`. Does NOT audit — the caller audits each `created` so one bulk call writes one row per
+ * new target.
+ */
+async function createOneTarget(env: Env, orgId: string, actorUserId: string, spec: CreateTargetSpec): Promise<CreateOutcome> {
+  const conn = await env.DB.prepare('SELECT id, provider, config_json FROM integration_connections WHERE id = ? AND org_id = ? LIMIT 1').bind(spec.connectionId, orgId).first<ConnRow>()
+  if (!conn) return { kind: 'error', status: 404, error: 'NOT_FOUND', message: 'Connection not found' }
+  const project = await env.DB.prepare('SELECT id FROM projects WHERE id = ? AND org_id = ? LIMIT 1').bind(spec.projectId, orgId).first()
+  if (!project) return { kind: 'error', status: 404, error: 'NOT_FOUND', message: 'Project not found' }
+  const environment = await env.DB.prepare('SELECT id FROM environments WHERE id = ? AND project_id = ? LIMIT 1').bind(spec.envId, spec.projectId).first()
+  if (!environment) return { kind: 'error', status: 404, error: 'NOT_FOUND', message: 'Environment not found' }
 
-  const checked = await checkResource(c.env, auth.orgId, conn, body.resource)
-  if (!checked.ok) return c.json({ error: checked.error, message: checked.message }, checked.status)
+  const checked = await checkResource(env, orgId, conn, spec.resource)
+  if (!checked.ok) {
+    // An exact-resource duplicate is idempotent, not an error: hand back the existing target.
+    if (checked.status === 409 && checked.existingId) {
+      const existing = await loadSyncTarget(env, checked.existingId, orgId)
+      if (existing) return { kind: 'existing', target: existing }
+    }
+    return { kind: 'error', status: checked.status, error: checked.error, message: checked.message }
+  }
 
   const id = createPrefixedId('ist')
   const now = new Date().toISOString()
-  // The per-plan cap is enforced inside the INSERT, so concurrent requests cannot exceed it. The
-  // cap comes from a CASE over the org's plan (plan-limits.ts), built from server constants only.
+  // The per-plan cap is enforced inside the INSERT, so concurrent requests (and bulk items) cannot exceed it.
   try {
-    await c.env.DB.prepare(
+    await env.DB.prepare(
       'INSERT INTO sync_targets (id, org_id, project_id, env_id, connection_id, provider, resource_json, name_filter_json, delete_removed, sync_on_change, schedule_minutes, fingerprint_salt, status, created_by, created_at, updated_at)'
       + ' SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'active\', ?, ?, ?'
       + ' WHERE (SELECT COUNT(*) FROM sync_targets WHERE org_id = ? AND deleted_at IS NULL) < '
       + maxSyncTargetsCaseSql('SELECT plan FROM organisations WHERE id = ?'),
-    ).bind(id, auth.orgId, body.projectId, body.envId, conn.id, conn.provider, JSON.stringify(checked.resource), JSON.stringify(cleanFilter(body.nameFilter)), body.deleteRemoved ? 1 : 0, body.autoSync?.onChange ? 1 : 0, body.autoSync?.scheduleMinutes ?? null, newFingerprintSalt(), auth.userId, now, now, auth.orgId, auth.orgId).run()
+    ).bind(id, orgId, spec.projectId, spec.envId, conn.id, conn.provider, JSON.stringify(checked.resource), JSON.stringify(cleanFilter(spec.nameFilter)), spec.deleteRemoved ? 1 : 0, spec.autoSync?.onChange ? 1 : 0, spec.autoSync?.scheduleMinutes ?? null, newFingerprintSalt(), actorUserId, now, now, orgId, orgId).run()
   } catch {
-    return c.json({ error: 'INTERNAL_ERROR', message: 'Could not create the sync target' }, 500)
+    return { kind: 'error', status: 500, error: 'INTERNAL_ERROR', message: 'Could not create the sync target' }
   }
-  const target = await loadSyncTarget(c.env, id, auth.orgId)
-  if (!target) {
+  const target = await loadSyncTarget(env, id, orgId)
+  if (!target) return { kind: 'plan_limit' }
+  return { kind: 'created', target }
+}
+
+// POST /api/integrations/targets
+integrationsRouter.post('/targets', ...adminOnly, integrationWriteRateLimit, zValidator('json', createTargetSchema, validationHook), async (c) => {
+  const auth = c.get('auth')
+  const outcome = await createOneTarget(c.env, auth.orgId, auth.userId, c.req.valid('json'))
+  if (outcome.kind === 'plan_limit') {
     const limits = await loadSyncLimits(c.env, auth.orgId)
     return c.json({ error: 'PLAN_LIMIT', message: `This plan allows ${limits.maxSyncTargets} sync targets; an operator can raise the organisation's plan to add more` }, 409)
   }
-  await audit(c, auth, 'sync.target.create', id, 'sync_target')
-  return c.json({ data: await toSyncTargetDto(c.env, target) }, 201)
+  // Single create keeps a 409 CONFLICT for an exact duplicate (the interactive signal); scripts use /targets/bulk,
+  // which is idempotent.
+  if (outcome.kind === 'existing') return c.json({ error: 'CONFLICT', message: 'A sync target for this resource already exists' }, 409)
+  if (outcome.kind === 'error') return c.json({ error: outcome.error, message: outcome.message }, outcome.status)
+  await audit(c, auth, 'sync.target.create', outcome.target.id, 'sync_target')
+  return c.json({ data: await toSyncTargetDto(c.env, outcome.target) }, 201)
+})
+
+// POST /api/integrations/targets/bulk — create many targets in one call, idempotently (onboarding scripts).
+// Per item: a new target is created, an exact (connection, resource) duplicate is returned as existing, and a
+// validation/plan problem is reported in `errors` by index — the batch never half-fails the request.
+const BULK_MAX_TARGETS = 50
+const bulkTargetSchema = z.object({ targets: z.array(createTargetSchema).min(1).max(BULK_MAX_TARGETS) }).strict()
+integrationsRouter.post('/targets/bulk', ...adminOnly, integrationWriteRateLimit, zValidator('json', bulkTargetSchema, validationHook), async (c) => {
+  const auth = c.get('auth')
+  const { targets } = c.req.valid('json')
+  const created: SyncTargetDto[] = []
+  const existing: SyncTargetDto[] = []
+  const errors: { index: number; error: string; message: string }[] = []
+  for (let i = 0; i < targets.length; i += 1) {
+    const outcome = await createOneTarget(c.env, auth.orgId, auth.userId, targets[i]!)
+    if (outcome.kind === 'created') {
+      await audit(c, auth, 'sync.target.create', outcome.target.id, 'sync_target')
+      created.push(await toSyncTargetDto(c.env, outcome.target))
+    } else if (outcome.kind === 'existing') {
+      existing.push(await toSyncTargetDto(c.env, outcome.target))
+    } else if (outcome.kind === 'plan_limit') {
+      const limits = await loadSyncLimits(c.env, auth.orgId)
+      errors.push({ index: i, error: 'PLAN_LIMIT', message: `This plan allows ${limits.maxSyncTargets} sync targets; an operator can raise the organisation's plan to add more` })
+    } else {
+      errors.push({ index: i, error: outcome.error, message: outcome.message })
+    }
+  }
+  return c.json({ data: { created, existing, errors } }, 201)
 })
 
 // GET /api/integrations/targets?limit=&cursor=

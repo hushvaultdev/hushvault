@@ -1,7 +1,7 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
-import { ApiError, friendlyError, SYNC_SCHEDULE_OPTIONS, type ApiClient, type SyncAutoSync, type SyncPlan, type SyncRun, type SyncTarget } from '../api.js'
-import { loadClient } from '../lib/context.js'
+import { ApiError, friendlyError, SYNC_SCHEDULE_OPTIONS, type ApiClient, type CreateTargetInput, type SyncAutoSync, type SyncPlan, type SyncRun, type SyncTarget } from '../api.js'
+import { loadClient, loadProjectContext, pickEnvInput, resolveEnvironment } from '../lib/context.js'
 import { prompt } from '../lib/prompt.js'
 
 /**
@@ -16,7 +16,7 @@ export const EXIT_FAIL = 1
 export const EXIT_BLOCKED = 2
 
 const MAX_NAMES = 20
-const DASHBOARD_HINT = 'Connections and targets are set up in the dashboard (Integrations).'
+const DASHBOARD_HINT = 'Connections are set up in the dashboard (Integrations); targets can be added with `sync add`.'
 
 export type Out = (line: string) => void
 
@@ -303,6 +303,63 @@ export function reportSyncError(err: unknown, client: ApiClient | undefined, opt
   return EXIT_FAIL
 }
 
+export interface AddOptions extends SyncOptions {
+  connection?: string | undefined
+  env?: string | undefined
+  onChange?: boolean | undefined
+  schedule?: string | undefined
+  deleteRemoved?: boolean | undefined
+}
+
+/**
+ * `hushvault sync add <script>`: create (idempotently) one sync target binding the current project's
+ * environment to a provider resource. Uses the bulk endpoint for a single item, so re-running is safe —
+ * an exact duplicate is reported as already existing, not an error. Connection setup (which carries the
+ * provider credential) stays in the dashboard; this only maps an existing connection to an environment.
+ */
+export async function syncAddAction(script: string, opts: AddOptions, out: Out, errOut: Out): Promise<number> {
+  if (!opts.connection) {
+    errOut(chalk.red('✗ --connection <id> is required (run `hushvault sync list` or the dashboard to find it)'))
+    return EXIT_FAIL
+  }
+  const ctx = await loadProjectContext()
+  const env = await resolveEnvironment(ctx.client, ctx.config.projectId, pickEnvInput(opts.env, ctx.config))
+  const connection = (await ctx.client.listConnections()).find((c) => c.id === opts.connection)
+  if (!connection) {
+    errOut(chalk.red(`✗ No connection ${safe(opts.connection)} in this organisation`))
+    return EXIT_FAIL
+  }
+  // Build the provider resource. Cloudflare Workers is keyed by (accountId, scriptName); the account must
+  // match the connection's, so take it from there rather than asking for it twice.
+  const resource: Record<string, string> = { scriptName: script }
+  if (connection.provider === 'cloudflare-workers') {
+    const accountId = connection.config['accountId']
+    if (!accountId) {
+      errOut(chalk.red('✗ The connection has no accountId configured'))
+      return EXIT_FAIL
+    }
+    resource['accountId'] = accountId
+  }
+  let autoSync: SyncAutoSync | undefined
+  if (opts.onChange !== undefined || opts.schedule !== undefined) {
+    autoSync = { onChange: opts.onChange ?? false, scheduleMinutes: opts.schedule !== undefined ? parseSchedule(opts.schedule) : null }
+  }
+  const spec: CreateTargetInput = { projectId: ctx.config.projectId, envId: env.id, connectionId: connection.id, resource, deleteRemoved: opts.deleteRemoved ?? false, ...(autoSync ? { autoSync } : {}) }
+  const result = await ctx.client.bulkCreateTargets([spec])
+  if (opts.json) {
+    out(JSON.stringify(result))
+  } else if (result.created.length > 0) {
+    out(chalk.green(`✓ Created sync target ${targetLabel(result.created[0]!)} (${result.created[0]!.id})`))
+  } else if (result.existing.length > 0) {
+    out(chalk.gray(`• Already exists: ${targetLabel(result.existing[0]!)} (${result.existing[0]!.id})`))
+  } else {
+    const err = result.errors[0]
+    errOut(chalk.red(`✗ ${safe(err?.error)}: ${safe(err?.message)}`))
+    return EXIT_FAIL
+  }
+  return EXIT_OK
+}
+
 async function exec(
   opts: SyncOptions,
   fn: (client: ApiClient, out: Out) => Promise<number>,
@@ -351,6 +408,28 @@ syncCommand
   .option('--json', 'Machine-readable output')
   .option('-y, --yes', 'Confirm deletes without prompting (required when non-interactive)')
   .action((t: string, o: SyncOptions) => exec(o, (c, out) => syncRunAction(c, t, o, out)))
+
+syncCommand
+  .command('add')
+  .description('Create (idempotently) a sync target: map this project\'s environment to a connection\'s resource')
+  .argument('<script>', 'Provider resource name (Cloudflare Workers: the Worker script name)')
+  .requiredOption('--connection <id>', 'Connection id (set up in the dashboard; see `sync list`)')
+  .option('--env <env>', 'Environment slug or id (defaults to the project\'s default)')
+  .option('--on-change', 'Sync automatically when a secret changes')
+  .option('--schedule <minutes>', 'Also reconcile on a schedule: 15, 60, 360, 1440 or off')
+  .option('--delete-removed', 'Delete names on the target when removed from the environment')
+  .option('--json', 'Machine-readable output')
+  .action(async (script: string, o: AddOptions) => {
+    const out: Out = (l) => console.log(l)
+    const errOut: Out = (l) => console.error(l)
+    let code: number
+    try {
+      code = await syncAddAction(script, o, out, errOut)
+    } catch (err) {
+      code = reportSyncError(err, undefined, o, out, errOut)
+    }
+    process.exit(code)
+  })
 
 syncCommand
   .command('auto')
