@@ -420,15 +420,28 @@ export async function planSync(env: Env, target: SyncTargetRow, provider: SyncPr
     wanted.set(secret.name, secret.value ?? '')
   }
 
-  // Per-name blockers are checked before anything touches the provider.
+  // Per-name blockers are checked before anything touches the provider. A provider may override name/value
+  // validity (GitHub, GitLab); absent a hook the engine applies its defaults. Prototype-polluting names are
+  // rejected here unconditionally — the hook cannot opt back into them.
   const limits = provider.limits
+  const nameOk = (name: string): boolean =>
+    !UNSAFE_NAMES.has(name.toLowerCase())
+    && (provider.validateName ? provider.validateName(name) : NAME_PATTERN.test(name) && name.length <= limits.maxNameLength)
+  const valueBlocker = (name: string, value: string): 'EMPTY_VALUE' | 'VALUE_TOO_LARGE' | null =>
+    provider.validateValue
+      ? provider.validateValue(name, value)
+      : value === '' ? 'EMPTY_VALUE' : encoder.encode(value).byteLength > limits.maxValueBytes ? 'VALUE_TOO_LARGE' : null
   const invalidNames: string[] = []
   const tooLarge: string[] = []
   const emptyValues: string[] = []
   for (const [name, value] of wanted) {
-    if (UNSAFE_NAMES.has(name.toLowerCase()) || !NAME_PATTERN.test(name) || name.length > limits.maxNameLength) invalidNames.push(name)
-    else if (value === '') emptyValues.push(name) // whether the provider accepts an empty value is unverified: do not guess
-    else if (encoder.encode(value).byteLength > limits.maxValueBytes) tooLarge.push(name)
+    if (!nameOk(name)) {
+      invalidNames.push(name)
+      continue
+    }
+    const vb = valueBlocker(name, value) // whether the provider accepts an empty value is unverified: do not guess
+    if (vb === 'EMPTY_VALUE') emptyValues.push(name)
+    else if (vb === 'VALUE_TOO_LARGE') tooLarge.push(name)
   }
   const wantedNames = sorted(wanted.keys())
   const blockers: SyncPlanDto['blockers'] = []

@@ -183,6 +183,23 @@ describe('provider limits are validated before any write', () => {
     expect(provider.pushCalls[1]!.every((o) => o.type === 'delete')).toBe(true)
   })
 
+  it('honours provider validateName / validateValue hooks, but still blocks prototype-polluting names (issue #99)', async () => {
+    provider = installFakeProvider({ maxItems: 100, maxNameLength: 64, maxValueBytes: 1024 })
+    // Custom provider rules: reject names starting with X_, and values shorter than 3 chars.
+    provider.validateName = (name: string) => !name.startsWith('X_')
+    provider.validateValue = (_name: string, value: string) => (value.length < 3 ? 'VALUE_TOO_LARGE' : null)
+    const w = await setupSyncWorld(env, { secrets: { GOOD_ONE: 'abcd', X_REJECTED: 'abcd', SHORT: 'ab' } })
+    // Seeded directly: `__proto__` in an object literal sets the prototype, not a key, so it can't go in `secrets`.
+    await seedSecret(env, w.projectId, w.envId, '__proto__', 'abcd')
+    const planned = await planSync(env, await target(w), provider)
+    if (!planned.ok) throw new Error('plan failed')
+    const codes = Object.fromEntries(planned.plan.blockers.map((b) => [b.code, b.names]))
+    // X_REJECTED fails the custom name rule; __proto__ is blocked by the engine despite validateName allowing it.
+    expect(codes['NAME_INVALID']).toEqual(['X_REJECTED', '__proto__'])
+    expect(codes['VALUE_TOO_LARGE']).toEqual(['SHORT'])
+    expect(planned.plan.create).toEqual(['GOOD_ONE'])
+  })
+
   it('chunks by limits.maxOpsPerChunk when set, independently of maxItems capacity (issue #99)', async () => {
     // Capacity is high (maxItems 100) so nothing is over capacity, but a no-bulk-style provider sends 2 ops/request.
     provider = installFakeProvider({ maxItems: 100, maxOpsPerChunk: 2 })

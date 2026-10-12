@@ -47,8 +47,25 @@ export interface PushInput {
   signal: AbortSignal
 }
 
+/** A per-name value blocker, from the fixed SyncPlanDto blocker vocabulary. */
+export type ValueBlocker = 'EMPTY_VALUE' | 'VALUE_TOO_LARGE'
+
 export interface SyncProvider extends IntegrationProvider {
   readonly limits: ProviderLimits
+  /**
+   * True when `name` is an acceptable variable name for this provider. When absent the engine applies its default
+   * (`/^[A-Za-z_][A-Za-z0-9_]*$/` and `name.length <= maxNameLength`). Provider-specific reasons (GitHub has no
+   * `GITHUB_` prefix; a GitLab masked key must be long enough) still surface as the single `NAME_INVALID` blocker.
+   * The engine ALWAYS additionally rejects prototype-polluting names (`__proto__`, `constructor`, `prototype`)
+   * regardless of this hook, because they can corrupt a request body — a provider cannot opt back into them.
+   */
+  validateName?(name: string): boolean
+  /**
+   * A blocker code when `value` is unacceptable for `name`, else null. When absent the engine applies its default
+   * (empty -> EMPTY_VALUE; UTF-8 byte length > maxValueBytes -> VALUE_TOO_LARGE). A GitLab masked value that is too
+   * short, for instance, maps onto VALUE_TOO_LARGE's sibling at the provider's discretion.
+   */
+  validateValue?(name: string, value: string): ValueBlocker | null
   /** Returns the sanitized resource identifiers, or null when invalid. Identifiers only, never URLs. */
   parseResource(resource: unknown): Record<string, string> | null
   /** Names currently on the target (never values), for conflict detection. Null when the provider cannot list. */
