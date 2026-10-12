@@ -182,6 +182,17 @@ describe('provider limits are validated before any write', () => {
     expect(provider.pushCalls[0]!.every((o) => o.type === 'set')).toBe(true)
     expect(provider.pushCalls[1]!.every((o) => o.type === 'delete')).toBe(true)
   })
+
+  it('chunks by limits.maxOpsPerChunk when set, independently of maxItems capacity (issue #99)', async () => {
+    // Capacity is high (maxItems 100) so nothing is over capacity, but a no-bulk-style provider sends 2 ops/request.
+    provider = installFakeProvider({ maxItems: 100, maxOpsPerChunk: 2 })
+    const w = await setupSyncWorld(env, { secrets: { A: '1', B: '2', C: '3', D: '4', E: '5' } })
+    provider.pushCalls.length = 0
+    const run = await runSync(env, w.targetId, { trigger: 'manual' })
+    expect(run).toMatchObject({ status: 'succeeded', counts: { created: 5 } })
+    // 5 sets at 2 ops/chunk -> three requests: [2, 2, 1].
+    expect(provider.pushCalls.map((c) => c.length)).toEqual([2, 2, 1])
+  })
 })
 
 describe('partial failure and retry', () => {

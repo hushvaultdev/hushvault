@@ -23,6 +23,18 @@ export interface ProviderLimits {
   maxItems: number
   maxNameLength: number
   maxValueBytes: number
+  /**
+   * Ops the engine sends to `push()` in one call. Defaults to `maxItems`. A provider with a bulk endpoint
+   * (Cloudflare) leaves this unset and takes the whole batch; a provider WITHOUT a bulk endpoint (GitHub,
+   * GitLab) sets it small, because each op becomes one sequential HTTP request and the chunk must finish
+   * inside `pushTimeoutMs`.
+   */
+  maxOpsPerChunk?: number
+  /** Hard timeout for one `listNames()` call. Defaults to the engine's LIST_TIMEOUT_MS. */
+  listTimeoutMs?: number
+  /** Hard timeout for one `push()` call (one chunk). Defaults to the engine's PUSH_TIMEOUT_MS. A no-bulk
+   * provider doing N sequential requests per chunk needs this larger than the bulk default. */
+  pushTimeoutMs?: number
 }
 
 export interface PushInput {

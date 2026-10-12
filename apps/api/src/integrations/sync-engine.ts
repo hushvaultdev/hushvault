@@ -446,7 +446,7 @@ export async function planSync(env: Env, target: SyncTargetRow, provider: SyncPr
   const credential = await readCredential(env, target.orgId, target.connectionId)
   if (credential === null) return { ok: false, code: 'CREDENTIAL_UNAVAILABLE' }
 
-  const listed = await callProvider(LIST_TIMEOUT_MS, (signal) => provider.listNames({ credential, config, resource: target.resource, signal }))
+  const listed = await callProvider(provider.limits.listTimeoutMs ?? LIST_TIMEOUT_MS, (signal) => provider.listNames({ credential, config, resource: target.resource, signal }))
   if (!listed.ok) return { ok: false, code: listed.code }
   if (!listed.value.ok) {
     const failure = listed.value
@@ -777,7 +777,7 @@ async function execute(
   const pushedAt = clock().toISOString()
   const resourceJson = target.resourceJson
   const guard = [target.id, resourceJson] as const
-  const chunkSize = Math.max(1, provider.limits.maxItems)
+  const chunkSize = Math.max(1, provider.limits.maxOpsPerChunk ?? provider.limits.maxItems)
   // Sets first, deletes last, so a failure mid-way never removes something before its replacement landed.
   const ordered = [...ops.filter((o) => o.type === 'set'), ...ops.filter((o) => o.type === 'delete')]
   let okItems = 0
@@ -808,7 +808,7 @@ async function execute(
     }
 
     const syncOps: SyncOp[] = chunk.map((o) => (o.type === 'set' ? { type: 'set', name: o.name, value: o.value } : { type: 'delete', name: o.name }))
-    const pushed = await callProvider(PUSH_TIMEOUT_MS, (signal) => provider.push({ credential, config, resource: target.resource, ops: syncOps, signal }))
+    const pushed = await callProvider(provider.limits.pushTimeoutMs ?? PUSH_TIMEOUT_MS, (signal) => provider.push({ credential, config, resource: target.resource, ops: syncOps, signal }))
     const result = pushed.ok ? pushed.value : pushed
     const statements: D1PreparedStatement[] = []
     if (!result.ok) {
