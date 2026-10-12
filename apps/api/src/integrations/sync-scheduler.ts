@@ -5,22 +5,26 @@
 import type { SyncTrigger } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
 import { logEvent } from '../lib/security'
+import { syncLimitsForPlan } from '../lib/plan-limits'
 import { MAX_SYNC_ATTEMPTS, loadSyncTarget, runSync } from './sync-engine'
 
 /** Changes inside this window coalesce into one run. The cron sweeps every minute, so latency is about 30-90 s. */
 export const SYNC_DEBOUNCE_MS = 30_000
 /** A claim older than this is considered abandoned (the Worker died) and the row is picked up again. */
 export const OUTBOX_CLAIM_MS = 5 * 60_000
-/** Automatic runs (change, schedule, retry) per organisation per hour; beyond it work is deferred, not dropped. */
-export const MAX_AUTO_RUNS_PER_ORG_PER_HOUR = 60
 export const DEFER_MS = 10 * 60_000
 /** Backoff for a row whose run could not start (busy target, unavailable provider) so it cannot hog the window. */
 export const RELEASE_BACKOFF_MS = 60_000
 /**
- * Runs started per tick across all steps. Each run makes many D1/KV/provider subrequests and a Worker invocation has
- * a subrequest limit, so a sweep is deliberately small; the backlog drains over the next minutes.
+ * Runs started per tick across ALL organisations. Each run makes many D1/KV/provider subrequests and a Worker
+ * invocation has a subrequest limit, so a sweep stays small; the backlog drains over the next minutes.
  */
-export const MAX_RUNS_PER_TICK = 5
+export const MAX_RUNS_PER_TICK = 10
+/**
+ * Runs started per organisation per tick: fairness, so one busy org cannot consume the whole tick budget and
+ * starve every other org's schedules. A 50-target mass change drains over a few minutes rather than all at once.
+ */
+export const MAX_RUNS_PER_ORG_PER_TICK = 6
 const SELECT_LIMIT = 25
 const OUTBOX_RETENTION_MS = 24 * 3_600_000
 /** An outbox row still pending this long past its due time is a backlog, not debounce latency (issue #83). */
@@ -30,9 +34,57 @@ const ABANDONED_WINDOW_MS = 24 * 3_600_000
 
 export type SyncTickResult = { changeRuns: number; scheduleRuns: number; retryRuns: number; deferred: number; failures: number }
 
-type Budget = { left: number }
+/**
+ * Per-tick state shared across the three steps. `left` is the global run budget. The caches make the
+ * hourly-cap check O(orgs) instead of O(rows): the plan limit and the baseline hourly count are each
+ * read once per org per tick, and runs this call has started are tallied in memory rather than re-queried
+ * (which also stops two steps double-spending one org's hourly allowance within a single tick).
+ */
+type TickContext = {
+  left: number
+  hourlyLimit: Map<string, number>
+  baseHourCount: Map<string, number>
+  startedThisTick: Map<string, number>
+}
+
+const newTickContext = (): TickContext => ({ left: MAX_RUNS_PER_TICK, hourlyLimit: new Map(), baseHourCount: new Map(), startedThisTick: new Map() })
 
 const plus = (now: Date, ms: number) => new Date(now.getTime() + ms).toISOString()
+
+async function orgHourlyLimit(env: Env, ctx: TickContext, orgId: string): Promise<number> {
+  const cached = ctx.hourlyLimit.get(orgId)
+  if (cached !== undefined) return cached
+  const row = await env.DB.prepare('SELECT plan FROM organisations WHERE id = ? LIMIT 1').bind(orgId).first<{ plan: string }>()
+  const limit = syncLimitsForPlan(row?.plan).autoRunsPerHour
+  ctx.hourlyLimit.set(orgId, limit)
+  return limit
+}
+
+/**
+ * True when the org has reached its plan's automatic-runs-per-hour cap. The hourly DB count is read once
+ * per org per tick; runs started earlier in THIS tick are added on top so the cap holds within the tick.
+ * A negative limit is unlimited.
+ */
+async function atHourlyCap(env: Env, ctx: TickContext, orgId: string, now: Date): Promise<boolean> {
+  const limit = await orgHourlyLimit(env, ctx, orgId)
+  if (limit < 0) return false
+  let base = ctx.baseHourCount.get(orgId)
+  if (base === undefined) {
+    base = await autoRunsLastHour(env, orgId, now)
+    ctx.baseHourCount.set(orgId, base)
+  }
+  return base + (ctx.startedThisTick.get(orgId) ?? 0) >= limit
+}
+
+/** True when the org has already used its per-tick fairness allowance. */
+function atTickCap(ctx: TickContext, orgId: string): boolean {
+  return (ctx.startedThisTick.get(orgId) ?? 0) >= MAX_RUNS_PER_ORG_PER_TICK
+}
+
+/** Record that a run was started for an org this tick (counts against both the tick and hourly allowance). */
+function noteStarted(ctx: TickContext, orgId: string): void {
+  ctx.startedThisTick.set(orgId, (ctx.startedThisTick.get(orgId) ?? 0) + 1)
+}
 
 /**
  * Queue a sync for every on-change target whose environment is `envId` or inherits from it. One pending row per
@@ -117,7 +169,7 @@ async function safeRun(env: Env, targetId: string, trigger: Exclude<SyncTrigger,
 }
 
 /** Process due on-change rows: claim, run, complete only if no change landed meanwhile. */
-async function drainOutbox(env: Env, now: Date, tally: SyncTickResult, budget: Budget): Promise<void> {
+async function drainOutbox(env: Env, now: Date, tally: SyncTickResult, ctx: TickContext): Promise<void> {
   const nowIso = now.toISOString()
   const staleIso = new Date(now.getTime() - OUTBOX_CLAIM_MS).toISOString()
   // Oldest due first; rows pushed back with a backoff sort behind rows that have never been tried.
@@ -126,7 +178,9 @@ async function drainOutbox(env: Env, now: Date, tally: SyncTickResult, budget: B
   ).bind(nowIso, staleIso, SELECT_LIMIT).all<{ id: string; target_id: string; org_id: string }>()
 
   for (const row of due.results ?? []) {
-    if (budget.left <= 0) return
+    if (ctx.left <= 0) return
+    // Fairness: skip (don't claim) a row whose org has used its per-tick allowance, so other orgs drain too.
+    if (atTickCap(ctx, row.org_id)) continue
     // Conditional claim: only one sweep wins a row.
     const claim = await env.DB.prepare('UPDATE sync_outbox SET claimed_at = ? WHERE id = ? AND done_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?)')
       .bind(nowIso, row.id, staleIso).run()
@@ -139,7 +193,7 @@ async function drainOutbox(env: Env, now: Date, tally: SyncTickResult, budget: B
       await env.DB.prepare('UPDATE sync_outbox SET done_at = ? WHERE id = ?').bind(nowIso, row.id).run()
       continue
     }
-    if ((await autoRunsLastHour(env, row.org_id, now)) >= MAX_AUTO_RUNS_PER_ORG_PER_HOUR) {
+    if (await atHourlyCap(env, ctx, row.org_id, now)) {
       await release(DEFER_MS)
       tally.deferred += 1
       continue
@@ -149,7 +203,8 @@ async function drainOutbox(env: Env, now: Date, tally: SyncTickResult, budget: B
       await release(RELEASE_BACKOFF_MS)
       continue
     }
-    budget.left -= 1
+    ctx.left -= 1
+    noteStarted(ctx, row.org_id)
     const outcome = await safeRun(env, row.target_id, 'change', 1, now)
     if (outcome === 'ran') {
       // Complete the row only if nothing changed after we claimed it; otherwise run again after the debounce.
@@ -165,7 +220,7 @@ async function drainOutbox(env: Env, now: Date, tally: SyncTickResult, budget: B
 }
 
 /** Targets with a schedule whose last run is older than the interval (and have no active run). */
-async function runSchedules(env: Env, now: Date, tally: SyncTickResult, budget: Budget): Promise<void> {
+async function runSchedules(env: Env, now: Date, tally: SyncTickResult, ctx: TickContext): Promise<void> {
   // An expired lease does not count as active: runSync closes it, which is the only way a crashed run is recovered.
   const rows = await env.DB.prepare(
     `SELECT t.id, t.org_id, t.schedule_minutes, t.last_run_at FROM sync_targets t
@@ -174,14 +229,16 @@ async function runSchedules(env: Env, now: Date, tally: SyncTickResult, budget: 
      ORDER BY COALESCE(t.last_run_at, '') LIMIT ?`,
   ).bind(now.toISOString(), SELECT_LIMIT * 4).all<{ id: string; org_id: string; schedule_minutes: number; last_run_at: string | null }>()
   for (const row of rows.results ?? []) {
-    if (budget.left <= 0) return
+    if (ctx.left <= 0) return
     const lastMs = row.last_run_at ? Date.parse(row.last_run_at) : 0
     if (now.getTime() - lastMs < row.schedule_minutes * 60_000) continue
-    if ((await autoRunsLastHour(env, row.org_id, now)) >= MAX_AUTO_RUNS_PER_ORG_PER_HOUR) {
+    if (atTickCap(ctx, row.org_id)) continue
+    if (await atHourlyCap(env, ctx, row.org_id, now)) {
       tally.deferred += 1
       continue
     }
-    budget.left -= 1
+    ctx.left -= 1
+    noteStarted(ctx, row.org_id)
     const outcome = await safeRun(env, row.id, 'schedule', 1, now)
     if (outcome === 'ran') tally.scheduleRuns += 1
     else if (outcome === 'failed') tally.failures += 1
@@ -193,7 +250,7 @@ async function runSchedules(env: Env, now: Date, tally: SyncTickResult, budget: 
  * supersedes an old failure), and only while attempts remain and the target is still active. The marker is NOT
  * cleared up front: runSync clears it once it has inserted its own run, so a run that never starts is retried again.
  */
-async function retryFailed(env: Env, now: Date, tally: SyncTickResult, budget: Budget): Promise<void> {
+async function retryFailed(env: Env, now: Date, tally: SyncTickResult, ctx: TickContext): Promise<void> {
   const rows = await env.DB.prepare(
     `SELECT r.id, r.target_id, r.attempt, t.org_id FROM sync_runs r JOIN sync_targets t ON t.id = r.target_id
      WHERE r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? AND r.status IN ('failed', 'partial')
@@ -202,7 +259,7 @@ async function retryFailed(env: Env, now: Date, tally: SyncTickResult, budget: B
      ORDER BY r.next_retry_at LIMIT ?`,
   ).bind(now.toISOString(), SELECT_LIMIT).all<{ id: string; target_id: string; attempt: number; org_id: string }>()
   for (const row of rows.results ?? []) {
-    if (budget.left <= 0) return
+    if (ctx.left <= 0) return
     if (row.attempt >= MAX_SYNC_ATTEMPTS) {
       await env.DB.prepare('UPDATE sync_runs SET next_retry_at = NULL WHERE id = ?').bind(row.id).run()
       // This target has stopped syncing and nothing will try again by itself. Clearing
@@ -212,12 +269,14 @@ async function retryFailed(env: Env, now: Date, tally: SyncTickResult, budget: B
       logEvent('sync.gave_up', { targetId: row.target_id, attempt: row.attempt, maxAttempts: MAX_SYNC_ATTEMPTS })
       continue
     }
-    if ((await autoRunsLastHour(env, row.org_id, now)) >= MAX_AUTO_RUNS_PER_ORG_PER_HOUR) {
+    if (atTickCap(ctx, row.org_id)) continue
+    if (await atHourlyCap(env, ctx, row.org_id, now)) {
       tally.deferred += 1
       continue
     }
     if (await hasActiveRun(env, row.target_id, now)) continue // retried on a later sweep
-    budget.left -= 1
+    ctx.left -= 1
+    noteStarted(ctx, row.org_id)
     const outcome = await safeRun(env, row.target_id, 'change', row.attempt + 1, now)
     if (outcome === 'ran') tally.retryRuns += 1
     else if (outcome === 'failed') tally.failures += 1
@@ -257,10 +316,10 @@ async function reportBacklog(env: Env, now: Date): Promise<void> {
 /** One sweep. Called from the minute cron; safe to call concurrently (claims and single flight). */
 export async function syncTick(env: Env, now: Date = new Date()): Promise<SyncTickResult> {
   const tally: SyncTickResult = { changeRuns: 0, scheduleRuns: 0, retryRuns: 0, deferred: 0, failures: 0 }
-  const budget: Budget = { left: MAX_RUNS_PER_TICK }
+  const ctx = newTickContext()
   for (const step of [drainOutbox, retryFailed, runSchedules]) {
     try {
-      await step(env, now, tally, budget)
+      await step(env, now, tally, ctx)
     } catch {
       tally.failures += 1
       console.error(JSON.stringify({ level: 'error', event: 'sync.tick_step_failed', step: step.name }))

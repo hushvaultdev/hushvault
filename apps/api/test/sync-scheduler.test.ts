@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  DEFER_MS, MAX_AUTO_RUNS_PER_ORG_PER_HOUR, MAX_RUNS_PER_TICK, OUTBOX_CLAIM_MS, SYNC_DEBOUNCE_MS, enqueueSyncForEnvironment, syncTick,
+  DEFER_MS, MAX_RUNS_PER_ORG_PER_TICK, MAX_RUNS_PER_TICK, OUTBOX_CLAIM_MS, SYNC_DEBOUNCE_MS, enqueueSyncForEnvironment, syncTick,
 } from '../src/integrations/sync-scheduler'
 import { MAX_SYNC_ATTEMPTS } from '../src/integrations/sync-engine'
+import { FREE_SYNC_LIMITS } from '../src/lib/plan-limits'
 import { call, createTestEnv, seedEnvironment, type TestEnv } from './helpers/env'
 import { installFakeProvider, seedTarget, setupSyncWorld, type FakeProvider } from './helpers/sync-fixture'
 
@@ -171,15 +172,18 @@ describe('review fixes', () => {
     expect(Date.parse(row['due_at'] as string)).toBeGreaterThan(at.getTime())
   })
 
-  it('a tick starts at most MAX_RUNS_PER_TICK runs; the rest wait for the next minute', async () => {
+  it('one org is capped at MAX_RUNS_PER_ORG_PER_TICK per tick (fairness); the rest wait for the next minute', async () => {
+    // All targets are in the same org, so the per-org fairness cap binds before the global budget.
     const w = await setupSyncWorld(env, { secrets: { A: 'a' } })
-    for (let i = 0; i < 7; i += 1) {
+    const total = MAX_RUNS_PER_ORG_PER_TICK + 2
+    for (let i = 0; i < total; i += 1) {
       const e = await seedEnvironment(env, w.projectId, `e${i}`)
       const tg = await seedTarget(env, { orgId: w.orgId, projectId: w.projectId, envId: e, connectionId: w.connectionId, userId: w.userId, resource: { scriptName: `w${i}` } })
       await setAuto(tg, 0, 15)
     }
+    expect(MAX_RUNS_PER_ORG_PER_TICK).toBeLessThanOrEqual(MAX_RUNS_PER_TICK)
     const tick = await syncTick(env as never, new Date())
-    expect(tick.scheduleRuns).toBe(MAX_RUNS_PER_TICK)
+    expect(tick.scheduleRuns).toBe(MAX_RUNS_PER_ORG_PER_TICK)
     expect((await syncTick(env as never, new Date())).scheduleRuns).toBe(2)
   })
 
@@ -272,7 +276,8 @@ describe('limits and safety', () => {
     await setAuto(w.targetId, 1)
     await enqueueSyncForEnvironment(env as never, w.envId)
     const now = new Date()
-    for (let i = 0; i < MAX_AUTO_RUNS_PER_ORG_PER_HOUR; i += 1) {
+    // The fixture org is on the free plan, so its automatic-run cap is the free tier's hourly limit.
+    for (let i = 0; i < FREE_SYNC_LIMITS.autoRunsPerHour; i += 1) {
       await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, counts_json, started_at, finished_at) VALUES (?, ?, 'schedule', 'succeeded', 1, '{}', ?, ?)")
         .bind(`isr_cap${i}`, w.targetId, now.toISOString(), now.toISOString()).run()
     }
@@ -282,6 +287,22 @@ describe('limits and safety', () => {
     const row = (await outbox())[0]!
     expect(row['done_at']).toBeNull()
     expect(Date.parse(row['due_at'] as string)).toBeGreaterThan(Date.now() + DEFER_MS - 5000)
+  })
+
+  it('a higher plan lifts the hourly cap: a pro org past the free limit still runs, does not defer', async () => {
+    const w = await setupSyncWorld(env)
+    await env.DB.prepare("UPDATE organisations SET plan = 'pro' WHERE id = ?").bind(w.orgId).run()
+    await setAuto(w.targetId, 1)
+    await enqueueSyncForEnvironment(env as never, w.envId)
+    const now = new Date()
+    // Seed exactly the FREE cap worth of recent runs; a free org would defer here, a pro org (cap 600) runs.
+    for (let i = 0; i < FREE_SYNC_LIMITS.autoRunsPerHour; i += 1) {
+      await env.DB.prepare("INSERT INTO sync_runs (id, target_id, trigger, status, attempt, counts_json, started_at, finished_at) VALUES (?, ?, 'schedule', 'succeeded', 1, '{}', ?, ?)")
+        .bind(`isr_pro${i}`, w.targetId, now.toISOString(), now.toISOString()).run()
+    }
+    const tick = await syncTick(env as never, later(SYNC_DEBOUNCE_MS + 1000))
+    expect(tick.deferred).toBe(0)
+    expect(tick.changeRuns).toBe(1)
   })
 
   it('a provider failure on an automatic run becomes a failed run + needs_attention for auth errors, with audit rows by the system actor', async () => {
