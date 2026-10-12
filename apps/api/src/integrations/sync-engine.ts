@@ -15,7 +15,7 @@
 //  - The sync denylist (scripts and Cloudflare account ids) is enforced here as well as in the routes.
 //  - Provider failures are mapped to a SyncErrorCode; provider error bodies are never stored.
 //  - Fail closed: any resolution failure (e.g. a computed-secret error) aborts before a single provider call.
-import type { SyncAutoSync, SyncErrorCode, SyncNameFilter, SyncPlanDto, SyncRunDto, SyncRunStatus, SyncTargetDto, SyncTrigger } from '@hushvault/shared/integrations'
+import type { SyncAutoSync, SyncErrorCode, SyncNameFilter, SyncPlanDto, SyncResourceSpec, SyncRunDto, SyncRunStatus, SyncTargetDto, SyncTrigger } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { notifySyncNeedsAttention } from '../lib/notify'
@@ -152,7 +152,7 @@ export type SyncTargetRow = {
   envId: string
   connectionId: string
   provider: string
-  resource: Record<string, string>
+  resource: SyncResourceSpec
   /** The stored resource_json: ledger writes are guarded on it so a run cannot write after the resource changed. */
   resourceJson: string
   nameFilter: SyncNameFilter
@@ -212,7 +212,7 @@ function toTargetRow(row: TargetDbRow): SyncTargetRow {
     envId: row.env_id,
     connectionId: row.connection_id,
     provider: row.provider,
-    resource: parseJson<Record<string, string>>(row.resource_json, {}),
+    resource: parseJson<SyncResourceSpec>(row.resource_json, {}),
     resourceJson: row.resource_json,
     nameFilter: parseJson<SyncNameFilter>(row.name_filter_json, {}),
     deleteRemoved: row.delete_removed === 1,

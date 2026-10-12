@@ -9,7 +9,7 @@
 // Still handled defensively. The bulk request is PATCH only: there is deliberately NO fallback to a
 // per-secret PUT, which replaces the whole set and would delete every secret not in the request.
 import type { VerifyResult } from '../provider'
-import type { FailureInfo, ItemResult, ProviderErrorCode, PushInput, PushResult, SyncOp, SyncProvider } from '../sync-types'
+import type { FailureInfo, ItemResult, ProviderErrorCode, PushInput, PushResult, SyncOp, SyncProvider, SyncResourceSpec } from '../sync-types'
 
 // The denylist lives in its own module so the engine can enforce it too; re-exported for existing importers.
 export { DEFAULT_DENIED_SCRIPTS, deniedScripts, isDeniedScript } from '../target-denylist'
@@ -116,7 +116,7 @@ function parseResource(resource: unknown): Record<string, string> | null {
 }
 
 // GET list of a script's secrets (names + types only). Used by verify and listNames.
-function secretsPath(resource: Record<string, string>): string | null {
+function secretsPath(resource: SyncResourceSpec): string | null {
   const parsed = parseResource(resource)
   if (!parsed) return null
   return `/accounts/${enc(parsed['accountId'] ?? '')}/workers/scripts/${enc(parsed['scriptName'] ?? '')}/secrets`
@@ -127,7 +127,7 @@ function secretsPath(resource: Record<string, string>): string | null {
 // 10405 "Method not allowed for this authentication scheme" and nothing is written (verified live
 // against a real Worker, 2026-10-12, issue #41). A value of null deletes a name; omitted names are
 // left unchanged; up to 100 operations per request.
-function secretsBulkPath(resource: Record<string, string>): string | null {
+function secretsBulkPath(resource: SyncResourceSpec): string | null {
   const parsed = parseResource(resource)
   if (!parsed) return null
   return `/accounts/${enc(parsed['accountId'] ?? '')}/workers/scripts/${enc(parsed['scriptName'] ?? '')}/secrets-bulk`

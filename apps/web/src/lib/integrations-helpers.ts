@@ -158,8 +158,9 @@ export function targetNeedsAttention(target: SyncTargetDto): boolean {
 }
 
 /** One-line description of a target's destination, e.g. the Worker name. */
-export function resourceText(resource: Record<string, string>): string {
-  return resource['scriptName'] ?? Object.values(resource).join(' / ')
+export function resourceText(resource: Record<string, string | number | boolean>): string {
+  const script = resource['scriptName']
+  return script !== undefined ? String(script) : Object.values(resource).map(String).join(' / ')
 }
 
 const SCHEDULE_LABELS: Record<number, string> = {

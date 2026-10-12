@@ -123,14 +123,22 @@ export interface SyncAutoSync {
   scheduleMinutes: number | null
 }
 
+/**
+ * A single resource-identifier value. Strings for identifiers (account id, script name, project id); booleans and
+ * numbers for provider flags such as GitLab's `masked`/`protected`/`environment_scope`. Never a URL or host — a
+ * provider calls fixed API hosts, so a resource value can never steer a request (SSRF).
+ */
+export type SyncResourceValue = string | number | boolean
+export type SyncResourceSpec = Record<string, SyncResourceValue>
+
 export interface SyncTargetDto {
   id: string
   projectId: string
   envId: string
   connectionId: string
   provider: string
-  /** Provider-specific identifiers only, e.g. { accountId, scriptName } for Cloudflare Workers. */
-  resource: Record<string, string>
+  /** Provider-specific identifiers/flags only, e.g. { accountId, scriptName } for Cloudflare Workers. */
+  resource: SyncResourceSpec
   nameFilter: SyncNameFilter
   /** Automatic triggers (M4). Both default to off; a manual run always works. */
   autoSync: SyncAutoSync

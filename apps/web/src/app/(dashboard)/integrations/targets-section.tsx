@@ -150,8 +150,9 @@ function EditTargetForm({
   onSaved: (target: SyncTargetDto) => void
   onCancel: () => void
 }) {
-  const accountId = target.resource['accountId'] ?? ''
-  const [scriptName, setScriptName] = useState(target.resource['scriptName'] ?? '')
+  // Cloudflare resource values are strings; coerce defensively now that resource values may be string|number|boolean.
+  const accountId = String(target.resource['accountId'] ?? '')
+  const [scriptName, setScriptName] = useState(String(target.resource['scriptName'] ?? ''))
   const [prefix, setPrefix] = useState(target.nameFilter.prefix ?? '')
   const [deny, setDeny] = useState((target.nameFilter.deny ?? []).join(', '))
   const [deleteRemoved, setDeleteRemoved] = useState(target.deleteRemoved)

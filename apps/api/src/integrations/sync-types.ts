@@ -1,6 +1,9 @@
 // Contract between the sync engine (M2) and providers (M3+). Providers push values and report per-item
 // results; they never persist anything, never log values or credentials, and call fixed API hosts only.
+import type { SyncResourceSpec } from '@hushvault/shared/integrations'
 import type { IntegrationProvider } from './provider'
+
+export type { SyncResourceSpec, SyncResourceValue } from '@hushvault/shared/integrations'
 
 export type SyncOp = { type: 'set'; name: string; value: string } | { type: 'delete'; name: string }
 
@@ -52,8 +55,8 @@ export interface PushInput {
   credential: string
   /** Non-secret connection config (identifiers only). */
   config: Record<string, unknown>
-  /** Target resource identifiers, already validated by parseResource. */
-  resource: Record<string, string>
+  /** Target resource identifiers/flags, already validated by parseResource. */
+  resource: SyncResourceSpec
   ops: SyncOp[]
   /** The value returned by `prepare()` for this run, or undefined when the provider has no `prepare`. */
   session?: ProviderSession
@@ -79,8 +82,8 @@ export interface SyncProvider extends IntegrationProvider {
    * short, for instance, maps onto VALUE_TOO_LARGE's sibling at the provider's discretion.
    */
   validateValue?(name: string, value: string): ValueBlocker | null
-  /** Returns the sanitized resource identifiers, or null when invalid. Identifiers only, never URLs. */
-  parseResource(resource: unknown): Record<string, string> | null
+  /** Returns the sanitized resource identifiers/flags, or null when invalid. Identifiers only, never URLs. */
+  parseResource(resource: unknown): SyncResourceSpec | null
   /** Names currently on the target (never values), for conflict detection. Null when the provider cannot list. */
   listNames(input: Omit<PushInput, 'ops' | 'session'>): Promise<{ ok: true; names: string[] } | ({ ok: false; code: ProviderErrorCode } & FailureInfo)>
   /**

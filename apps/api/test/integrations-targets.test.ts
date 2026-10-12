@@ -356,6 +356,17 @@ describe('own-worker denylist and the real Cloudflare provider', () => {
   })
 })
 
+describe('resource carries non-string flags (issue #99)', () => {
+  it('round-trips boolean/number resource values through create and the DTO', async () => {
+    const w = await setupOrg()
+    const res = await createTarget(w.token, createBody(w, 'worker-a', { resource: { scriptName: 'worker-a', masked: true, maxItems: 3 } }))
+    expect(res.status).toBe(201)
+    expect(res.body.data.resource).toEqual({ scriptName: 'worker-a', masked: true, maxItems: 3 })
+    const stored = await env.DB.prepare('SELECT resource_json FROM sync_targets WHERE id = ?').bind(res.body.data.id).first<{ resource_json: string }>()
+    expect(JSON.parse(stored!.resource_json)).toEqual({ scriptName: 'worker-a', masked: true, maxItems: 3 })
+  })
+})
+
 describe('corrupt connection config fails closed (issue #99)', () => {
   it('refuses a new target with 422 when the connection config_json is unparseable', async () => {
     const w = await setupOrg()

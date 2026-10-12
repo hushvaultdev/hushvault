@@ -8,7 +8,7 @@ import { enqueueSyncForTarget } from '../integrations/sync-scheduler'
 import { getProvider, connectableProviderIds } from '../integrations/provider'
 import { isDeniedAccount, isTargetDenied } from '../integrations/target-denylist'
 import { SyncEngineError, type SyncTargetRow, listSyncTargets, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
-import type { SyncTargetDto } from '@hushvault/shared/integrations'
+import type { SyncResourceSpec, SyncTargetDto } from '@hushvault/shared/integrations'
 import { isSyncProvider } from '../integrations/sync-types'
 import { createPrefixedId } from '../lib/auth'
 import { loadSyncLimits, maxSyncTargetsCaseSql } from '../lib/plan-limits'
@@ -253,7 +253,7 @@ async function hasActiveRun(env: Env, targetId: string, nowIso: string): Promise
   return row !== null
 }
 
-function canonicalResource(resource: Record<string, string>): string {
+function canonicalResource(resource: SyncResourceSpec): string {
   return JSON.stringify(Object.keys(resource).sort().map((k) => [k, resource[k]]))
 }
 
@@ -266,7 +266,7 @@ function cleanFilter(f: z.infer<typeof nameFilterSchema> | undefined): { prefix?
 }
 
 type ConnRow = { id: string; provider: string; config_json: string }
-type ResourceCheck = { ok: true; resource: Record<string, string> } | { ok: false; status: 400 | 409 | 422; error: string; message: string; existingId?: string }
+type ResourceCheck = { ok: true; resource: SyncResourceSpec } | { ok: false; status: 400 | 409 | 422; error: string; message: string; existingId?: string }
 
 /** Validate a resource for a connection: provider syntax, same account as the connection, denylist, no duplicate target. */
 async function checkResource(env: Env, orgId: string, conn: ConnRow, raw: unknown, excludeTargetId?: string): Promise<ResourceCheck> {
@@ -295,7 +295,7 @@ async function checkResource(env: Env, orgId: string, conn: ConnRow, raw: unknow
   for (const row of same.results ?? []) {
     if (row.id === excludeTargetId) continue
     try {
-      if (canonicalResource(JSON.parse(row.resource_json) as Record<string, string>) === wanted) {
+      if (canonicalResource(JSON.parse(row.resource_json) as SyncResourceSpec) === wanted) {
         return { ok: false, status: 409, error: 'CONFLICT', message: 'A sync target for this resource already exists', existingId: row.id }
       }
     } catch { /* an unparseable row cannot clash */ }
@@ -512,7 +512,7 @@ integrationsRouter.delete('/targets/:id', ...adminOnly, integrationWriteRateLimi
 })
 
 /** Early denylist answer for the routes. The engine enforces the same rule again (and checks the connection's account). */
-function targetDenied(env: Env, resource: Record<string, string>): boolean {
+function targetDenied(env: Env, resource: SyncResourceSpec): boolean {
   return isTargetDenied(env, resource)
 }
 
