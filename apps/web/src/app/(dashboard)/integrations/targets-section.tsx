@@ -28,7 +28,7 @@ import {
   parseScheduleValue,
   parseNameList,
   planIsEmpty,
-  resourceText,
+  resourceLabel,
   retryText,
   runCountsText,
   runErrorGuidance,
@@ -348,7 +348,7 @@ function TargetRow({
           {projectName} / {envName}
         </strong>
         <span className={s('meta')}>
-          Worker {resourceText(target.resource)} via {label} · last run {formatWhen(target.lastRunAt)}
+          {resourceLabel(target.provider, target.resource)} via {label} · last run {formatWhen(target.lastRunAt)}
           {target.lastRunStatus ? ` (${target.lastRunStatus})` : ''}
           {target.deleteRemoved ? ' · deletes removed secrets' : ''}
           {` · auto-sync: ${autoSyncText(target.autoSync)}`}
@@ -600,7 +600,7 @@ function CreateTargetForm({
             <strong>Delete removed secrets on the target</strong>
             <span className={s('note')}>
               Off by default. When on, a secret that HushVault itself pushed earlier and that you later delete here is also deleted from the
-              Worker. Secrets HushVault did not create are never touched.
+              destination. Secrets HushVault did not create are never touched.
             </span>
           </span>
         </label>
@@ -786,7 +786,7 @@ export function TargetsSection({
       {targets.length === 0 ? (
         <EmptyState
           title="No sync targets"
-          description={connections.length === 0 ? 'Connect a provider first, then add a target.' : 'Add a target to push an environment to a Worker.'}
+          description={connections.length === 0 ? 'Connect a provider first, then add a target.' : 'Add a target to push an environment to a destination.'}
         />
       ) : (
         <Card tone="light">
@@ -813,7 +813,7 @@ export function TargetsSection({
       <RunHistory
         targets={targets}
         refreshKey={historyKey}
-        optionLabel={(t) => `${projectName(t.projectId)} / ${envNames[t.envId] ?? 'environment'} / Worker ${resourceText(t.resource)}`}
+        optionLabel={(t) => `${projectName(t.projectId)} / ${envNames[t.envId] ?? 'environment'} / ${resourceLabel(t.provider, t.resource)}`}
       />
     </section>
   )

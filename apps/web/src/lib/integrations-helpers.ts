@@ -31,7 +31,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   PROVIDER_RATE_LIMIT: 'The provider is rate limiting requests. Wait a minute and try again.',
   PROVIDER_VALIDATION: 'The provider refused a value or name. Use Preview to check names and sizes, then fix the secret or the name filter.',
   PROVIDER_ERROR: 'The provider returned an error. Try again shortly.',
-  TARGET_NOT_FOUND: 'The target resource (for example the Worker) was not found. Check it still exists, or edit the target to point at the right one.',
+  TARGET_NOT_FOUND: 'The target resource was not found. Check it still exists, or edit the target to point at the right one.',
   COMPUTED_ERROR: 'A computed secret could not be resolved. Fix its ${NAME} references in the project, then run again.',
   CREDENTIAL_UNAVAILABLE: 'The stored credential could not be used. Rotate the credential on the connection, then run again.',
   DECRYPTION_FAILED: 'HushVault could not decrypt something it needed. Contact support if this repeats.',
@@ -163,6 +163,34 @@ export function resourceText(resource: Record<string, string | number | boolean>
   return script !== undefined ? String(script) : Object.values(resource).map(String).join(' / ')
 }
 
+/**
+ * Provider-aware one-line description of a target's destination.
+ * Use this instead of "Worker {resourceText(...)}" everywhere a provider-agnostic label is needed.
+ */
+export function resourceLabel(provider: string, resource: Record<string, string | number | boolean>): string {
+  switch (provider) {
+    case 'cloudflare-workers': {
+      const script = resource['scriptName']
+      return `Worker ${script !== undefined ? String(script) : resourceText(resource)}`
+    }
+    case 'gitlab': {
+      const projectId = resource['projectId']
+      const groupId = resource['groupId']
+      if (groupId !== undefined) return `GitLab group ${String(groupId)}`
+      if (projectId !== undefined) return `GitLab project ${String(projectId)}`
+      return `GitLab ${resourceText(resource)}`
+    }
+    case 'github-actions': {
+      const owner = resource['owner']
+      const repo = resource['repo']
+      if (owner !== undefined && repo !== undefined) return `GitHub ${String(owner)}/${String(repo)}`
+      return `GitHub ${resourceText(resource)}`
+    }
+    default:
+      return resourceText(resource)
+  }
+}
+
 const SCHEDULE_LABELS: Record<number, string> = {
   15: 'Every 15 minutes',
   60: 'Hourly',
@@ -215,7 +243,7 @@ export function retryText(nextRetryAt: string | null | undefined): string | null
 export function needsAttentionSteps(): string[] {
   return [
     'Rotate the connection credential (Connections, Rotate credential) if the provider rejected it or it expired.',
-    'Edit the target if the Worker was renamed or moved, or remove the target if it is no longer needed.',
+    'Edit the target if the destination was renamed or moved, or remove the target if it is no longer needed.',
     'Then use Run now. A successful run clears this state; automatic runs are paused until then.',
   ]
 }
