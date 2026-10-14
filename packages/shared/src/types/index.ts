@@ -1,4 +1,5 @@
 // Core domain types shared across API, CLI, and dashboard
+export * from './admin.js'
 
 export interface User {
   id: string
