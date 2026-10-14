@@ -18,7 +18,10 @@
       "Bash(gh issue *)",
       "Bash(gh pr *)",
       "Bash(gh label *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(git reset *)",
+      "Bash(pnpm --filter * test*)",
+      "Bash(pnpm --filter * exec vitest*)"
     ],
     "deny": [
       "Bash(rm -rf /)",
