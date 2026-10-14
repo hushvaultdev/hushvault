@@ -1,14 +1,10 @@
-import { FREE_PLAN_MAX_SYNC_TARGETS } from '@hushvault/shared/integrations'
 import type { Env } from '../index'
+import { FREE_ENTITLEMENTS, PLAN_ENTITLEMENTS } from './entitlements'
 
 // A count can never reach this, so it stands in for "unlimited" where SQL needs a number.
 const UNLIMITED_SENTINEL = 2_147_483_647
 
-// Per-plan sync limits. Mirrors the subscription plan tiers
-// (docs/plans/subscription-service-layer.md) and the same local-map pattern as
-// `AUDIT_RETENTION_DAYS` in audit-retention.ts: kept beside the sync feature so
-// it has no dependency on the (not-yet-built) billing/tiers module. If that
-// module lands, this map should defer to it.
+// Per-plan sync limits, derived from the single tier table in entitlements.ts.
 //
 // WHY NOT A SELF-SERVE UPGRADE ENDPOINT. Billing is not live (the pricing page
 // says so). An API that let an owner set their own plan to a paid tier would be
@@ -25,16 +21,17 @@ export type SyncPlanLimits = {
   autoRunsPerHour: number
 }
 
-// The most restrictive tier; also the fallback for an unrecognised plan string.
-// The free target cap is the shared constant, so the two never drift.
-export const FREE_SYNC_LIMITS: SyncPlanLimits = { maxSyncTargets: FREE_PLAN_MAX_SYNC_TARGETS, autoRunsPerHour: 60 }
+const toSyncLimits = (e: { maxSyncTargets: number; autoRunsPerHour: number }): SyncPlanLimits => ({
+  maxSyncTargets: e.maxSyncTargets,
+  autoRunsPerHour: e.autoRunsPerHour,
+})
 
-export const SYNC_PLAN_LIMITS: Record<string, SyncPlanLimits> = {
-  free: FREE_SYNC_LIMITS,
-  pro: { maxSyncTargets: 25, autoRunsPerHour: 600 },
-  team: { maxSyncTargets: 100, autoRunsPerHour: 2_000 },
-  enterprise: { maxSyncTargets: -1, autoRunsPerHour: -1 },
-}
+// The most restrictive tier; also the fallback for an unrecognised plan.
+export const FREE_SYNC_LIMITS: SyncPlanLimits = toSyncLimits(FREE_ENTITLEMENTS)
+
+export const SYNC_PLAN_LIMITS: Record<string, SyncPlanLimits> = Object.fromEntries(
+  Object.entries(PLAN_ENTITLEMENTS).map(([plan, e]) => [plan, toSyncLimits(e)]),
+)
 
 export function syncLimitsForPlan(plan: string | null | undefined): SyncPlanLimits {
   return (plan && SYNC_PLAN_LIMITS[plan]) || FREE_SYNC_LIMITS
