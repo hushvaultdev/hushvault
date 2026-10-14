@@ -1,11 +1,14 @@
-# GitHub Actions secrets (beta)
+# GitHub Actions secrets (planned — not yet verified live)
 
 One-way push of a HushVault environment to a GitHub **repository's Actions secrets**, one way. Provider id `github-actions`,
 module `apps/api/src/integrations/providers/github-actions.ts`. Overview: [../INTEGRATIONS.md](../INTEGRATIONS.md).
 
-> **Status: beta.** The provider is implemented, unit-tested against the GitHub API as documented, and has been verified live against a
-> real repository (issue #44): connect, target, preview, create, update, delete with `deleteRemoved` off then on, and the `NAME_INVALID`
-> rename-suggestion path. GitHub Enterprise Server (custom hosts) is out of scope — only `api.github.com` is called (SSRF).
+> **Status: planned, and currently NOT registered in the API.** The provider is implemented and unit-tested against the GitHub API as
+> documented, but it has **not** been verified against a live repository, and it is not wired into `providers/index.ts`: `libsodium-wrappers`
+> probes `crypto.getRandomValues` at import time, which Workers forbid in global scope, so bundling it fails every API deploy with Cloudflare
+> error 10021 ("No secure random number generator found"). Re-registering it is blocked on that fix (backlog issue under #44; candidate fixes:
+> a lazy import, or a different sealed-box primitive). It stays `planned` until a clean live end-to-end run is recorded on #44; only then does
+> it become `beta`. GitHub Enterprise Server (custom hosts) is out of scope — only `api.github.com` is called (SSRF).
 > Environment secrets are a follow-up; v1 does **repository** secrets.
 
 ## Encryption (the one crypto exception)
@@ -69,11 +72,9 @@ name rules (alphanumeric + `_`, no leading digit, no `GITHUB_` prefix; case-inse
 secret endpoints (deferred); the exact maximum secret-name length; whether `libsodium-wrappers`' WASM initialises within the Worker's startup
 budget under production load (the bundle builds and the dry-run passes).
 
-## Live E2E (recorded, #44)
+## Live E2E (owner action, needed to promote to beta)
 
-Run against a throwaway GitHub repo with a fine-grained token (Secrets: read and write). Connect, project/environment, seed secrets,
-create a connection, target `{ owner, repo }`, preview, run (create), change a secret and run (update), and delete-with-`deleteRemoved`-off
-then -on all passed against the real GitHub Actions secrets API. The `NAME_INVALID` rename-suggestion sub-case did not run in the recorded
-drill because seeding a GitHub-invalid secret name was itself rejected by HushVault's own name validation (`HTTP 400`) before the sync path
-was reached — tracked separately; it does not affect the push path above, which is independently proven by the list/create/update/delete
-checks against GitHub's API (ground truth, not HushVault's own bookkeeping).
+Against a throwaway GitHub repo with a fine-grained token (Secrets: write), record the output on #44:
+connect → target `{ owner, repo }` → preview → run (create) → change a secret and run (update) → set `deleteRemoved`, remove a secret, run
+(delete) → a name GitHub rejects (e.g. `db-url`) shows the rename suggestion → confirm the secrets exist in the repo (Settings → Secrets and
+variables → Actions) and that no value appears in any log or response.

@@ -25,15 +25,13 @@
 - Short-lived sessions with rotating refresh tokens, and ciphertext bound to its record (AAD)
 - CLI: `login`, `init`, `set`, `get`, `run`, `share`
 - Cloudflare Workers secrets sync: beta, manual runs from the dashboard, CLI (`hushvault sync`) and API, one-way Worker secrets only, not yet verified against a live Cloudflare account (see `docs/integrations/cloudflare-workers.md`)
-- GitHub Actions secrets sync (beta): one-way push of an environment to a repository's Actions secrets, manual runs from the dashboard, CLI and API, verified live against a real GitHub repository (see `docs/integrations/github-actions.md`)
 - Web dashboard: sign-in, projects, secrets, audit log
 
 **Planned, not built**
 
 - Integrations still planned: Cloudflare Pages, Slack, webhooks (status in `packages/shared/src/integrations.ts`)
-- GitHub Actions OIDC pull (not the same as the beta push integration above): the API side is built
-  (OIDC token exchange, per-repository access rules) and the action itself lives in
-  `apps/secrets-action/`, but it is **not released** — there is no published
+- GitHub Actions: the API side is built (OIDC token exchange, per-repository access rules) and the
+  action itself lives in `apps/secrets-action/`, but it is **not released** — there is no published
   `hushvaultdev/secrets-action` tag to reference from a workflow yet
 - Stripe billing and hosted paid plans. A few plan gates *are* already enforced (audit export,
   audit retention, max 2 sync targets on Free) — and with no billing, every organisation is on
@@ -111,11 +109,9 @@ base (shared vars)
     └── prod-eu  (overrides: REGION)
 ```
 
-## GitHub Actions (OIDC pull)
+## GitHub Actions
 
-For the separate, released push-sync feature (HushVault → repository Actions secrets), see
-`docs/integrations/github-actions.md`. This section is the OIDC pull mechanism below, which is
-code complete, **not released**. The API accepts a GitHub OIDC token and exchanges it for a
+Code complete, **not released**. The API accepts a GitHub OIDC token and exchanges it for a
 short-lived, environment-scoped read token (`POST /api/auth/github-oidc`), access is granted
 per repository with an explicit rule, and the action is in `apps/secrets-action/`.
 

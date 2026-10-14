@@ -30,8 +30,8 @@ export const PLANS: PlanDefinition[] = [
       'Branch inheritance',
       'One-time share links, encrypted in your browser',
       'Cloudflare Workers secrets sync (beta)',
-      'GitHub Actions secrets sync (beta)',
       'Cloudflare Pages sync (planned)',
+      'GitHub Actions sync (planned)',
     ],
   },
   {
