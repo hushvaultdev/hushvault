@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   AUDIT_SWEEP_ROWS_PER_TICK,
+  COMP_EXPIRY_PER_TICK,
   ORPHAN_CANDIDATE_TTL_MS,
   ORPHAN_DELETE_PER_TICK,
   ORPHAN_GRACE_MS,
@@ -66,6 +67,54 @@ describe('audit retention sweep', () => {
     expect((await housekeepingTick(env)).auditRowsDeleted).toBe(AUDIT_SWEEP_ROWS_PER_TICK)
     expect((await housekeepingTick(env)).auditRowsDeleted).toBe(10)
     expect((await countAudit(env, orgId))?.n).toBe(0)
+  })
+})
+
+describe('comp expiry sweep', () => {
+  const setPlan = (env: TestEnv, orgId: string, plan: string, expiresAt: string | null) =>
+    env.DB.prepare('UPDATE organisations SET plan = ?, plan_expires_at = ? WHERE id = ?').bind(plan, expiresAt, orgId).run()
+  const readPlan = (env: TestEnv, orgId: string) =>
+    env.DB.prepare('SELECT plan, plan_expires_at FROM organisations WHERE id = ?').bind(orgId)
+      .first<{ plan: string; plan_expires_at: string | null }>()
+
+  it('reverts a past-due comp to free, data kept, and clears the expiry', async () => {
+    const env = createTestEnv()
+    const { orgId } = await seedUser(env)
+    await seedProject(env, orgId, 'Still here')
+    await setPlan(env, orgId, 'pro', new Date(Date.now() - 1000).toISOString())
+
+    const result = await housekeepingTick(env)
+    expect(result.compsExpired).toBe(1)
+    expect(await readPlan(env, orgId)).toEqual({ plan: 'free', plan_expires_at: null })
+    const { results } = await env.DB.prepare('SELECT id FROM projects WHERE org_id = ?').bind(orgId).all()
+    expect(results).toHaveLength(1)
+  })
+
+  it('leaves an unexpired comp and a plan with no expiry untouched', async () => {
+    const env = createTestEnv()
+    const { orgId: active } = await seedUser(env)
+    await setPlan(env, active, 'team', new Date(Date.now() + 86_400_000).toISOString())
+    const { orgId: noExpiry } = await seedUser(env)
+    await setPlan(env, noExpiry, 'enterprise', null)
+
+    expect((await housekeepingTick(env)).compsExpired).toBe(0)
+    expect((await readPlan(env, active))?.plan).toBe('team')
+    expect((await readPlan(env, noExpiry))?.plan).toBe('enterprise')
+  })
+
+  it('is bounded per tick and resumes on the next one', async () => {
+    const env = createTestEnv()
+    const past = new Date(Date.now() - 1000).toISOString()
+    const now = new Date().toISOString()
+    // Raw inserts, not seedUser: seedUser hashes a password per call, which is the right cost for
+    // an auth test but would make this bounds test the slowest thing in the suite for no reason.
+    for (let i = 0; i < COMP_EXPIRY_PER_TICK + 3; i += 1) {
+      await env.DB.prepare("INSERT INTO organisations (id, name, slug, plan, plan_expires_at, created_at) VALUES (?, ?, ?, 'pro', ?, ?)")
+        .bind(`org_comp_${i}`, `Org ${i}`, `org-comp-${i}`, past, now).run()
+    }
+    expect((await housekeepingTick(env)).compsExpired).toBe(COMP_EXPIRY_PER_TICK)
+    expect((await housekeepingTick(env)).compsExpired).toBe(3)
+    expect((await housekeepingTick(env)).compsExpired).toBe(0)
   })
 })
 
