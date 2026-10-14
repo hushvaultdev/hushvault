@@ -366,6 +366,14 @@ export async function syncAddAction(script: string, opts: AddOptions, out: Out, 
     if (opts.scope) resource['environmentScope'] = opts.scope
     if (opts.masked) resource['masked'] = true
     if (opts.protected) resource['protected'] = true
+  } else if (connection.provider === 'github-actions') {
+    const m = /^([^/]+)\/([^/]+)$/.exec(script)
+    if (!m) {
+      errOut(chalk.red('✗ For GitHub Actions, the positional argument must be "owner/repo"'))
+      return EXIT_FAIL
+    }
+    resource['owner'] = m[1]!
+    resource['repo'] = m[2]!
   } else {
     resource['scriptName'] = script
   }
@@ -441,7 +449,7 @@ syncCommand
 syncCommand
   .command('add')
   .description('Create (idempotently) a sync target: map this project\'s environment to a connection\'s resource')
-  .argument('<resource>', 'Cloudflare Workers: the Worker script name. GitLab: the numeric project id (or group id with --gitlab-group)')
+  .argument('<resource>', 'Cloudflare Workers: the Worker script name. GitLab: the numeric project id (or group id with --gitlab-group). GitHub Actions: owner/repo')
   .requiredOption('--connection <id>', 'Connection id (set up in the dashboard; see `sync list`)')
   .option('--env <env>', 'Environment slug or id (defaults to the project\'s default)')
   .option('--gitlab-group', 'GitLab only: the id is a group id, not a project id')
