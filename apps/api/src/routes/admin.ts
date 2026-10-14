@@ -11,12 +11,18 @@ import type { Env } from '../index'
 import { PLAN_ENTITLEMENTS, type PlanTier } from '../lib/entitlements'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 import { validationHook } from '../lib/validation'
+import { requireAccessBinding } from '../middleware/access-binding'
+import { requireAccessJwt } from '../middleware/access-jwt'
 import { requireAuth } from '../middleware/auth'
 import { requirePlatformAdmin } from '../middleware/platform-admin'
 
 export const adminRoutes = new Hono<{ Bindings: Env }>()
 
-adminRoutes.use('*', requireAuth, requirePlatformAdmin)
+// Order matters (issue #108 finding 1): Access verification first (cheapest, rejects a forged or
+// expired token before any DB work), then session auth (resolves who is signed in), then the
+// Access/session binding (ties the two identities together), then the platform-admin table check
+// (re-read every request, as before). Each step is a separate file/export, one concern per file.
+adminRoutes.use('*', requireAccessJwt, requireAuth, requireAccessBinding, requirePlatformAdmin)
 
 const PLAN_TIERS = Object.keys(PLAN_ENTITLEMENTS) as [PlanTier, ...PlanTier[]]
 const ADMIN_LIST_LIMIT = 50
@@ -43,19 +49,52 @@ function toOrgDto(row: OrgListRow) {
   }
 }
 
+/** Decode an opaque `created_at|id` cursor (see listSyncTargets for the same pattern). Unlike that
+ * pattern, an undecodable cursor here is a 400, not a silent "ignore it and show page one" — a
+ * stale or tampered cursor should look like an error, not quietly reset the admin's position in
+ * a list they may be paging through for several screens. */
+function decodeOrgCursor(cursor: string): { createdAt: string; id: string } | null {
+  let decoded = ''
+  try {
+    decoded = atob(cursor.replace(/-/g, '+').replace(/_/g, '/'))
+  } catch {
+    return null
+  }
+  const sep = decoded.lastIndexOf('|')
+  if (sep <= 0) return null
+  return { createdAt: decoded.slice(0, sep), id: decoded.slice(sep + 1) }
+}
+
+function encodeOrgCursor(createdAt: string, id: string): string {
+  return btoa(`${createdAt}|${id}`).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+const listOrgsQuerySchema = z.object({ cursor: z.string().min(1).max(512).optional() })
+
 // GET /api/admin/orgs - list organisations, newest first. Plan/usage only, never secrets.
-adminRoutes.get('/orgs', async (c) => {
-  const cursor = c.req.query('cursor')
+// Keyset pagination on (created_at, id) (issue #108): a tie on created_at alone could skip or
+// duplicate a row across pages, so the tie is broken by id, matching listSyncTargets's pattern.
+adminRoutes.get('/orgs', zValidator('query', listOrgsQuerySchema, validationHook), async (c) => {
+  const { cursor } = c.req.valid('query')
+  const binds: unknown[] = []
+  let where = '1=1'
+  if (cursor !== undefined) {
+    const decoded = decodeOrgCursor(cursor)
+    if (!decoded) return c.json({ error: 'VALIDATION_ERROR', message: 'Invalid cursor.' }, 400)
+    where += ' AND (o.created_at < ?1 OR (o.created_at = ?1 AND o.id < ?2))'
+    binds.push(decoded.createdAt, decoded.id)
+  }
   const { results } = await c.env.DB.prepare(
     `SELECT o.id, o.name, o.slug, o.plan, o.plan_expires_at, o.created_at,
             (SELECT COUNT(*) FROM members m WHERE m.org_id = o.id) AS member_count
        FROM organisations o
-      WHERE (?1 IS NULL OR o.created_at < (SELECT created_at FROM organisations WHERE id = ?1))
-      ORDER BY o.created_at DESC
-      LIMIT ?2`,
-  ).bind(cursor ?? null, ADMIN_LIST_LIMIT + 1).all<OrgListRow>()
+      WHERE ${where}
+      ORDER BY o.created_at DESC, o.id DESC
+      LIMIT ?${binds.length + 1}`,
+  ).bind(...binds, ADMIN_LIST_LIMIT + 1).all<OrgListRow>()
   const page = results.slice(0, ADMIN_LIST_LIMIT)
-  const nextCursor = results.length > ADMIN_LIST_LIMIT ? page[page.length - 1]?.id ?? null : null
+  const last = page[page.length - 1]
+  const nextCursor = results.length > ADMIN_LIST_LIMIT && last ? encodeOrgCursor(last.created_at, last.id) : null
   return c.json({ data: page.map(toOrgDto), nextCursor })
 })
 

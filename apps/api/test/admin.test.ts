@@ -52,6 +52,70 @@ describe('GET /api/admin/orgs', () => {
     expect(found).toMatchObject({ plan: 'free', memberCount: 2 })
     expect(JSON.stringify(res.body)).not.toMatch(/sec_|secret/i)
   })
+
+  it('rejects a garbage cursor with 400 rather than silently returning page one', async () => {
+    const env = createTestEnv()
+    const { token } = await seedPlatformAdmin(env)
+    await seedUser(env)
+    const res = await call(env, 'GET', '/api/admin/orgs?cursor=not-valid-base64!!', { token })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('VALIDATION_ERROR')
+  })
+
+  it('rejects a well-formed-looking cursor with no separator', async () => {
+    const env = createTestEnv()
+    const { token } = await seedPlatformAdmin(env)
+    const res = await call(env, 'GET', `/api/admin/orgs?cursor=${Buffer.from('no-pipe-here').toString('base64url')}`, { token })
+    expect(res.status).toBe(400)
+  })
+
+  it('paginates with a tie on created_at broken by id: every org appears exactly once across pages', async () => {
+    const env = createTestEnv()
+    const { token } = await seedPlatformAdmin(env)
+    // Seed enough orgs, sharing one created_at timestamp, that ADMIN_LIST_LIMIT (50) is exceeded.
+    const now = new Date().toISOString()
+    const seededIds: string[] = []
+    for (let i = 0; i < 55; i += 1) {
+      const { orgId } = await seedUser(env)
+      await env.DB.prepare('UPDATE organisations SET created_at = ? WHERE id = ?').bind(now, orgId).run()
+      seededIds.push(orgId)
+    }
+
+    const seen = new Set<string>()
+    let cursor: string | null = null
+    let pages = 0
+    do {
+      const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+      const res = await call(env, 'GET', `/api/admin/orgs${qs}`, { token })
+      expect(res.status).toBe(200)
+      for (const row of res.body.data as { id: string }[]) {
+        expect(seen.has(row.id)).toBe(false) // never duplicated across pages
+        seen.add(row.id)
+      }
+      cursor = res.body.nextCursor
+      pages += 1
+      expect(pages).toBeLessThan(10) // guard against an infinite loop if the fix regresses
+    } while (cursor)
+
+    for (const id of seededIds) expect(seen.has(id)).toBe(true) // never skipped
+  })
+
+  it('round-trips nextCursor correctly across two pages for orgs with distinct timestamps', async () => {
+    const env = createTestEnv()
+    const { token } = await seedPlatformAdmin(env)
+    for (let i = 0; i < 52; i += 1) await seedUser(env)
+
+    const first = await call(env, 'GET', '/api/admin/orgs', { token })
+    expect(first.status).toBe(200)
+    expect(first.body.data).toHaveLength(50)
+    expect(first.body.nextCursor).not.toBeNull()
+
+    const second = await call(env, 'GET', `/api/admin/orgs?cursor=${encodeURIComponent(first.body.nextCursor)}`, { token })
+    expect(second.status).toBe(200)
+    expect(second.body.nextCursor).toBeNull()
+    const firstIds = new Set((first.body.data as { id: string }[]).map((o) => o.id))
+    for (const row of second.body.data as { id: string }[]) expect(firstIds.has(row.id)).toBe(false)
+  })
 })
 
 describe('GET /api/admin/orgs/:id', () => {

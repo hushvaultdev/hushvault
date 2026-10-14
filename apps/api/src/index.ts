@@ -66,6 +66,10 @@ export type Env = {
   HUSHVAULT_SYNC_DENY_SCRIPTS?: string
   // Cloudflare account ids (comma list) that sync targets and connections may never use.
   HUSHVAULT_SYNC_DENY_ACCOUNT_IDS?: string
+  // Cloudflare Access on /api/admin/* (issue #108 finding 1). Optional: unset means the fail-closed
+  // behaviour in requireAccessJwt applies (503 in production and outside localhost dev).
+  CF_ACCESS_TEAM_DOMAIN?: string // e.g. https://hushvault.cloudflareaccess.com
+  CF_ACCESS_AUD?: string
 }
 
 declare module 'hono' {
