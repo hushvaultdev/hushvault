@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Section } from '@/components/ui/section'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { Section } from '@hushvault/web-kit/ui'
 import { API_BASE } from '@/lib/api'
 import { decryptShare } from '@/lib/share-crypto'
 

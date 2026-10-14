@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 
 import { AuthProvider } from '@/lib/auth-context'
 
-import './globals.css'
+import '@hushvault/web-kit/styles/globals.css'
 
 export const metadata: Metadata = {
   title: {

@@ -2,9 +2,9 @@
 
 import { useState } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Field } from '@/components/ui/field'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { Field } from '@hushvault/web-kit/ui'
 import { createInvite, type InviteSummary } from '@/lib/orgs-api'
 import { ROLE_DESCRIPTION, ROLE_LABEL, assignableRoles, describeOrgError, validateInviteEmail } from '@/lib/orgs-helpers'
 import type { Role } from '@/lib/types'

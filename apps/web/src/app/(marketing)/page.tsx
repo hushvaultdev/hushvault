@@ -1,9 +1,9 @@
 import { plannedNamesPhrase } from '@hushvault/shared/integrations'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Section } from '@/components/ui/section'
+import { Badge } from '@hushvault/web-kit/ui'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { Section } from '@hushvault/web-kit/ui'
 
 import styles from './page.module.css'
 

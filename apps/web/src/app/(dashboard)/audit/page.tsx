@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
-import { Badge } from '@/components/ui/badge'
-import { EmptyState } from '@/components/ui/empty-state'
+import { Badge } from '@hushvault/web-kit/ui'
+import { EmptyState } from '@hushvault/web-kit/ui'
 import { ApiError, apiFetch } from '@/lib/api'
 import { type AuditRetention, auditExportEntitlement, retentionNote } from '@/lib/audit-export'
 import type { AuditRow } from '@/lib/types'

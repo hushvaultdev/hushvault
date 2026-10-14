@@ -1,6 +1,6 @@
 import Link from 'next/link'
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@hushvault/web-kit/ui'
 
 import styles from './marketing-shell.module.css'
 

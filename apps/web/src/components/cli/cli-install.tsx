@@ -1,4 +1,4 @@
-import { Card } from '@/components/ui/card'
+import { Card } from '@hushvault/web-kit/ui'
 
 import styles from './cli-install.module.css'
 

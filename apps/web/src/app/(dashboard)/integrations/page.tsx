@@ -3,9 +3,9 @@
 import { INTEGRATIONS, type IntegrationInfo, type IntegrationStatus, type SyncTargetDto } from '@hushvault/shared/integrations'
 import { useCallback, useEffect, useState } from 'react'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
+import { Badge } from '@hushvault/web-kit/ui'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
 import { useAuth } from '@/lib/auth-context'
 import { listConnections, listProviders, listTargets, type ConnectionDto, type ProviderDto } from '@/lib/integrations-api'
 import { describeApiError, isAdminRole } from '@/lib/integrations-helpers'

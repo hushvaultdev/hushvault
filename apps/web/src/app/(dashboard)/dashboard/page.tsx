@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { CliInstallCard } from '@/components/cli/cli-install'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { EmptyState } from '@/components/ui/empty-state'
-import { Field } from '@/components/ui/field'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { EmptyState } from '@hushvault/web-kit/ui'
+import { Field } from '@hushvault/web-kit/ui'
 import { ApiError, apiFetch } from '@/lib/api'
 import type { ProjectRow } from '@/lib/types'
 

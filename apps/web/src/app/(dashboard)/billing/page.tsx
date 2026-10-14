@@ -1,8 +1,8 @@
 'use client'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
+import { Badge } from '@hushvault/web-kit/ui'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
 import { useOrgs } from '@/lib/org-context'
 import { orgNameOrId } from '@/lib/orgs-helpers'
 import { PLANS, type PlanName } from '@/lib/plans'

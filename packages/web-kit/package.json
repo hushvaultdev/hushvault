@@ -1,0 +1,28 @@
+{
+  "name": "@hushvault/web-kit",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Browser-side building blocks shared by the customer dashboard (apps/web) and the platform admin (apps/admin): UI primitives, design tokens and the API client. Consumed as TypeScript source (transpilePackages).",
+  "type": "module",
+  "exports": {
+    "./ui": "./src/ui/index.ts",
+    "./client": "./src/client/index.ts",
+    "./styles/globals.css": "./src/styles/globals.css"
+  },
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "next": "^15.5.0",
+    "react": "^18.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "next": "15.5.27",
+    "react": "^18.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.11"
+  }
+}

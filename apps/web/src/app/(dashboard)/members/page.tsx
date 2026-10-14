@@ -3,9 +3,9 @@
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { EmptyState } from '@/components/ui/empty-state'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { EmptyState } from '@hushvault/web-kit/ui'
 import { ApiError } from '@/lib/api'
 import { useAuth } from '@/lib/auth-context'
 import { useOrgs } from '@/lib/org-context'

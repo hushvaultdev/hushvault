@@ -1,72 +1,29 @@
+import { createSessionStore } from '@hushvault/web-kit/client'
+
 import type { Session } from './types'
 
-// The access token (15 minutes) lives in memory only: nothing in localStorage or sessionStorage for
-// an XSS payload, extension or injected script to read and replay later. Persistence across reloads
-// comes from the API's HttpOnly refresh cookie, which page scripts cannot see; the auth provider
-// exchanges it for a fresh access token on load (see refreshSession in api.ts).
-// Isolated here so the storage strategy can be swapped without touching callers.
+// The session holder and the hint live in the shared kit (packages/web-kit); this file only binds
+// them to the dashboard's Session shape and hint key, and keeps the dashboard-specific route list.
+// The access token is in memory only; persistence comes from the API's HttpOnly refresh cookie.
+//
+// The access token is refreshed from inside apiFetch, and a refresh can come back naming a
+// *different* organisation: the refresh cookie is shared between tabs, so a switch in one tab
+// rotates the family every tab will next refresh against. Anything that renders the session
+// subscribes (subscribeSession) instead of reading once.
 
-let current: Session | null = null
+/** The dashboard's session store; the API client is configured with this same instance. */
+export const sessionStore = createSessionStore<Session>({ hintKey: 'hv_has_session' })
+const store = sessionStore
 
-// Who to tell when the stored session changes. The access token is refreshed from inside
-// apiFetch, and a refresh can come back naming a *different* organisation — the refresh cookie is
-// shared between tabs, so a switch in one tab rotates the family every tab will next refresh
-// against. Without this, the provider's React state kept the old org while requests already went
-// to the new one, which is how org A's name ends up over org B's data. Anything that renders the
-// session subscribes instead of reading once.
-const listeners = new Set<() => void>()
-
-function notify(): void {
-  for (const listener of [...listeners]) listener()
-}
-
-export function subscribeSession(listener: () => void): () => void {
-  listeners.add(listener)
-  return () => {
-    listeners.delete(listener)
-  }
-}
-
-export function readSession(): Session | null {
-  return current
-}
-
-export function writeSession(session: Session): void {
-  current = session
-  notify()
-}
-
-export function clearSession(): void {
-  if (current === null) return
-  current = null
-  notify()
-}
-
-// A non-secret hint that this browser has (or recently had) a session. The refresh cookie is HttpOnly and
-// invisible to scripts, so without a hint every public page view would POST /refresh and get a 401.
-const HINT_KEY = 'hv_has_session'
-
-export function markSessionHint(present: boolean): void {
-  if (typeof window === 'undefined') return
-  try {
-    if (present) window.localStorage.setItem(HINT_KEY, '1')
-    else window.localStorage.removeItem(HINT_KEY)
-  } catch {
-    // storage unavailable: the hint is only an optimisation
-  }
-}
-
-export function hasSessionHint(): boolean {
-  if (typeof window === 'undefined') return false
-  try {
-    return window.localStorage.getItem(HINT_KEY) === '1'
-  } catch {
-    return true // cannot tell: try the refresh
-  }
-}
+export const readSession = store.read
+export const writeSession = store.write
+export const clearSession = store.clear
+export const subscribeSession = store.subscribe
+export const markSessionHint = store.markHint
+export const hasSessionHint = store.hasHint
 
 /** The key other tabs watch, so a sign-out in one tab is noticed by the rest. */
-export const SESSION_HINT_KEY = HINT_KEY
+export const SESSION_HINT_KEY = store.hintKey
 
 /**
  * Paths where a missing hint must NOT be taken as "no session".
