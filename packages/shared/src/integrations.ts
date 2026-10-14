@@ -43,9 +43,9 @@ export const INTEGRATIONS: readonly IntegrationInfo[] = [
     id: 'github-actions',
     name: 'GitHub Actions',
     mark: 'GH',
-    status: 'planned',
-    directions: ['pull', 'push'],
-    summary: 'Planned: pull secrets into workflows without a stored GitHub credential, and later push to GitHub secrets.',
+    status: 'beta',
+    directions: ['push'],
+    summary: 'Beta: one-way push of an environment to a GitHub repository’s Actions secrets, verified live against a real GitHub repository.',
     issue: 43,
   },
   {

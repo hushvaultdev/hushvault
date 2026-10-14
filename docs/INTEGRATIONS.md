@@ -6,7 +6,7 @@ README derive from it, and tests fail if an entry is promoted to beta/available 
 | Integration | Status | Direction | Notes |
 |-------------|--------|-----------|-------|
 | Cloudflare Workers | **beta** | push | Worker secrets only. See [integrations/cloudflare-workers.md](integrations/cloudflare-workers.md). Manual runs from the dashboard, `hushvault sync` and the API; one way. Not yet verified against a live Cloudflare account. |
-| GitHub Actions | planned | pull, push | Not built. |
+| GitHub Actions | **beta** | push | Repository Actions secrets only. See [integrations/github-actions.md](integrations/github-actions.md). Manual runs from the dashboard, `hushvault sync` and the API; one way. Verified live against a real GitHub repository. |
 | Cloudflare Pages | planned | push | Not built, lowest priority. |
 | Slack | planned | notify | Not built. |
 | Webhooks | planned | notify | Not built. |
