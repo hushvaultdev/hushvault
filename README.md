@@ -31,7 +31,7 @@
 **Planned, not built**
 
 - Integrations still planned: Cloudflare Pages, Slack, webhooks (status in `packages/shared/src/integrations.ts`)
-- GitHub Actions OIDC pull (a separate mechanism from the push sync above): the API side is built
+- GitHub Actions OIDC pull (not the same as the beta push integration above): the API side is built
   (OIDC token exchange, per-repository access rules) and the action itself lives in
   `apps/secrets-action/`, but it is **not released** — there is no published
   `hushvaultdev/secrets-action` tag to reference from a workflow yet
