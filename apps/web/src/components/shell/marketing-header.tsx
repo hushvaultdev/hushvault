@@ -54,7 +54,7 @@ export function MarketingHeader() {
 
         <div className={s('actions')}>
           <Button href="/sign-in" variant="ghost">Sign in</Button>
-          <Button href="/docs" variant="primary">Read the self-host guide</Button>
+          <Button href="/docs#self-hosting" variant="primary">Read self-hosting status</Button>
         </div>
 
         <button
