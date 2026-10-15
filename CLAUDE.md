@@ -51,7 +51,13 @@ hushvault/
 ### Security (NON-NEGOTIABLE)
 - **Never** log, `console.log`, or embed secrets/keys in error messages or responses
 - **Never** use hardcoded keys, IVs, or salts — always generate with `crypto.getRandomValues()`
-- **Never** implement custom cryptography — use WebCrypto (`crypto.subtle`) only
+- **Never** implement custom cryptography — use WebCrypto (`crypto.subtle`) only.
+  **Narrow exception:** GitHub Actions secret sync uses NaCl `crypto_box_seal`, which WebCrypto
+  does not provide, so `apps/api/src/integrations/providers/github-seal.ts` uses `tweetnacl` +
+  `@noble/hashes` BLAKE2b — the same construction GitHub's own (archived) `tweetsodium` used.
+  `libsodium-wrappers` cannot run on this Worker (import-time RNG probe → error 10021); it stays
+  as a devDependency only, used by the interop test as a cross-check. Do not widen this exception
+  to other files.
 - **Always** bind every user value: `DB.prepare(...).bind(...)`, never string interpolation.
   D1 queries are written as raw prepared statements — Drizzle is imported in exactly one file
   (`apps/api/src/db/schema.ts`) for the table definitions, and no route builds a `drizzle()`
