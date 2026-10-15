@@ -96,6 +96,12 @@ WEB_APP_URL = "https://beta.hushvault.dev"
 API_PUBLIC_URL = "https://api-beta.hushvault.dev"
 # See top-level [vars]: the account hosting HushVault's own Workers is never a sync target.
 HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = "f10f2a6538d8f765e028672a37b224e2"
+# Cloudflare Access gate for /api/admin/* (issue #108). The team domain is the full https://
+# URL that Access uses as the JWT `iss` claim; the AUD tag identifies the Access application
+# that covers both admin.beta.hushvault.dev and api-beta.hushvault.dev/api/admin/*. One
+# Access app covers both the dev and prod hostnames, so the same AUD is used in both envs.
+CF_ACCESS_TEAM_DOMAIN = "https://n4k4r.cloudflareaccess.com"
+CF_ACCESS_AUD = "d582eec55e34b7de0a0db93d5bcc281c937860e970a0b0b66db2dba0cf20c22d"
 
 [[env.dev.d1_databases]]
 binding = "DB"
@@ -156,6 +162,12 @@ API_PUBLIC_URL = "https://api.hushvault.dev"
 # See top-level [vars]. REQUIRED here: with ENVIRONMENT = "production" an empty account
 # denylist fails closed and refuses every sync target/connection (issue #41).
 HUSHVAULT_SYNC_DENY_ACCOUNT_IDS = "f10f2a6538d8f765e028672a37b224e2"
+# See [env.dev.vars] note: one Access app covers both admin.hushvault.dev and
+# api.hushvault.dev/api/admin/*, so the dev and prod envs share the same AUD. In
+# production, requireAccessJwt fails closed (503 ACCESS_NOT_CONFIGURED) if either
+# value is missing — do not comment these out.
+CF_ACCESS_TEAM_DOMAIN = "https://n4k4r.cloudflareaccess.com"
+CF_ACCESS_AUD = "d582eec55e34b7de0a0db93d5bcc281c937860e970a0b0b66db2dba0cf20c22d"
 
 [[env.production.d1_databases]]
 binding = "DB"
