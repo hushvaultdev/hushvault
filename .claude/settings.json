@@ -21,7 +21,15 @@
       "Bash(node *)",
       "Bash(git reset *)",
       "Bash(pnpm --filter * test*)",
-      "Bash(pnpm --filter * exec vitest*)"
+      "Bash(pnpm --filter * exec vitest*)",
+      "Bash(mkdir -p /tmp/sodium-check)",
+      "Bash(npm init *)",
+      "Bash(node -e ' *)",
+      "Bash(pnpm --filter @hushvault/api type-check)",
+      "Bash(pnpm --filter @hushvault/api exec vitest run test/schema-drift.test.ts test/housekeeping.test.ts test/migrations.test.ts)",
+      "Bash(pnpm --filter @hushvault/api exec vitest run test/admin.test.ts test/housekeeping.test.ts)",
+      "Bash(NEXT_PUBLIC_API_URL=https://api-beta.hushvault.dev pnpm run build:cf)",
+      "Bash(grep -vE \"^    at |^$\")"
     ],
     "deny": [
       "Bash(rm -rf /)",
