@@ -25,14 +25,16 @@
   "dependencies": {
     "@hono/zod-validator": "^0.4.0",
     "@hushvault/shared": "workspace:*",
+    "@noble/hashes": "^2.4.0",
     "drizzle-orm": "0.45.2",
     "hono": "^4.13.7",
-    "libsodium-wrappers": "0.7.15",
+    "tweetnacl": "^1.0.3",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250322.0",
     "drizzle-kit": "^0.30.0",
+    "libsodium-wrappers": "0.7.15",
     "typescript": "^5.7.0",
     "wrangler": "4.92.0"
   }
