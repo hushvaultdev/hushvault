@@ -13,7 +13,12 @@ globs:
 
 - **NEVER** log, `console.log`, `console.error`, or embed secrets, keys, IVs, or DEKs in any message
 - **NEVER** hardcode keys, salts, or IVs — always use `crypto.getRandomValues()`
-- **NEVER** implement custom encryption algorithms — use `crypto.subtle` (WebCrypto) only
+- **NEVER** implement custom encryption algorithms — use `crypto.subtle` (WebCrypto) only.
+  **Narrow exception:** `apps/api/src/integrations/providers/github-seal.ts` uses `tweetnacl` +
+  `@noble/hashes` BLAKE2b for GitHub Actions sealed-box encryption (NaCl `crypto_box_seal`, which
+  WebCrypto does not provide). `libsodium-wrappers` is a devDependency only (interop test
+  oracle) — it cannot run on the API Worker (import-time RNG probe → error 10021). Do not widen
+  this exception to any other file.
 - **NEVER** include plaintext secret values in API responses beyond the immediate fetch request
 - **NEVER** store plaintext secrets in D1 — only encrypted blobs in KV + wrapped DEKs in D1
 - **NEVER** use `Math.random()` for cryptographic purposes
