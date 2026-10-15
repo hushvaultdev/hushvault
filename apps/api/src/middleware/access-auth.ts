@@ -25,7 +25,7 @@ export const requireAuthFromAccess: MiddlewareHandler<{ Bindings: Env }> = async
     return c.json({ error: 'UNAUTHORIZED', message: 'Access verification required' }, 401)
   }
 
-  const user = await c.env.DB.prepare('SELECT id FROM users WHERE email = ? LIMIT 1')
+  const user = await c.env.DB.prepare('SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1')
     .bind(email).first<{ id: string }>()
   if (!user) {
     return c.json({
