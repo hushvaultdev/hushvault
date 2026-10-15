@@ -12,18 +12,17 @@ import { entitlementsForPlan, PLAN_ENTITLEMENTS, type PlanTier } from '../lib/en
 import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/pagination'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 import { validationHook } from '../lib/validation'
-import { requireAccessBinding } from '../middleware/access-binding'
+import { requireAuthFromAccess } from '../middleware/access-auth'
 import { requireAccessJwt } from '../middleware/access-jwt'
-import { requireAuth } from '../middleware/auth'
 import { requirePlatformAdmin } from '../middleware/platform-admin'
 
 export const adminRoutes = new Hono<{ Bindings: Env }>()
 
-// Order matters (issue #108 finding 1): Access verification first (cheapest, rejects a forged or
-// expired token before any DB work), then session auth (resolves who is signed in), then the
-// Access/session binding (ties the two identities together), then the platform-admin table check
-// (re-read every request, as before). Each step is a separate file/export, one concern per file.
-adminRoutes.use('*', requireAccessJwt, requireAuth, requireAccessBinding, requirePlatformAdmin)
+// Order matters (issue #108 redesign): Access JWT verification first (cheapest, RS256 against
+// Cloudflare JWKS, rejects a forged or expired token before any DB work), then user resolution
+// from the verified Access email (one indexed users-row read), then the platform-admin table
+// check (re-read every request). No separate app login — the Access JWT is the sole credential.
+adminRoutes.use('*', requireAccessJwt, requireAuthFromAccess, requirePlatformAdmin)
 
 const PLAN_TIERS = Object.keys(PLAN_ENTITLEMENTS) as [PlanTier, ...PlanTier[]]
 const ADMIN_LIST_LIMIT = 50

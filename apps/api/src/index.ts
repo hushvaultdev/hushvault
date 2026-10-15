@@ -70,6 +70,8 @@ export type Env = {
   // behaviour in requireAccessJwt applies (503 in production and outside localhost dev).
   CF_ACCESS_TEAM_DOMAIN?: string // e.g. https://hushvault.cloudflareaccess.com
   CF_ACCESS_AUD?: string
+  // Local dev only: email to use when Access JWT verification is bypassed (requireAuthFromAccess).
+  DEV_ADMIN_EMAIL?: string
 }
 
 declare module 'hono' {
