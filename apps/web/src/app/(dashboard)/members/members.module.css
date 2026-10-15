@@ -4,7 +4,8 @@
 
 .pageTitle {
   margin: 0 0 6px;
-  font-size: 1.8rem;
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+  letter-spacing: -0.04em;
 }
 
 .pageSubtitle {
@@ -44,7 +45,7 @@
   list-style: none;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--surface);
+  background: #fff;
 }
 
 .row {
@@ -101,6 +102,10 @@
   margin-top: 24px;
   display: grid;
   gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: none;
 }
 
 .panelTitle {
@@ -190,5 +195,17 @@
 @media (max-width: 640px) {
   .row {
     grid-template-columns: 1fr;
+  }
+
+  .actions {
+    width: 100%;
+  }
+
+  .actions > * {
+    flex: 1 1 auto;
+  }
+
+  .linkRow .input {
+    flex-basis: 100%;
   }
 }

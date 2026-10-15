@@ -9,7 +9,7 @@ export const metadata: Metadata = {
     default: 'HushVault',
     template: '%s | HushVault',
   },
-  description: 'Secrets manager for modern teams. Better workflow features, lower friction, and pricing that scales with you.',
+  description: 'Open source secrets management for developers. HushVault is pre-release software; review current capabilities and security limits before use.',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

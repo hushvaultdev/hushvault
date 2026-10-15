@@ -1,4 +1,4 @@
-import { plannedNamesPhrase } from '@hushvault/shared/integrations'
+import Link from 'next/link'
 
 import { Badge } from '@hushvault/web-kit/ui'
 import { Button } from '@hushvault/web-kit/ui'
@@ -11,172 +11,163 @@ const s = (name: string) => styles[name]
 
 const workflowSteps = [
   {
-    title: 'Model environments once',
-    body: 'Create development, staging, and production environments with inheritance built in, so new projects do not start from secret sprawl.',
+    number: '01',
+    title: 'Group by project',
+    body: 'Keep application secrets together and separate development, staging, and production values.',
+    detail: 'Projects · Environments',
   },
   {
-    title: 'Inject secrets where you run',
-    body: `Inject secrets into any command with the CLI today. ${plannedNamesPhrase()} integrations are planned and not available yet.`,
+    number: '02',
+    title: 'Resolve with context',
+    body: 'Inherit values between environments and compose computed secrets from other values.',
+    detail: 'Inheritance · Computed values',
   },
   {
-    title: 'Grow into governance',
-    body: 'Role-based access and an audit log are built in. SSO, compliance exports, and hosted billing tiers are planned for when teams need them.',
+    number: '03',
+    title: 'Run with the CLI',
+    body: 'Load secrets into a process when you run it, keeping local env files out of the workflow.',
+    detail: 'hushvault run -- pnpm dev',
   },
-]
-
-const trustPoints = [
-  'Envelope encryption with AES-256-GCM',
-  'Cloudflare Workers, D1, and KV runtime',
-  'Open source with self-hosting path',
-  'Self-host on Cloudflare — designed for the free tier',
-]
-
-// Said plainly, because listing encryption facts and nothing about key custody invites the
-// opposite inference — and because it is true, checkable, and the honest answer to the first
-// question anyone comparing secrets managers should ask. docs/ARCHITECTURE.md says the same.
-const keyCustodyNote =
-  'HushVault is not zero-knowledge for stored secrets: the server holds the master key and '
-  + 'decrypts them to serve them, which is what makes CI pulls and sync possible. Share links '
-  + 'are the exception — those are encrypted and decrypted in the browser, and the server never '
-  + 'sees the key.'
-
-const comparison = [
-  { label: 'Computed secrets', hushvault: 'Server-side ${NAME} templates, included', others: 'Varies by vendor' },
-  { label: 'Branch inheritance', hushvault: 'Built into the core workflow', others: 'Varies by vendor' },
-  { label: 'Cloudflare-native runtime', hushvault: 'Workers, D1, and KV; self-host for $0', others: 'Varies by vendor' },
 ]
 
 export default function HomePage() {
   return (
-    <main className={`${s('page')} grid-background`}>
+    <main className={s('page')}>
       <Section className={s('heroSection')}>
         <div className={`${s('heroGrid')} page-container`}>
           <div className={s('heroCopy')}>
-            <span className="eyebrow">Secrets management for modern teams</span>
-            <h1 className={s('heroTitle')}>Better workflow features than the free tier you have now. Lower friction than the paid tier you are avoiding.</h1>
+            <div className={s('heroEyebrow')}>
+              <Badge tone="warning">Pre-release</Badge>
+              <span>Open source secrets management</span>
+            </div>
+            <h1 className={s('heroTitle')}>Secrets for every environment. Clear control for every developer.</h1>
             <p className={s('heroBody')}>
-              HushVault gives developers the features they actually want on day one: computed secrets, environment inheritance, one-time share links, and a Cloudflare-native architecture you can self-host for free. HushVault is an early, pre-release project.
+              Organise application secrets by project, resolve environment inheritance, and inject values into local commands with the HushVault CLI.
+            </p>
+            <p className={s('releaseNote')}>
+              HushVault is early software. It is not production-ready and has not had an independent security audit.
             </p>
             <div className={s('heroActions')}>
-              <Button href="/docs" variant="primary">Self-host for Free</Button>
-              <Button href="#workflows" variant="secondary">See How It Works</Button>
+              <Button href="/docs#self-hosting" variant="primary">Read self-hosting status</Button>
+              <Button href="#workflows" variant="secondary">Explore the workflow</Button>
             </div>
-            <div className={s('heroStats')}>
-              <Badge tone="neutral">$0 to self-host</Badge>
-              <Badge tone="accent">Open source</Badge>
-              <Badge tone="neutral">Built on Cloudflare Workers</Badge>
-              <Badge tone="warning">Pre-release</Badge>
+            <div className={s('heroMeta')}>
+              <span>Cloudflare Workers + D1 + KV</span>
+              <span aria-hidden="true">·</span>
+              <span>Self-hosted deployment</span>
             </div>
           </div>
 
-          <Card className={s('productScene')} tone="dark">
+          <Card className={s('productScene')} tone="light">
             <div className={s('sceneToolbar')}>
-              <span className={s('sceneTitle')}>Project: hushvault.dev</span>
-              <Badge tone="neutral">Sample data</Badge>
-            </div>
-
-            <div className={s('scenePanels')}>
-              <Card className={s('scenePanel')} tone="light">
-                <div className={s('panelHeader')}>
-                  <span>Secrets</span>
-                  <span className={s('panelMeta')}>production</span>
-                </div>
-                <div className={s('secretRow')}>
-                  <code>DATABASE_URL</code>
-                  <span>Direct</span>
-                </div>
-                <div className={s('secretRow')}>
-                  <code>REDIS_URL</code>
-                  <span>Inherited</span>
-                </div>
-                <div className={s('secretRow')}>
-                  <code>APP_ORIGIN</code>
-                  <span>Computed</span>
-                </div>
-              </Card>
-
-              <Card className={s('scenePanel')} tone="light">
-                <div className={s('panelHeader')}>
-                  <span>Recent activity</span>
-                  <span className={s('panelMeta')}>example</span>
-                </div>
-                <p className={s('activityLine')}><strong>APP_ORIGIN</strong> updated for production</p>
-                <p className={s('activityLine')}>DATABASE_URL read via the CLI</p>
-                <p className={s('activityLine')}>One-time share link created for staging handoff</p>
-              </Card>
-            </div>
-
-            <Card className={s('cliPanel')} tone="light">
-              <div className={s('panelHeader')}>
-                <span>CLI preview</span>
-                <span className={s('panelMeta')}>terminal</span>
+              <div>
+                <span className={s('sceneKicker')}>PROJECT</span>
+                <strong className={s('sceneTitle')}>billing-api</strong>
               </div>
-              <pre className={s('cliCode')}>hushvault login{`\n`}hushvault init{`\n`}hushvault run -- pnpm dev</pre>
-            </Card>
+              <Badge tone="neutral">Example data</Badge>
+            </div>
+            <div className={s('environmentBar')}>
+              <span>Environment</span>
+              <strong>production</strong>
+              <span className={s('environmentMarker')} aria-hidden="true">▾</span>
+            </div>
+            <div className={s('secretList')} aria-label="Example secrets, values hidden">
+              <div className={s('secretRow')}>
+                <span><code>DATABASE_URL</code><small>Direct value</small></span>
+                <span className={s('secretMask')} aria-label="Value hidden">••••••••</span>
+              </div>
+              <div className={s('secretRow')}>
+                <span><code>REDIS_URL</code><small>Inherited from staging</small></span>
+                <Badge tone="neutral">Inherited</Badge>
+              </div>
+              <div className={s('secretRow')}>
+                <span><code>APP_ORIGIN</code><small>Computed from environment</small></span>
+                <Badge tone="accent">Computed</Badge>
+              </div>
+            </div>
+            <div className={s('terminalPanel')}>
+              <div className={s('terminalHeading')}><span>RUN LOCALLY</span><span>CLI</span></div>
+              <code>hushvault run -- pnpm dev</code>
+            </div>
+            <p className={s('sceneCaption')}>Illustrative interface · no live customer data</p>
           </Card>
         </div>
       </Section>
 
-      <Section id="trust">
-        <div className={`${s('trustBand')} page-container`}>
-          {trustPoints.map((item) => (
-            <Card key={item} className={s('trustCard')}>
-              <p>{item}</p>
-            </Card>
-          ))}
-        </div>
-        <div className="page-container">
-          <p className={s('sectionNote')}>{keyCustodyNote}</p>
-        </div>
-      </Section>
-
-      <Section id="workflows">
+      <Section id="workflows" className={s('workflowSection')}>
         <div className={`${s('sectionHeader')} page-container`}>
-          <span className="eyebrow">Workflow-first</span>
-          <h2>Secrets management that starts simple and scales with operational maturity.</h2>
-          <p>
-            HushVault aims to be immediately useful for solo developers, then grow into shared infrastructure as teams need collaboration, governance, and automation.
-          </p>
+          <span className="eyebrow">A clear path from local to production</span>
+          <h2>Keep secrets close to the code that needs them.</h2>
+          <p>One workflow for organising values, choosing an environment, and running your application.</p>
         </div>
         <div className={`${s('workflowGrid')} page-container`}>
-          {workflowSteps.map((step, index) => (
-            <Card key={step.title} className={s('workflowCard')}>
-              <span className={s('workflowIndex')}>0{index + 1}</span>
+          {workflowSteps.map((step) => (
+            <Card key={step.number} className={s('workflowCard')} tone="light">
+              <span className={s('workflowNumber')}>{step.number}</span>
               <h3>{step.title}</h3>
               <p>{step.body}</p>
+              <span className={s('workflowDetail')}>{step.detail}</span>
             </Card>
           ))}
         </div>
       </Section>
 
-      <Section id="pricing">
-        <div className={`${s('pricingGrid')} page-container`}>
-          <Card className={s('pricingIntro')}>
-            <span className="eyebrow">Planned pricing</span>
-            <h2>Give away the features that create product love. Charge for the layers that remove operational pain.</h2>
-            <p>
-              Self-hosting is free today. Hosted tiers are planned: Pro to remove friction, Team for governance, Enterprise for procurement. Billing is not live yet and prices are provisional.
-            </p>
-            <Button href="/pricing" variant="primary">View Planned Pricing</Button>
+      <Section id="trust" className={s('trustSection')}>
+        <div className={`${s('trustLayout')} page-container`}>
+          <div className={s('trustCopy')}>
+            <span className="eyebrow">Security, stated plainly</span>
+            <h2>Understand the trust boundary before you deploy.</h2>
+            <p>Stored values use AES-256-GCM envelope encryption. The deployment server holds the master key and decrypts values when serving them; HushVault is not zero-knowledge for stored secrets.</p>
+            <Link href="/security" className={s('textLink')}>Read the security model <span aria-hidden="true">→</span></Link>
+          </div>
+          <Card className={s('trustCard')} tone="light">
+            <div className={s('trustStatus')}><span className={s('statusDot')} aria-hidden="true" /> Early access status</div>
+            <h3>Evaluate with care</h3>
+            <ul>
+              <li>Pre-release software</li>
+              <li>No independent security audit</li>
+              <li>Not production-ready</li>
+            </ul>
+            <p>Review the code and threat model before storing sensitive values.</p>
           </Card>
+        </div>
+      </Section>
 
-          <Card className={s('comparisonCard')}>
-            <div className={s('panelHeader')}>
-              <span>Why HushVault</span>
-              <span className={s('panelMeta')}>what you get</span>
-            </div>
-            <div className={s('comparisonRows')}>
-              {comparison.map((row) => (
-                <div key={row.label} className={s('comparisonRow')}>
-                  <div>
-                    <strong>{row.label}</strong>
-                    <p>{row.hushvault}</p>
-                  </div>
-                  <span>{row.others}</span>
-                </div>
-              ))}
-            </div>
+      <Section className={s('capabilitySection')}>
+        <div className={`${s('capabilityHeader')} page-container`}>
+          <div>
+            <span className="eyebrow">Product status</span>
+            <h2>Available today, clearly separated from the roadmap.</h2>
+          </div>
+          <p>HushVault is changing quickly. Check current status before planning around a capability.</p>
+        </div>
+        <div className={`${s('capabilityGrid')} page-container`}>
+          <Card className={s('capabilityCard')} tone="light">
+            <Badge tone="success">Available</Badge>
+            <h3>Core secrets workflow</h3>
+            <p>Projects, environments, encrypted secret storage, inheritance, computed values, and CLI commands.</p>
           </Card>
+          <Card className={s('capabilityCard')} tone="light">
+            <Badge tone="warning">Limited beta</Badge>
+            <h3>Cloudflare Workers secrets sync (beta)</h3>
+            <p>One-way manual sync; it has not yet been verified against a live Cloudflare account.</p>
+          </Card>
+          <Card className={s('capabilityCard')} tone="light">
+            <Badge tone="neutral">Planned</Badge>
+            <h3>Hosted plans and more integrations</h3>
+            <p>Hosted billing and several provider integrations are not available yet.</p>
+          </Card>
+        </div>
+      </Section>
+
+      <Section className={s('guideSection')}>
+        <div className={`${s('guideCard')} page-container`}>
+          <div>
+            <span className="eyebrow">Before you deploy</span>
+            <h2>Start with the current setup and deployment notes.</h2>
+            <p>The existing self-hosting material is still being made portable and verified. Review its limitations and account-specific settings before following it.</p>
+          </div>
+          <Button href="/docs#self-hosting" variant="primary">Read self-hosting status</Button>
         </div>
       </Section>
     </main>

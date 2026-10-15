@@ -1,6 +1,6 @@
 .authShell {
   min-height: 100vh;
-  background: linear-gradient(180deg, #eef4f2 0%, #f7f2ea 100%);
+  background: #f3f7f5;
   display: grid;
   align-items: center;
   padding: 40px 0;
@@ -8,4 +8,5 @@
 
 .container {
   width: min(100%, 560px);
+  padding: 0 12px;
 }
