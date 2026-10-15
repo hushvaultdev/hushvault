@@ -134,6 +134,18 @@ describe('GET /api/admin/orgs/:id', () => {
     expect(res.body.data).toMatchObject({ id: orgId, plan: 'free', usage: { projectCount: 0, syncTargetCount: 0 } })
     expect(res.body.data.entitlements.maxSyncTargets).toBe(2)
   })
+
+  it('resolves entitlements correctly for each paid plan (regression for the entitlementsForPlan swap, #112)', async () => {
+    const env = createTestEnv()
+    const { token } = await seedPlatformAdmin(env)
+    for (const plan of ['pro', 'team', 'enterprise'] as const) {
+      const { orgId } = await seedUser(env)
+      await env.DB.prepare('UPDATE organisations SET plan = ? WHERE id = ?').bind(plan, orgId).run()
+      const res = await call(env, 'GET', `/api/admin/orgs/${orgId}`, { token })
+      expect(res.status).toBe(200)
+      expect(res.body.data.entitlements.plan).toBe(plan)
+    }
+  })
 })
 
 describe('PUT /api/admin/orgs/:id/plan', () => {

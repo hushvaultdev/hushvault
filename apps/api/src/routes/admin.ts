@@ -8,7 +8,8 @@ import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { Env } from '../index'
-import { PLAN_ENTITLEMENTS, type PlanTier } from '../lib/entitlements'
+import { entitlementsForPlan, PLAN_ENTITLEMENTS, type PlanTier } from '../lib/entitlements'
+import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/pagination'
 import { getRequestIp, writeAuditLog } from '../lib/security'
 import { validationHook } from '../lib/validation'
 import { requireAccessBinding } from '../middleware/access-binding'
@@ -49,26 +50,6 @@ function toOrgDto(row: OrgListRow) {
   }
 }
 
-/** Decode an opaque `created_at|id` cursor (see listSyncTargets for the same pattern). Unlike that
- * pattern, an undecodable cursor here is a 400, not a silent "ignore it and show page one" — a
- * stale or tampered cursor should look like an error, not quietly reset the admin's position in
- * a list they may be paging through for several screens. */
-function decodeOrgCursor(cursor: string): { createdAt: string; id: string } | null {
-  let decoded = ''
-  try {
-    decoded = atob(cursor.replace(/-/g, '+').replace(/_/g, '/'))
-  } catch {
-    return null
-  }
-  const sep = decoded.lastIndexOf('|')
-  if (sep <= 0) return null
-  return { createdAt: decoded.slice(0, sep), id: decoded.slice(sep + 1) }
-}
-
-function encodeOrgCursor(createdAt: string, id: string): string {
-  return btoa(`${createdAt}|${id}`).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
 const listOrgsQuerySchema = z.object({ cursor: z.string().min(1).max(512).optional() })
 
 // GET /api/admin/orgs - list organisations, newest first. Plan/usage only, never secrets.
@@ -79,7 +60,10 @@ adminRoutes.get('/orgs', zValidator('query', listOrgsQuerySchema, validationHook
   const binds: unknown[] = []
   let where = '1=1'
   if (cursor !== undefined) {
-    const decoded = decodeOrgCursor(cursor)
+    // A stale or tampered cursor should look like an error here, not quietly reset to page one —
+    // an admin may be paging through many screens. listSyncTargets uses the same codec with the
+    // opposite policy (silent reset); see lib/pagination.ts.
+    const decoded = decodeKeysetCursor(cursor)
     if (!decoded) return c.json({ error: 'VALIDATION_ERROR', message: 'Invalid cursor.' }, 400)
     where += ' AND (o.created_at < ?1 OR (o.created_at = ?1 AND o.id < ?2))'
     binds.push(decoded.createdAt, decoded.id)
@@ -94,7 +78,7 @@ adminRoutes.get('/orgs', zValidator('query', listOrgsQuerySchema, validationHook
   ).bind(...binds, ADMIN_LIST_LIMIT + 1).all<OrgListRow>()
   const page = results.slice(0, ADMIN_LIST_LIMIT)
   const last = page[page.length - 1]
-  const nextCursor = results.length > ADMIN_LIST_LIMIT && last ? encodeOrgCursor(last.created_at, last.id) : null
+  const nextCursor = results.length > ADMIN_LIST_LIMIT && last ? encodeKeysetCursor(last.created_at, last.id) : null
   return c.json({ data: page.map(toOrgDto), nextCursor })
 })
 
@@ -116,7 +100,10 @@ adminRoutes.get('/orgs/:id', async (c) => {
   return c.json({
     data: {
       ...toOrgDto(row),
-      entitlements: PLAN_ENTITLEMENTS[(row.plan in PLAN_ENTITLEMENTS ? row.plan : 'free') as PlanTier],
+      // entitlementsForPlan is the single codebase pattern for a safe fallback-to-free lookup; use it rather than
+      // re-implementing the `plan in PLAN_ENTITLEMENTS` check inline (issue #112: the prototype-chain-walking `in`
+      // diverged from Object.hasOwn used everywhere else).
+      entitlements: entitlementsForPlan(row.plan),
       usage: { projectCount, syncTargetCount },
     },
   })
