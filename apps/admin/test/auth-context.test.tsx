@@ -21,6 +21,7 @@ async function renderProvider() {
         <span data-testid="ready">{String(auth.ready)}</span>
         <span data-testid="isAdmin">{String(auth.isAdmin)}</span>
         <span data-testid="notAdmin">{String(auth.notAdmin)}</span>
+        <span data-testid="notAdminReason">{auth.notAdminReason}</span>
         <span data-testid="checkFailed">{String(auth.checkFailed)}</span>
         <button onClick={auth.retryCheck}>Retry</button>
       </div>
@@ -47,11 +48,12 @@ describe('AuthProvider — Access-only admin check (#108 redesign)', () => {
     expect(screen.getByTestId('checkFailed').textContent).toBe('false')
   })
 
-  it('a 403 from the admin check: notAdmin true', async () => {
-    adminFetch.mockRejectedValue(new ApiError(403, 'FORBIDDEN', 'forbidden'))
+  it('a 403 from the admin check: notAdmin true with reason', async () => {
+    adminFetch.mockRejectedValue(new ApiError(403, 'FORBIDDEN', 'No HushVault account found for this email. Sign up via the main app first.'))
     await renderProvider()
     await waitFor(() => expect(screen.getByTestId('ready').textContent).toBe('true'))
     expect(screen.getByTestId('notAdmin').textContent).toBe('true')
+    expect(screen.getByTestId('notAdminReason').textContent).toBe('No HushVault account found for this email. Sign up via the main app first.')
     expect(screen.getByTestId('isAdmin').textContent).toBe('false')
     expect(screen.getByTestId('checkFailed').textContent).toBe('false')
   })

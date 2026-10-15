@@ -8,7 +8,7 @@ import type { OrgDetail } from '../src/lib/types'
 // useAuth is consumed by Shell; stub it so the page renders without going through the real
 // auth-context/session machinery (out of scope for this component test).
 vi.mock('../src/lib/auth-context', () => ({
-  useAuth: () => ({ isAdmin: true, ready: true, notAdmin: false, checkFailed: false, retryCheck: vi.fn(), signOut: vi.fn() }),
+  useAuth: () => ({ isAdmin: true, ready: true, notAdmin: false, notAdminReason: '', checkFailed: false, retryCheck: vi.fn(), signOut: vi.fn() }),
 }))
 
 vi.mock('next/navigation', () => ({

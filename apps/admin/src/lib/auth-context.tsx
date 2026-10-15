@@ -8,6 +8,7 @@ interface AuthContextValue {
   ready: boolean
   isAdmin: boolean
   notAdmin: boolean
+  notAdminReason: string
   checkFailed: boolean
   retryCheck: () => void
   signOut: () => void
@@ -19,6 +20,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAdmin, setIsAdmin] = useState(false)
   const [ready, setReady] = useState(false)
   const [notAdmin, setNotAdmin] = useState(false)
+  const [notAdminReason, setNotAdminReason] = useState('')
   const [checkFailed, setCheckFailed] = useState(false)
   const [tick, setTick] = useState(0)
 
@@ -26,6 +28,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false
     setCheckFailed(false)
     setNotAdmin(false)
+    setNotAdminReason('')
     setIsAdmin(false)
     setReady(false)
 
@@ -39,6 +42,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (cancelled) return
         if (err instanceof ApiError && err.status === 403) {
           setNotAdmin(true)
+          setNotAdminReason(err.message)
         } else {
           setCheckFailed(true)
         }
@@ -54,8 +58,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const value = useMemo<AuthContextValue>(
-    () => ({ ready, isAdmin, notAdmin, checkFailed, retryCheck, signOut }),
-    [ready, isAdmin, notAdmin, checkFailed, retryCheck, signOut],
+    () => ({ ready, isAdmin, notAdmin, notAdminReason, checkFailed, retryCheck, signOut }),
+    [ready, isAdmin, notAdmin, notAdminReason, checkFailed, retryCheck, signOut],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

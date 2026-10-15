@@ -9,7 +9,7 @@ import styles from '../app/admin.module.css'
 const s = (name: string) => styles[name]
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { isAdmin, ready, checkFailed, notAdmin, retryCheck, signOut } = useAuth()
+  const { isAdmin, ready, checkFailed, notAdmin, notAdminReason, retryCheck, signOut } = useAuth()
 
   if (!ready) {
     return (
@@ -34,7 +34,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   if (notAdmin) {
     return (
       <main className={s('status')} role="alert">
-        <p>This account is not a platform administrator.</p>
+        <p>{notAdminReason || 'This account is not a platform administrator.'}</p>
         <div className={s('actions')}>
           <Button variant="secondary" size="sm" onClick={signOut}>Sign out</Button>
         </div>
