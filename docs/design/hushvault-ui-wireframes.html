@@ -139,6 +139,8 @@
       .desktop-home { padding: 16px; }
       .site-nav { padding-bottom: 17px; }
       .site-links, .site-actions > span { display: none; }
+      .desktop-viewport { display: none; }
+      .mobile-viewport { display: inline; }
       .hero { grid-template-columns: 1fr; gap: 22px; padding: 25px 17px; }
       .hero h2 { font-size: 42px; }
       .steps { grid-template-columns: 1fr; }
@@ -192,7 +194,7 @@
 
     <section class="panel" id="panel-desktop" role="tabpanel" aria-labelledby="tab-desktop">
       <div class="canvas" id="public-home">
-        <div class="canvas-head"><strong>Public home · desktop</strong><span>Concept viewport: 1440 px</span></div>
+        <div class="canvas-head"><strong>Public home · desktop</strong><span class="desktop-viewport">Concept viewport: 1440 px</span><span class="mobile-viewport">Mobile: 390 px</span></div>
         <div class="desktop-home">
           <div class="site-nav">
             <a class="brand" href="#overview"><span class="mark">H</span> HushVault</a>
@@ -298,6 +300,15 @@
         if (event.key === 'End') target = tabs[tabs.length - 1]
         if (target) { event.preventDefault(); selectTab(target) }
       })
+    }
+    if (window.matchMedia('(max-width: 760px)').matches) {
+      const mobileTab = document.getElementById('tab-mobile')
+      mobileTab.setAttribute('aria-selected', 'true')
+      mobileTab.tabIndex = 0
+      document.getElementById('panel-desktop').hidden = true
+      document.getElementById('panel-mobile').hidden = false
+      document.getElementById('tab-desktop').setAttribute('aria-selected', 'false')
+      document.getElementById('tab-desktop').tabIndex = -1
     }
   </script>
 </body>
