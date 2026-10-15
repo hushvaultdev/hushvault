@@ -31,12 +31,14 @@ HushVault manages application secrets with envelope encryption (AES-256-GCM), br
 ```
 hushvault/
 ├── apps/
+│   ├── admin/           # Platform-admin Next.js app on Cloudflare Workers (OpenNext, Access-gated)
 │   ├── api/             # Hono API on Cloudflare Workers
 │   ├── cli/             # Commander.js CLI (not published to npm yet)
 │   ├── secrets-action/  # GitHub Action (OIDC); dependency-free, runs src/index.js
 │   └── web/             # Next.js dashboard on Cloudflare Workers (OpenNext)
 ├── packages/
-│   └── shared/       # Shared types, Hono AppType, crypto utils
+│   ├── shared/       # Shared types, Hono AppType, crypto utils
+│   └── web-kit/      # Browser-side UI primitives, design tokens and API client shared by web + admin
 ├── .claude/          # Claude Code configuration
 ├── CLAUDE.md         # This file
 └── SKILL.md          # Core product skill

@@ -38,6 +38,13 @@ declare module 'hono' {
   interface ContextVariableMap {
     auth: AuthContext
     orgScope: OrgScope
+    /**
+     * Set only on the JWT (user) auth path by requireAuth, for requireAccessBinding to read without
+     * a second users-row round trip (issue #113). Absent for CI-token and API-key auth: neither
+     * reaches /api/admin/* meaningfully (requirePlatformAdmin rejects them on userId/role), and
+     * requireAccessBinding treats the absent case as a mismatch (403), same as a user not found.
+     */
+    authUserEmail: string
   }
 }
 
@@ -82,8 +89,10 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
   if (jwtPayload) {
     // Session invalidation (password reset / account takeover): reject tokens issued before the
     // user's marker, and tokens of deleted users. One primary-key read per JWT request.
-    const user = await c.env.DB.prepare('SELECT sessions_valid_after FROM users WHERE id = ? LIMIT 1')
-      .bind(jwtPayload.sub).first<{ sessions_valid_after: number }>()
+    // `email` is also selected here so requireAccessBinding (admin surface, issue #113) can bind
+    // the Access JWT identity to the signed-in user without a second round trip to the same row.
+    const user = await c.env.DB.prepare('SELECT sessions_valid_after, email FROM users WHERE id = ? LIMIT 1')
+      .bind(jwtPayload.sub).first<{ sessions_valid_after: number; email: string }>()
     if (!user || jwtPayload.iat < user.sessions_valid_after) {
       return c.json({ error: 'UNAUTHORIZED', message: 'Session expired. Please sign in again.' }, 401)
     }
@@ -93,6 +102,7 @@ export const requireAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next)
       role: jwtPayload.role,
       actorType: 'user',
     })
+    c.set('authUserEmail', user.email)
     return next()
   }
 

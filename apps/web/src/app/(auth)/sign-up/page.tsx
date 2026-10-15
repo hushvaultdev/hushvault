@@ -1,12 +1,13 @@
 'use client'
 
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Field } from '@/components/ui/field'
-import { Section } from '@/components/ui/section'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { Field } from '@hushvault/web-kit/ui'
+import { Section } from '@hushvault/web-kit/ui'
 import { ApiError, API_BASE } from '@/lib/api'
 import { useAuth } from '@/lib/auth-context'
 
@@ -44,7 +45,7 @@ export default function SignUpPage() {
           <span className="eyebrow">Get started</span>
           <h1>Create your HushVault account</h1>
           <p className={s('authText')}>
-            Start free and keep your secrets secure as your project grows. Sign up with GitHub, Google, or email.
+            Create an account to evaluate HushVault. It is pre-release software and is not production-ready. Review the <Link href="/security">security model</Link> before adding sensitive values.
           </p>
           <div className={s('authActions')}>
             <Button href={`${API_BASE}/api/auth/github`} variant="secondary">Continue with GitHub</Button>

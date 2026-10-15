@@ -160,3 +160,159 @@
   color: var(--accent-strong);
   font-weight: 600;
 }
+
+.pageTitle {
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+  letter-spacing: -0.04em;
+}
+
+.projectCard {
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(22, 47, 48, 0.035);
+  cursor: default;
+  transition: border-color var(--transition-base), box-shadow var(--transition-base), transform var(--transition-base);
+}
+
+.projectCard:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 8px 24px rgba(22, 47, 48, 0.07);
+  transform: translateY(-1px);
+}
+
+.panel {
+  padding: clamp(18px, 3vw, 26px);
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: none;
+}
+
+.table {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fff;
+  overflow: hidden;
+}
+
+.table th {
+  background: #f1f6f4;
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+}
+
+.table td {
+  padding: 14px 12px;
+  overflow-wrap: anywhere;
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+.envChip {
+  min-height: 42px;
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.envChipActive {
+  border-width: 1px;
+  background: #e6f1ed;
+}
+
+@media (max-width: 720px) {
+  .pageHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .inlineForm {
+    width: 100%;
+  }
+
+  .inlineForm > * {
+    flex-basis: 100%;
+  }
+
+  .envBar {
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .envBar > button {
+    flex: 1 1 auto;
+  }
+
+  .table,
+  .table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table tr:last-child {
+    border-bottom: 0;
+  }
+
+  .table td {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    padding: 0;
+    border: 0;
+    text-align: left;
+  }
+
+  .table td::before {
+    content: attr(data-label);
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    font-weight: 650;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .table td[data-label='Name'] {
+    display: block;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table td[data-label='Name']::before {
+    display: none;
+  }
+
+  .table td[data-label='Actions'] {
+    display: block;
+    padding-top: 6px;
+  }
+
+  .table td[data-label='Actions']::before {
+    display: block;
+    margin-bottom: 6px;
+  }
+}

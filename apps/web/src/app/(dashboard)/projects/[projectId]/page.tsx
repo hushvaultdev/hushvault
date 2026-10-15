@@ -4,11 +4,11 @@ import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { useCallback, useEffect, useState } from 'react'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { EmptyState } from '@/components/ui/empty-state'
-import { Field } from '@/components/ui/field'
+import { Badge } from '@hushvault/web-kit/ui'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { EmptyState } from '@hushvault/web-kit/ui'
+import { Field } from '@hushvault/web-kit/ui'
 import { ApiError, apiFetch } from '@/lib/api'
 import type { EnvironmentRow, ProjectRow, SecretRow, SecretValue } from '@/lib/types'
 
@@ -24,6 +24,7 @@ export default function ProjectPage() {
   const [selectedEnvId, setSelectedEnvId] = useState<string | null>(null)
   const [secrets, setSecrets] = useState<SecretRow[]>([])
   const [revealed, setRevealed] = useState<Record<string, string>>({})
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -61,6 +62,7 @@ export default function ProjectPage() {
     try {
       setSecrets(await apiFetch<SecretRow[]>(`/api/secrets?envId=${encodeURIComponent(envId)}`))
       setRevealed({})
+      setCopiedId(null)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load secrets.')
     }
@@ -137,6 +139,18 @@ export default function ProjectPage() {
       setRevealed((prev) => ({ ...prev, [secret.id]: detail.value }))
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reveal secret.')
+    }
+  }
+
+  async function onCopy(secret: SecretRow) {
+    const value = revealed[secret.id]
+    if (value === undefined) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopiedId(secret.id)
+      window.setTimeout(() => setCopiedId((current) => current === secret.id ? null : current), 1800)
+    } catch {
+      setError('Clipboard access is unavailable. Reveal the value and copy it manually.')
     }
   }
 
@@ -289,8 +303,8 @@ export default function ProjectPage() {
                       const isEditing = editingId === secret.id
                       return (
                         <tr key={secret.id}>
-                          <td className={s('secretName')}>{secret.name}</td>
-                          <td className={s('secretValue')}>
+                          <td data-label="Name" className={s('secretName')}>{secret.name}</td>
+                          <td data-label="Value" className={s('secretValue')}>
                             {isEditing ? (
                               <input
                                 className={s('inlineInput')}
@@ -307,10 +321,10 @@ export default function ProjectPage() {
                               '••••••••'
                             )}
                           </td>
-                          <td>
+                          <td data-label="Type">
                             {secret.is_computed ? <Badge tone="accent">Computed</Badge> : <Badge tone="neutral">Static</Badge>}
                           </td>
-                          <td>
+                          <td data-label="Actions">
                             <span className={s('rowActions')}>
                               {isEditing ? (
                                 <>
@@ -321,6 +335,13 @@ export default function ProjectPage() {
                                 <>
                                   <Button variant="ghost" onClick={() => onReveal(secret)}>
                                     {revealed[secret.id] !== undefined ? 'Hide' : 'Reveal'}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    disabled={revealed[secret.id] === undefined}
+                                    onClick={() => onCopy(secret)}
+                                  >
+                                    {copiedId === secret.id ? 'Copied' : 'Copy'}
                                   </Button>
                                   <Button variant="ghost" onClick={() => onStartEdit(secret)}>Edit</Button>
                                   {confirmDeleteId === secret.id ? (

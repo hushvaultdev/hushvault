@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@hushvault/web-kit/ui'
 import { ApiError, apiFetch } from '@/lib/api'
 import { useAuth } from '@/lib/auth-context'
 

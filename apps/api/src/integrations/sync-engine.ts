@@ -20,6 +20,7 @@ import type { Env } from '../index'
 import { createPrefixedId } from '../lib/auth'
 import { notifySyncNeedsAttention } from '../lib/notify'
 import { readCredential } from '../lib/integration-credentials'
+import { decodeKeysetCursor, encodeKeysetCursor } from '../lib/pagination'
 import { resolveEnvironment } from '../lib/resolve-environment'
 import { writeAuditLog } from '../lib/security'
 import { getProvider } from './provider'
@@ -273,14 +274,14 @@ export async function listSyncTargets(env: Env, orgId: string, opts: { limit?: n
   const binds: unknown[] = [orgId]
   let where = 'org_id = ? AND deleted_at IS NULL'
   if (opts.cursor) {
-    let decoded = ''
-    try { decoded = atob(opts.cursor.replace(/-/g, '+').replace(/_/g, '/')) } catch { decoded = '' }
-    const sep = decoded.lastIndexOf('|')
-    if (sep > 0) {
+    // An invalid cursor is silently ignored here (fall back to page one): the sync-target list is
+    // a dashboard view, not an operator paging deeply, so a stale cursor is more usefully a reset
+    // than an error. admin.ts's org list uses the same codec with the opposite policy (400); see
+    // lib/pagination.ts.
+    const decoded = decodeKeysetCursor(opts.cursor)
+    if (decoded) {
       where += ' AND (created_at < ? OR (created_at = ? AND id < ?))'
-      const createdAt = decoded.slice(0, sep)
-      const id = decoded.slice(sep + 1)
-      binds.push(createdAt, createdAt, id)
+      binds.push(decoded.createdAt, decoded.createdAt, decoded.id)
     }
   }
   const rows = await env.DB.prepare(
@@ -293,7 +294,7 @@ export async function listSyncTargets(env: Env, orgId: string, opts: { limit?: n
   let nextCursor: string | null = null
   if (all.length > limit && page.length > 0) {
     const last = page[page.length - 1]!
-    nextCursor = btoa(`${last.created_at}|${last.id}`).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    nextCursor = encodeKeysetCursor(last.created_at, last.id)
   }
   return { targets, nextCursor }
 }

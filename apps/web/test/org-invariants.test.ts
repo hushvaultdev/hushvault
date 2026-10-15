@@ -34,12 +34,13 @@ describe('the dashboard subtree is remounted when the organisation changes', () 
 })
 
 describe('no organisation is ever read from web storage', () => {
-  it('keeps localStorage and sessionStorage out of every file but the session hint', () => {
+  it('keeps localStorage and sessionStorage out of every file but the session store binding', () => {
     const offenders = sourceFiles(SRC)
       .filter((file) => /localStorage|sessionStorage/.test(readFileSync(file, 'utf8')))
-      .map((file) => file.slice(SRC.length + 1))
-    // auth-storage.ts holds one boolean hint ("this browser had a session") and nothing else.
-    // An org id in local storage can be a switch out of date, which is exactly the bug in #82.
+      .map((file) => file.slice(SRC.length + 1).replaceAll('\\', '/'))
+    // The one boolean session hint lives in the shared kit's session store (packages/web-kit, asserted by
+    // the kit's own test). auth-storage.ts only binds it and removes one legacy key; it never reads an
+    // organisation. An org id in local storage can be a switch out of date, which is exactly the bug in #82.
     expect(offenders).toEqual(['lib/auth-storage.ts'])
   })
 })

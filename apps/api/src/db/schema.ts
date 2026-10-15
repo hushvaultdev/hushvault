@@ -94,6 +94,9 @@ export const organisations = sqliteTable('organisations', {
   // Optional per-org audit log retention override (days). null = use the plan
   // default. Can shorten retention below the plan allowance, never extend it.
   auditRetentionDays: integer('audit_retention_days'),
+  // When the current plan reverts to free (migration 0021, issue #102/#103). A time-boxed comp
+  // grant IS a plan with an expiry; null means the plan does not expire on its own.
+  planExpiresAt: text('plan_expires_at'),
   createdAt: text('created_at').notNull(),
 })
 
@@ -495,3 +498,14 @@ export const erasureLog = sqliteTable('erasure_log', {
   orgsErased: integer('orgs_erased').notNull().default(0),
   actorType: text('actor_type').notNull(),
 }, (t) => [index('erasure_log_user_idx').on(t.erasedUserId), index('erasure_log_at_idx').on(t.erasedAt)])
+
+/**
+ * Platform-admin identity (migration 0021, issue #102/#103). Deliberately NOT a role on `members`:
+ * an org `owner` must never gain admin powers from org membership alone, so this is checked by its
+ * own middleware (`requirePlatformAdmin`) against this table, never derived from `auth.role`.
+ */
+export const platformAdmins = sqliteTable('platform_admins', {
+  userId: text('user_id').primaryKey().references(() => users.id),
+  grantedAt: text('granted_at').notNull(),
+  grantedBy: text('granted_by').references(() => users.id),
+})

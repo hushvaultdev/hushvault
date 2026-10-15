@@ -96,6 +96,10 @@ describe('connections: create / list / rotate / revoke', () => {
   it('rejects unknown providers, invalid config, duplicates and over-long input without echoing it', async () => {
     await setupAdmin()
     expect((await post(admin.token, { provider: 'slack', label: 'x', credential: CANARY })).body.error).toBe('UNSUPPORTED_PROVIDER')
+    // cloudflare-pages is deliberately unregistered (issue #110 — its PATCH behavior is unverified
+    // against a live Pages project and could wipe bindings). Lock in that it stays unreachable
+    // through this route until #45's live e2e drill records evidence and the module is re-registered.
+    expect((await post(admin.token, { provider: 'cloudflare-pages', label: 'x', credential: CANARY })).body.error).toBe('UNSUPPORTED_PROVIDER')
     expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'x', credential: CANARY, config: { accountId: 5 } })).status).toBe(400)
     expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'x', credential: 'short' })).status).toBe(400)
     expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'dup', credential: CANARY })).status).toBe(201)

@@ -44,6 +44,9 @@ attached to the table auditors trust most.
 | `org.member.remove` / `org.member.leave` | `{ role }` — role held when removed/left |
 | `org.invite.create` | `{ role }` — invited role |
 | `org.invite.accept` | `{ role }` — role actually granted (the existing role if already a member) |
+| `admin.org.plan_set` | `{ from, to }` — old and new plan (platform admin override, issue #103/#108) |
+| `admin.org.comp_grant` | `{ from, to, days }` — old plan, new plan, comp length |
+| `admin.org.comp_revoke` | `{ from }` — plan held before reverting to free |
 
 Every other action leaves `metadata` NULL. Do not add a secret-bearing or free-text value to any
 new call site; if a new event needs context, add fixed non-secret keys and document them here and in

@@ -1,168 +1,46 @@
-import { clearSession, markSessionHint, readSession, writeSession } from './auth-storage'
+import { ApiError, createApiClient } from '@hushvault/web-kit/client'
+
+import { sessionStore } from './auth-storage'
 import type { Session } from './types'
 
 // Base URL of the HushVault API. Defaults to the local wrangler dev server;
 // override with NEXT_PUBLIC_API_URL for staging/production builds.
 export const API_BASE = (process.env['NEXT_PUBLIC_API_URL'] ?? 'http://127.0.0.1:8787').replace(/\/$/, '')
 
-export class ApiError extends Error {
-  readonly status: number
-  readonly code: string
-  /**
-   * The rest of the API's error object, when it sent one. Only ever read for named, non-secret
-   * fields (e.g. the address an invitation was sent to); never logged and never rendered whole,
-   * so an error body cannot become a channel for leaking internals into the UI.
-   */
-  readonly details: Record<string, unknown> | null
+export { ApiError }
 
-  constructor(status: number, code: string, message: string, details: Record<string, unknown> | null = null) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-    this.code = code
-    this.details = details
-  }
-}
-
-interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
-  body?: unknown
-  // When false, the request is sent without an Authorization header (login/register).
-  auth?: boolean
-}
-
-const CLIENT_HEADER = { 'X-HushVault-Client': 'web' }
-
-// Exchange the HttpOnly refresh cookie for a new access token. Concurrent callers share one request;
-// a 409 means another tab won the rotation, so retry with the cookie it just set.
-let inflightRefresh: Promise<Session | null> | null = null
-
-export function refreshSession(): Promise<Session | null> {
-  if (!inflightRefresh) {
-    inflightRefresh = doRefresh().finally(() => {
-      inflightRefresh = null
-    })
-  }
-  return inflightRefresh
-}
-
-async function doRefresh(): Promise<Session | null> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    let res: Response
-    try {
-      res = await fetch(`${API_BASE}/api/auth/refresh`, { method: 'POST', headers: CLIENT_HEADER, credentials: 'include' })
-    } catch {
-      return null
+// The refresh, retry and error handling are the shared client's (packages/web-kit); this binds it to the
+// dashboard: its API origin, its Session shape and the one dashboard-only reaction to an API error.
+const client = createApiClient<Session>({
+  apiBase: API_BASE,
+  clientName: 'web',
+  store: sessionStore,
+  sessionFromRefresh: (data) => {
+    if (typeof data['token'] !== 'string' || typeof data['userId'] !== 'string' || typeof data['orgId'] !== 'string') return null
+    return {
+      token: data['token'],
+      userId: data['userId'],
+      orgId: data['orgId'],
+      role: data['role'] as Session['role'],
+      emailVerified: data['emailVerified'] as boolean | undefined,
     }
-    if (!res.ok && res.status !== 409) {
-      // Non-secret diagnostics: the API names why a refresh failed (no_cookie, expired, unknown, ...).
-      const info = (await res.clone().json().catch(() => null)) as { reason?: string } | null
-      console.warn('[hushvault] session refresh failed', res.status, info?.reason ?? '')
-    }
-    if (res.status === 409) {
-      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
-      continue
-    }
-    if (res.status === 401) {
-      // The refresh token is genuinely gone (expired, revoked, reused): this is a sign-out.
-      clearSession()
-      markSessionHint(false)
-      return null
-    }
-    if (!res.ok) return null // 429/5xx: transient, keep the cookie and the hint so a retry can work
-    const payload = (await res.json().catch(() => null)) as { data?: Session & { expiresIn?: number } } | null
-    const data = payload?.data
-    if (!data?.token) return null
-    const next: Session = { token: data.token, userId: data.userId, orgId: data.orgId, role: data.role, emailVerified: data.emailVerified }
-    writeSession(next)
-    markSessionHint(true)
-    return next
-  }
-  return null
-}
-
-/** End the session server-side (revokes the refresh token family), then forget it locally. */
-export async function endSession(): Promise<void> {
-  try {
-    await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', headers: CLIENT_HEADER, credentials: 'include', keepalive: true })
-  } catch {
-    // offline: the local session is still cleared below
-  }
-  clearSession()
-  markSessionHint(false)
-}
-
-async function send(path: string, method: string, body: unknown, token: string | null): Promise<Response> {
-  const headers: Record<string, string> = { ...CLIENT_HEADER }
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
-  if (token) headers['Authorization'] = `Bearer ${token}`
-  try {
-    return await fetch(`${API_BASE}${path}`, {
-      method,
-      headers,
-      credentials: 'include', // the refresh cookie is set/rotated by login and refresh responses
-      // Responses can carry plaintext secret values. The API sends Cache-Control: no-store, and
-      // this says the same thing from the client side so nothing is served from the HTTP cache.
-      cache: 'no-store',
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    })
-  } catch {
-    throw new ApiError(0, 'NETWORK_ERROR', `Could not reach the API at ${API_BASE}.`)
-  }
-}
-
-// Typed fetch wrapper. Unwraps the `{ data }` envelope on success and throws
-// an ApiError carrying the API's `{ error, message }` on failure. An expired access
-// token is refreshed once transparently; if that fails the user is sent to sign in.
-export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, auth = true } = options
-  let sentToken = auth ? (readSession()?.token ?? null) : null
-  let res = await send(path, method, body, sentToken)
-
-  if (res.status === 401 && auth && sentToken && typeof window !== 'undefined') {
-    // Another request may already have refreshed; only refresh if the token we used is still current.
-    const current = readSession()
-    const refreshed = current && current.token !== sentToken ? current : await refreshSession()
-    if (refreshed) {
-      sentToken = refreshed.token
-      res = await send(path, method, body, sentToken)
-    } else {
-      clearSession()
-      window.location.assign('/sign-in?expired=1')
-    }
-  }
-
-  let payload: unknown = null
-  const text = await res.text()
-  if (text) {
-    try {
-      payload = JSON.parse(text)
-    } catch {
-      payload = null
-    }
-  }
-
-  if (!res.ok) {
-    const err = payload as (Record<string, unknown> & { error?: string; message?: string }) | null
-    const code = err?.error ?? 'ERROR'
-    // The org this token acts in is no longer one the caller is a member of. Every org-scoped
-    // list on the page would be empty or belong to nobody, so go to organisation selection
-    // rather than render a signed-in dashboard for an org the user cannot see. This is not a
-    // sign-out: the session is still valid for the user's other organisations.
+  },
+  // Non-secret diagnostics: the API names why a refresh failed (no_cookie, expired, unknown, ...).
+  onRefreshFailure: (status, reason) => console.warn('[hushvault] session refresh failed', status, reason ?? ''),
+  // The org this token acts in is no longer one the caller is a member of. Every org-scoped
+  // list on the page would be empty or belong to nobody, so go to organisation selection
+  // rather than render a signed-in dashboard for an org the user cannot see. This is not a
+  // sign-out: the session is still valid for the user's other organisations.
+  onApiError: ({ code, authenticated }) => {
     if (
-      auth &&
+      authenticated &&
       (code === 'NOT_A_MEMBER' || code === 'MEMBERSHIP_REVOKED') &&
       typeof window !== 'undefined' &&
       !window.location.pathname.startsWith('/organisations')
     ) {
       window.location.assign(`/organisations?reason=${code}`)
     }
-    throw new ApiError(res.status, code, err?.message ?? `Request failed (${res.status}).`, err ?? null)
-  }
+  },
+})
 
-  if (payload === null || typeof payload !== 'object' || !('data' in payload)) {
-    throw new ApiError(res.status, 'INVALID_RESPONSE', 'The API returned an unexpected response shape.')
-  }
-
-  return (payload as { data: T }).data
-}
+export const { apiFetch, refreshSession, endSession } = client

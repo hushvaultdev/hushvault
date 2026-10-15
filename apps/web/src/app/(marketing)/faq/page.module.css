@@ -1,11 +1,11 @@
 .container {
-  padding: 6rem 2rem 4rem;
+  padding: clamp(40px, 6vw, 76px) 16px 56px;
   max-width: 1080px;
   margin: 0 auto;
 }
 
 .hero {
-  text-align: center;
+  text-align: left;
   margin-bottom: 3rem;
 }
 
@@ -25,17 +25,23 @@
 }
 
 .description {
-  margin: 1.25rem auto 0;
+  margin: 1.25rem 0 0;
   max-width: 680px;
   color: var(--muted);
   font-size: 1.05rem;
   line-height: 1.8;
 }
 
+.hero {
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .grid {
   display: grid;
   gap: 1.75rem;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
 }
 
 .card {
@@ -43,7 +49,17 @@
   border-radius: var(--radius-md);
   background: var(--surface-translucent);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
+  box-shadow: none;
+}
+
+@media (max-width: 700px) {
+  .container {
+    padding: 36px 12px 44px;
+  }
+
+  .hero {
+    text-align: left;
+  }
 }
 
 .card h2 {

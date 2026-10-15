@@ -33,6 +33,8 @@ export const AUDIT_SWEEP_ROWS_PER_TICK = 500
 export const SHARE_PURGE_PER_TICK = 200
 /** Closed organisation invitations removed per tick (issue #82 Lane B). */
 export const INVITE_PURGE_PER_TICK = 200
+/** Expired time-boxed comp grants reverted to free per tick (issue #102/#103). */
+export const COMP_EXPIRY_PER_TICK = 200
 
 /** KV keys listed per tick. One list call; the cursor resumes on the next tick. */
 export const ORPHAN_SCAN_KEYS_PER_TICK = 200
@@ -80,6 +82,8 @@ export type HousekeepingResult = {
   orphanBlobsUnreferenced: number
   /** Blobs deleted: proved unreferenced twice, ORPHAN_GRACE_MS apart. */
   orphanBlobsDeleted: number
+  /** Expired comp grants reverted to free (issue #102/#103). */
+  compsExpired: number
   /** Pre-0014 `secrethist:` copies deleted. Counts down to zero and stays there (issue #84). */
   legacyHistoryBlobsDeleted: number
 }
@@ -380,6 +384,19 @@ async function purgeAuthTokens(env: Env, now: Date): Promise<number> {
 }
 
 /**
+ * Revert an expired time-boxed comp grant to free, data kept. `plan_expires_at` is the only trigger —
+ * a plan set by an operator or Stripe with no expiry (NULL) is never touched here. One UPDATE,
+ * capped per tick like every other sweep in this file; the next tick continues where this stopped.
+ */
+async function sweepExpiredComps(env: Env, now: Date): Promise<number> {
+  const result = await env.DB.prepare(
+    `UPDATE organisations SET plan = 'free', plan_expires_at = NULL
+     WHERE id IN (SELECT id FROM organisations WHERE plan_expires_at IS NOT NULL AND plan_expires_at <= ? LIMIT ?)`,
+  ).bind(now.toISOString(), COMP_EXPIRY_PER_TICK).run()
+  return Number(result.meta.changes ?? 0)
+}
+
+/**
  * Never throws: it shares a scheduled invocation with key rotation and the sync tick, and a
  * housekeeping failure must not take either of those down. Each step is independent, so one
  * failing does not skip the others.
@@ -390,6 +407,7 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
     shareLinksDeleted: 0,
     authTokensDeleted: 0,
     orgInvitesDeleted: 0,
+    compsExpired: 0,
     orphanBlobsScanned: 0,
     orphanBlobsUnreferenced: 0,
     orphanBlobsDeleted: 0,
@@ -401,6 +419,7 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
     ['share', async () => { result.shareLinksDeleted = await purgeShareLinks(env, now) }],
     ['tokens', async () => { result.authTokensDeleted = await purgeAuthTokens(env, now) }],
     ['org_invites', async () => { result.orgInvitesDeleted = await purgeOrgInvites(env, now) }],
+    ['comp_expiry', async () => { result.compsExpired = await sweepExpiredComps(env, now) }],
     ['orphan_blobs', async () => { Object.assign(result, await sweepOrphanBlobs(env, now)) }],
     ['legacy_history_blobs', async () => { result.legacyHistoryBlobsDeleted = await purgeLegacyHistoryBlobs(env) }],
   ] as const) {
@@ -432,6 +451,11 @@ export async function housekeepingTick(env: Env, now: Date = new Date()): Promis
       authTokensDeleted: result.authTokensDeleted,
       orgInvitesDeleted: result.orgInvitesDeleted,
     })
+  }
+  // A comp reverting to free is a billing-relevant event, not routine cleanup, so it gets its own
+  // line even on a tick where nothing else moved.
+  if (result.compsExpired) {
+    logEvent('housekeeping.comp_expired', { count: result.compsExpired })
   }
   return result
 }

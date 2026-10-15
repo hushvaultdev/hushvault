@@ -1044,7 +1044,9 @@ Written by the API today: `auth.login`, `auth.login.github`, `auth.login.google`
 `org.switch_in`, `org.switch_out`, `org.invite.create`, `org.invite.sent`, `org.invite.revoke`,
 `org.invite.accept`, `org.member.role_change`, `org.member.remove`, `org.member.leave`, `project.create`,
 `project.update`, `project.delete`, `environment.create`, `secret.read`, `secret.read_bulk`, `secret.create`,
-`secret.update`, `secret.delete`, `share.create`, `user.delete`. Not audited: registration, listing endpoints, share views.
+`secret.update`, `secret.delete`, `share.create`, `user.delete`, `admin.org.plan_set`, `admin.org.comp_grant`,
+`admin.org.comp_revoke` (issue #103/#108, written by `apps/api/src/routes/admin.ts`; `actor_id` is the
+platform admin's own user id, never an org role). Not audited: registration, listing endpoints, share views.
 
 The invitation and membership rows carry `resource_type` `org_invite` (resource id `inv_...`) or `member`
 (resource id the member's `usr_...`), and `org.invite.sent` is the only one with `actor_type: system` — it
@@ -1065,6 +1067,11 @@ server-set keys. The populated ones today:
   nulls it (`audit_log.actor_id` is `ON DELETE SET NULL`), which is why the id is also carried in
   `resource_id`. Written only to organisations that SURVIVE the deletion — an erased sole-member
   org's audit log is cascaded away with it.
+- `admin.org.plan_set` → `{ "from": <old plan>, "to": <new plan> }` — an operator override via the
+  admin app, never reachable by the organisation itself.
+- `admin.org.comp_grant` → `{ "from": <old plan>, "to": <new plan>, "days": <int> }`.
+- `admin.org.comp_revoke` → `{ "from": <old plan> }`. Not written when there was no active comp to
+  revoke (the route is a no-op in that case — see `apps/api/src/routes/admin.ts`).
 
 Every other action leaves `metadata` `null`. It never carries a secret value, token, key or
 caller-supplied free text — the rule is `.claude/rules/audit-log.md`.

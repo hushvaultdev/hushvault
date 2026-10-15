@@ -150,10 +150,16 @@ Done (issue #21). IDs are in `apps/api/wrangler.toml`. To recreate elsewhere:
 `wrangler d1 create <name>` and `wrangler kv namespace create <title>` and paste the
 IDs into the matching `[env.*]` block. Never share a D1 or KV between dev and production.
 
-### 2. Create the four Workers and connect the repo
+### 2. Create the Workers and connect the repo
 
-**State as of 2026-10-06 (issue #93): all four Workers ARE connected to
-`hushvaultdev/hushvault`, and every one of them reports "Latest build failed."**
+Six Workers in total: `hushvault-api-dev`/`hushvault-api`, `hushvault-web-dev`/`hushvault-web`,
+and `hushvault-admin-dev`/`hushvault-admin` (issue #108 — the admin app added the last two). See
+[apps/admin/DEPLOY.md](../apps/admin/DEPLOY.md) for the admin pair's own setup, which additionally
+needs a Cloudflare Access application before its route is public.
+
+**State as of 2026-10-06 (issue #93): the four pre-admin Workers ARE connected to
+`hushvaultdev/hushvault`, and every one of them reports "Latest build failed."** The admin pair is
+new and has not been connected yet (see apps/admin/DEPLOY.md's manual steps).
 
 An earlier version of this section claimed the repository had never been connected. That
 was wrong, and the reasoning that produced it is worth recording so nobody repeats it:
@@ -271,6 +277,11 @@ secret is stored**: losing it makes all stored secrets unrecoverable (OPERATIONS
   single-level subdomain on purpose: I believe Cloudflare's free universal certificate
   covers only one subdomain level (unverified, please check)
   (<https://developers.cloudflare.com/workers/configuration/routing/custom-domains/>).
+- `admin.beta.hushvault.dev` / `admin.hushvault.dev` (issue #108) are set up the same way as the
+  web domains above, with one addition: each must have a **Cloudflare Access application**
+  attached before the custom domain route goes live — see
+  [apps/admin/DEPLOY.md](../apps/admin/DEPLOY.md). The API also needs `CF_ACCESS_TEAM_DOMAIN` /
+  `CF_ACCESS_AUD` set per environment, or `/api/admin/*` fails closed with 503.
 
 ### 6. First migration and deploy
 

@@ -1,24 +1,19 @@
 import type { Env } from '../index'
+import { FREE_ENTITLEMENTS, PLAN_ENTITLEMENTS } from './entitlements'
 
-// Per-plan audit log retention, in days. -1 = retain forever (never purge,
-// never truncate queries). Mirrors `auditLogDays` in the subscription plan
-// (docs/plans/subscription-service-layer.md). Kept local to the audit feature
-// so it has no dependency on the (not-yet-built) billing/tiers module; if that
-// module lands, this map should defer to it.
-// Fallback when an org's plan string isn't recognised (treat as the most
-// restrictive tier).
-export const DEFAULT_RETENTION_DAYS = 7
+// Per-plan audit log retention, in days. -1 = retain forever (never purge, never truncate queries).
+// Derived from the single tier table in entitlements.ts.
+// Fallback when an org's plan string isn't recognised (treat as the most restrictive tier).
+export const DEFAULT_RETENTION_DAYS = FREE_ENTITLEMENTS.auditRetentionDays
 
-export const AUDIT_RETENTION_DAYS: Record<string, number> = {
-  free: DEFAULT_RETENTION_DAYS,
-  pro: 90,
-  team: 365,
-  enterprise: -1,
-}
+export const AUDIT_RETENTION_DAYS: Record<string, number> = Object.fromEntries(
+  Object.entries(PLAN_ENTITLEMENTS).map(([plan, e]) => [plan, e.auditRetentionDays]),
+)
 
-// Plans that may export the audit log (compliance evidence). Mirrors the
-// `complianceExport` feature flag in the subscription plan.
-export const COMPLIANCE_EXPORT_PLANS = new Set<string>(['team', 'enterprise'])
+// Plans that may export the audit log (compliance evidence).
+export const COMPLIANCE_EXPORT_PLANS = new Set<string>(
+  Object.entries(PLAN_ENTITLEMENTS).filter(([, e]) => e.complianceExport).map(([plan]) => plan),
+)
 
 export type OrgRetentionSettings = {
   plan: string

@@ -1,11 +1,11 @@
 .container {
-  padding: 6rem 2rem 4rem;
+  padding: clamp(40px, 6vw, 76px) 16px 56px;
   max-width: 1080px;
   margin: 0 auto;
 }
 
 .hero {
-  text-align: center;
+  text-align: left;
   margin-bottom: 3rem;
 }
 
@@ -25,17 +25,23 @@
 }
 
 .description {
-  margin: 1.25rem auto 0;
+  margin: 1.25rem 0 0;
   max-width: 680px;
   color: var(--muted);
   font-size: 1.05rem;
   line-height: 1.8;
 }
 
+.hero {
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .cards {
   display: grid;
   gap: 1.75rem;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
 }
 
 .card {
@@ -43,7 +49,7 @@
   border-radius: var(--radius-md);
   background: var(--surface-translucent);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
+  box-shadow: none;
 }
 
 .card h2 {
@@ -62,4 +68,67 @@
   margin-top: 1rem;
   color: var(--accent);
   font-weight: 600;
+}
+
+.notice {
+  display: grid;
+  gap: 12px;
+  margin: 28px auto 0;
+  max-width: 760px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.78);
+  text-align: left;
+}
+
+.notice p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+
+.selfHosting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 28px;
+  padding: clamp(20px, 4vw, 36px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: #edf4f1;
+}
+
+.selfHosting > div {
+  display: grid;
+  gap: 14px;
+  max-width: 760px;
+}
+
+.selfHosting h2,
+.selfHosting p {
+  margin: 0;
+}
+
+.selfHosting h2 {
+  font-size: clamp(1.55rem, 3vw, 2.2rem);
+  letter-spacing: -0.035em;
+}
+
+.selfHosting p {
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+
+@media (max-width: 700px) {
+  .container {
+    padding: 36px 12px 44px;
+  }
+
+  .selfHosting {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }

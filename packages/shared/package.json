@@ -14,6 +14,11 @@
       "types": "./src/integrations.ts",
       "import": "./src/integrations.ts",
       "default": "./src/integrations.ts"
+    },
+    "./types": {
+      "types": "./src/types/index.ts",
+      "import": "./src/types/index.ts",
+      "default": "./src/types/index.ts"
     }
   },
   "scripts": {

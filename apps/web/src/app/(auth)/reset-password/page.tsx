@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Field } from '@/components/ui/field'
-import { Section } from '@/components/ui/section'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { Field } from '@hushvault/web-kit/ui'
+import { Section } from '@hushvault/web-kit/ui'
 import { ApiError, apiFetch } from '@/lib/api'
 
 import styles from '../auth.module.css'

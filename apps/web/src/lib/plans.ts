@@ -22,9 +22,9 @@ export interface PlanDefinition {
 export const PLANS: PlanDefinition[] = [
   {
     name: 'Free',
-    price: '$0',
+    price: 'Self-hosted',
     status: 'available',
-    audience: 'Solo developers and early projects. Self-host on the Cloudflare free tier.',
+    audience: 'Solo developers and early projects. No HushVault charge; Cloudflare costs may apply.',
     features: [
       'Computed secrets',
       'Branch inheritance',
@@ -67,7 +67,7 @@ export const PLANS: PlanDefinition[] = [
     status: 'planned',
     audience: 'Organisations with advanced security and scale needs.',
     features: [
-      'Self-host at $0',
+      'Self-hosting option (Cloudflare costs may apply)',
       'Dedicated support (planned)',
       'Custom SLAs (planned)',
       'Security review assistance (planned)',

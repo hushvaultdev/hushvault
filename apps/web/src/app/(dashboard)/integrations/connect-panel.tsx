@@ -3,9 +3,9 @@
 import type { IntegrationInfo } from '@hushvault/shared/integrations'
 import { useState } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Field } from '@/components/ui/field'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { Field } from '@hushvault/web-kit/ui'
 import { createConnection, type ConnectionDto } from '@/lib/integrations-api'
 import {
   describeApiError,

@@ -1,0 +1,60 @@
+# HushVault platform admin — Next.js on Cloudflare Workers via @opennextjs/cloudflare.
+# Separate Worker from the customer dashboard (apps/web) on purpose (#103): this is the
+# highest-blast-radius surface in the product and must not share a deploy, a crash, or a Workers
+# Builds connection with the customer-facing app. Deploys run on Cloudflare Workers Builds, one
+# Worker per environment, root directory apps/admin. See apps/admin/DEPLOY.md.
+#
+# MANDATORY before this is reachable by anyone but you: put this Worker's route behind Cloudflare
+# Access (Zero Trust), so Access gates it at the edge before any app code runs. App-level sign-in
+# (below) authenticates WHO you are to the API; Access decides WHETHER you may reach this app at
+# all. Neither one is a substitute for the other. See apps/admin/DEPLOY.md.
+#
+# NOTE: NEXT_PUBLIC_* variables are inlined at BUILD time by `next build`. Set
+# NEXT_PUBLIC_API_URL as a Workers Builds *build variable* per Worker, not in [vars].
+
+name = "hushvault-admin-local"
+main = ".open-next/worker.js"
+compatibility_date = "2026-09-30"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[observability]
+enabled = true
+
+# Non-inheritable keys (assets, observability) must be repeated per environment. Worker names are
+# set explicitly so the dashboard Worker name always matches this file (required by Workers Builds).
+
+[env.dev]
+name = "hushvault-admin-dev"
+# Route: admin.beta.hushvault.dev — set in the Cloudflare dashboard (Workers & Pages > this
+# Worker > Triggers), alongside the Access policy. Not configurable from this file alone.
+
+# API_INTERNAL_URL must be a runtime [vars] binding, not only a build variable: proxy.ts reads
+# process.env['API_INTERNAL_URL'] at request time, and OpenNext populates process.env from
+# wrangler [vars] — build variables exist only during `next build`.
+[env.dev.vars]
+API_INTERNAL_URL = "https://api-beta.hushvault.dev"
+
+[env.dev.assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[env.dev.observability]
+enabled = true
+
+[env.production]
+name = "hushvault-admin"
+# Route: admin.hushvault.dev — same dashboard steps as dev, on the production Worker.
+
+[env.production.vars]
+API_INTERNAL_URL = "https://api.hushvault.dev"
+
+[env.production.assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[env.production.observability]
+enabled = true

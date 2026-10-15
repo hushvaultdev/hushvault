@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from 'react'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Field } from '@/components/ui/field'
+import { Badge } from '@hushvault/web-kit/ui'
+import { Button } from '@hushvault/web-kit/ui'
+import { Card } from '@hushvault/web-kit/ui'
+import { Field } from '@hushvault/web-kit/ui'
 import { useOrgs } from '@/lib/org-context'
 import { ROLE_LABEL, describeOrgError, membershipReason, shortId, validateOrgName } from '@/lib/orgs-helpers'
 

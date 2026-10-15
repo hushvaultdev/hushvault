@@ -2,8 +2,8 @@
 
 import { useState } from 'react'
 
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { Badge } from '@hushvault/web-kit/ui'
+import { Button } from '@hushvault/web-kit/ui'
 import { removeMember, updateMemberRole, type MemberSummary } from '@/lib/orgs-api'
 import { ROLE_DESCRIPTION, ROLE_LABEL, assignableRoles, describeOrgError, formatWhen, shortId } from '@/lib/orgs-helpers'
 import { useFocusReturn } from '@/lib/use-focus-return'

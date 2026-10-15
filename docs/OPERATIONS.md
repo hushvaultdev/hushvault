@@ -529,14 +529,30 @@ provider are stranded on that provider and can no longer be reconciled or cleane
 ## 8. Setting an organisation's plan
 
 Billing is **not live**, so there is deliberately **no self-service upgrade endpoint** — an API that
-let an owner set their own plan to a paid tier would be handing out paid limits for free. Until
-billing ships, an operator raises a client's plan directly in D1. This is the supported path for
-onboarding a client who needs more than the free tier's **2 sync targets** (issue #98).
+let an owner set their own plan to a paid tier would be handing out paid limits for free. An
+operator raises a client's plan through the **platform admin app**
+(`https://admin.hushvault.dev`, Access-gated — see
+[apps/admin/DEPLOY.md](../apps/admin/DEPLOY.md)): sign in, open the organisation, and use **Set
+plan** (an immediate, no-expiry override) or **Grant comp** (a time-boxed plan that reverts to
+free on expiry, issue #104) on its detail page. This is the supported path for onboarding a
+client who needs more than the free tier's **2 sync targets** (issue #98), superseding the
+earlier raw-D1 instructions once the admin app (issue #108) shipped.
 
 The plan column is `organisations.plan`, constrained to `free | pro | team | enterprise`. The sync
 limits each tier unlocks are in `apps/api/src/lib/plan-limits.ts` (`SYNC_PLAN_LIMITS`): free 2
 targets / 60 auto-runs per hour, pro 25 / 600, team 100 / 2000, enterprise unlimited. Audit-log
-retention per tier is separate (`audit-retention.ts`).
+retention per tier is separate (`audit-retention.ts`). The admin app's `GET /api/admin/orgs/:id`
+shows the resolved entitlements and current usage side by side.
+
+Every plan or comp change made through the admin app writes an audit row
+(`admin.org.plan_set` / `admin.org.comp_grant` / `admin.org.comp_revoke`, with `{from, to}` or
+`{from, to, days}` in `metadata` — see `.claude/rules/audit-log.md` and docs/API.md § Audit
+actions) attributed to the platform admin's own user id. The new limits take effect on the next
+request and the next cron tick — no deploy, because every sync limit reads the plan column live.
+Lowering a plan never deletes existing targets over the new cap; it only refuses new ones until
+the count is back under the cap.
+
+**Break-glass fallback** (Access or the admin app itself is unreachable — not the normal path):
 
 ```bash
 # Find the org id (an operator query; never expose org listings through the API for this).
@@ -549,7 +565,5 @@ wrangler d1 execute DB --remote --env production \
   --command "UPDATE organisations SET plan = 'team' WHERE id = '<org-id>'"
 ```
 
-The new limits take effect on the next request and the next cron tick — no deploy, because every
-sync limit reads the plan column live. There is no audit row for an operator plan change yet; note
-it in the client's onboarding ticket. Lowering a plan never deletes existing targets over the new
-cap; it only refuses new ones until the count is back under the cap.
+A raw-D1 change like this writes **no audit row** — note it explicitly in the client's onboarding
+ticket, since the admin app's audit trail above will otherwise look like the only history there is.
