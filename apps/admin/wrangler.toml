@@ -32,6 +32,12 @@ name = "hushvault-admin-dev"
 # Route: admin.beta.hushvault.dev — set in the Cloudflare dashboard (Workers & Pages > this
 # Worker > Triggers), alongside the Access policy. Not configurable from this file alone.
 
+# API_INTERNAL_URL must be a runtime [vars] binding, not only a build variable: proxy.ts reads
+# process.env['API_INTERNAL_URL'] at request time, and OpenNext populates process.env from
+# wrangler [vars] — build variables exist only during `next build`.
+[env.dev.vars]
+API_INTERNAL_URL = "https://api-beta.hushvault.dev"
+
 [env.dev.assets]
 directory = ".open-next/assets"
 binding = "ASSETS"
@@ -42,6 +48,9 @@ enabled = true
 [env.production]
 name = "hushvault-admin"
 # Route: admin.hushvault.dev — same dashboard steps as dev, on the production Worker.
+
+[env.production.vars]
+API_INTERNAL_URL = "https://api.hushvault.dev"
 
 [env.production.assets]
 directory = ".open-next/assets"
