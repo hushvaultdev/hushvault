@@ -13,7 +13,7 @@ const footerGroups: { title: string; links: FooterLink[] }[] = [
       { href: '/#workflows', label: 'Workflow' },
       { href: '/#pricing', label: 'Pricing' },
       { href: '/faq', label: 'FAQ' },
-      { href: '/#trust', label: 'Security' },
+      { href: '/security', label: 'Security' },
     ],
   },
   {
@@ -39,9 +39,9 @@ export function MarketingFooter() {
       <div className={`${s('footer')} page-container`}>
         <div className={s('footerIntro')}>
           <p className={s('footerKicker')}>HushVault</p>
-          <h2>Secrets management built for developer momentum and startup budgets. Early, pre-release, and open source.</h2>
+          <h2>Open source secrets management for the developer workflow.</h2>
           <p>
-            Give developers the useful workflow features immediately, then add governance when the organization actually needs it.
+            HushVault is pre-release and still being verified. Review its current status, security model, and setup notes before using it.
           </p>
         </div>
 

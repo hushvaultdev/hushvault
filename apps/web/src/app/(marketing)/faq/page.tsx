@@ -52,9 +52,9 @@ export default function FAQPage() {
         </article>
 
         <article className={styles['card']}>
-          <h2>Can I self-host it for free?</h2>
+          <h2>Is there a portable self-hosting guide?</h2>
           <p>
-            Yes. HushVault is designed to run on Cloudflare Workers, D1, KV, and Pages, which can fit inside the Cloudflare free tier for a small team or MVP. HushVault is pre-release software, so review the code and your threat model before relying on it in production.
+            Not yet. The current deployment notes contain project-specific hostnames and resource IDs, so they are reference material rather than a third-party setup recipe. Cloudflare costs depend on your account and usage. See the <Link href="/docs#self-hosting">current self-hosting status</Link>.
           </p>
         </article>
 
@@ -76,7 +76,7 @@ export default function FAQPage() {
         <article className={styles['card']}>
           <h2>What makes HushVault secure?</h2>
           <p>
-            Secret values are never stored in plaintext. Metadata lives in D1, while encrypted blobs live in KV. The app uses AES-256-GCM envelope encryption via WebCrypto. HushVault has not had an independent security audit or compliance certification.
+            Secret values are stored using AES-256-GCM envelope encryption. The deployment server holds the master key and decrypts stored values when serving them. HushVault is pre-release, has not had an independent security audit, and holds no compliance certification. <Link href="/security">Read the security model</Link>.
           </p>
         </article>
       </section>

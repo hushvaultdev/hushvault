@@ -11,9 +11,9 @@ const s = (name: string) => styles[name]
 // Presentation/CTA for the marketing surface; plan data comes from the shared
 // PLANS module so the tiers stay in sync with the in-product billing page.
 const MARKETING = {
-  Free: { cta: 'Self-host for free', href: '/docs', tone: 'light' },
+  Free: { cta: 'Review self-hosting notes', href: '/docs#self-hosting', tone: 'light' },
   Pro: { cta: 'Coming soon', href: null, tone: 'light' },
-  Team: { cta: 'Coming soon', href: null, tone: 'dark' },
+  Team: { cta: 'Coming soon', href: null, tone: 'light' },
 } as const
 
 const plans = (Object.keys(MARKETING) as Array<keyof typeof MARKETING>).map((name) => {
@@ -29,10 +29,10 @@ export default function PricingPage() {
     <main className={`page-shell ${s('pricingPage')}`}>
       <Section className={s('pricingHero')}>
         <div className="page-container">
-          <span className="eyebrow">Pricing that matches your growth</span>
-          <h1 className={s('pricingTitle')}>Own secrets now, upgrade only when the team needs it.</h1>
+          <span className="eyebrow">Plans and availability</span>
+          <h1 className={s('pricingTitle')}>Self-hosting is available. Hosted plans are still planned.</h1>
           <p className={s('pricingSubtitle')}>
-            HushVault is free to self-host today. Hosted Pro and Team plans are planned: prices are provisional, billing is not live yet, and features marked &ldquo;planned&rdquo; are not available.
+            There is no HushVault charge for the self-hosted version. Your infrastructure provider may charge for usage. Hosted Pro and Team plans are not available; prices are provisional and checkout is not live.
           </p>
         </div>
       </Section>

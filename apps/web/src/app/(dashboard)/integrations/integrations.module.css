@@ -4,7 +4,8 @@
 
 .pageTitle {
   margin: 0 0 6px;
-  font-size: 1.8rem;
+  font-size: clamp(1.75rem, 4vw, 2.35rem);
+  letter-spacing: -0.04em;
 }
 
 .pageSubtitle {
@@ -16,13 +17,17 @@
 .grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
 }
 
 .card {
   display: grid;
   grid-template-rows: auto 1fr auto;
   gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: none;
 }
 
 .cardTop {
@@ -284,6 +289,10 @@
 }
 
 @media (max-width: 640px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .row {
     grid-template-columns: 1fr;
   }

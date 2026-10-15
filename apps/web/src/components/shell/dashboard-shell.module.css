@@ -1,34 +1,45 @@
 .shell {
   display: grid;
-  grid-template-columns: 248px 1fr;
+  grid-template-columns: 232px minmax(0, 1fr);
   min-height: 100vh;
+  background: #f7f9f8;
 }
 
 .sidebar {
+  position: sticky;
+  top: 0;
   display: flex;
   flex-direction: column;
-  gap: 28px;
-  padding: 24px 18px;
-  background: linear-gradient(180deg, var(--surface-dark-alt), var(--surface-dark));
-  color: var(--text-inverse);
+  gap: 32px;
+  height: 100vh;
+  padding: 24px 16px;
+  border-right: 1px solid var(--border);
+  background: #fbfcfb;
+  color: var(--text);
 }
 
 .brand {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  font-size: 1.1rem;
+  padding: 0 8px;
+  font-size: 1.05rem;
 }
 
 .brandMark {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--accent-contrast);
-  font-weight: var(--weight-bold);
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  background: #173f3c;
+  color: #f4faf8;
+  font-weight: 700;
+}
+
+.brandName {
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .nav {
@@ -37,20 +48,26 @@
 }
 
 .navItem {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  color: rgba(238, 244, 243, 0.74);
-  font-weight: var(--weight-semibold);
+  border-radius: 9px;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  font-weight: 560;
+  transition: background var(--transition-base), color var(--transition-base);
 }
 
 .navItem:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-inverse);
+  background: #f0f5f3;
+  color: var(--text);
 }
 
 .navItemActive {
-  background: rgba(15, 138, 131, 0.28);
-  color: var(--text-inverse);
+  background: #e6f1ed;
+  color: #155d55;
+  font-weight: 650;
 }
 
 .main {
@@ -60,41 +77,36 @@
 }
 
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 15;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 16px 28px;
+  gap: 12px;
+  min-height: 68px;
+  padding: 12px clamp(16px, 3vw, 32px);
   border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px);
 }
 
 .topbarActions {
   display: inline-flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
+  margin-left: auto;
 }
 
 .content {
-  padding: 28px;
-  width: min(100%, 1080px);
+  width: min(100%, 1280px);
+  padding: clamp(20px, 3.6vw, 40px);
 }
 
-@media (max-width: 720px) {
-  .shell {
-    grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .nav {
-    grid-auto-flow: column;
-  }
+.mobileMenuToggle,
+.navOverlay {
+  display: none;
 }
 
 .verifyBanner {
@@ -104,7 +116,96 @@
   gap: 12px;
   padding: 10px 16px;
   margin-bottom: 16px;
-  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border: 1px solid var(--border);
   border-radius: 10px;
+  background: #fff;
   font-size: 0.9rem;
+}
+
+@media (max-width: 760px) {
+  .shell {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    z-index: 31;
+    inset: 0 auto 0 0;
+    width: min(300px, calc(100vw - 48px));
+    height: 100dvh;
+    padding: 20px 16px;
+    box-shadow: 18px 0 48px rgba(15, 35, 34, 0.15);
+    transform: translateX(-105%);
+    visibility: hidden;
+    transition: transform 180ms ease, visibility 180ms ease;
+  }
+
+  .sidebarOpen {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  .navOverlay {
+    position: fixed;
+    z-index: 30;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: rgba(14, 29, 30, 0.34);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 180ms ease, visibility 180ms ease;
+  }
+
+  .navOverlayOpen {
+    opacity: 1;
+    visibility: visible;
+  }
+
+  .topbar {
+    justify-content: flex-start;
+    gap: 10px;
+    min-height: 64px;
+    padding: 10px 12px;
+  }
+
+  .mobileMenuToggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    min-height: 44px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .topbar > :global(*) {
+    min-width: 0;
+  }
+
+  .topbarActions {
+    margin-left: auto;
+  }
+
+  .content {
+    padding: 20px 16px 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .navOverlay,
+  .navItem {
+    transition-duration: 0.01ms;
+  }
 }

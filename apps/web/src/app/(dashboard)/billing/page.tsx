@@ -31,10 +31,10 @@ const usage: UsageStat[] = [
 
 // Presentation-only tone per plan; the plan data itself comes from the shared
 // PLANS module (also used by the marketing pricing page) to avoid drift.
-const PLAN_TONE: Record<PlanName, 'light' | 'dark'> = {
+const PLAN_TONE: Record<PlanName, 'light'> = {
   Free: 'light',
   Pro: 'light',
-  Team: 'dark',
+  Team: 'light',
   Enterprise: 'light',
 }
 
@@ -64,7 +64,7 @@ export default function BillingPage() {
         <div className={s('summaryMeta')}>
           <span className={s('summaryWorkspace')}>Workspace: {workspace}</span>
           <span className={s('pageSubtitle')}>
-            You are on the {CURRENT_PLAN} plan at $0. Plan limits (projects, secrets, members) are not enforced yet.
+            You are using the self-hosted Free tier. Cloudflare may charge for infrastructure usage. Plan limits (projects, secrets, members) are not enforced yet.
           </span>
         </div>
         <p className={s('summaryNote')}>Live plan and usage data is coming soon. The usage figures below are examples, not your real usage.</p>
@@ -109,7 +109,7 @@ export default function BillingPage() {
           {PLANS.map((plan) => {
             const isCurrent = plan.name === CURRENT_PLAN
             const tone = PLAN_TONE[plan.name]
-            const cardClass = `${s('planCard')} ${tone === 'dark' ? s('planCardDark') : ''}`.trim()
+            const cardClass = s('planCard')
             return (
               <Card key={plan.name} className={cardClass} tone={tone}>
                 <div className={s('planHeader')}>
@@ -130,7 +130,7 @@ export default function BillingPage() {
                     </Button>
                   ) : (
                     <>
-                      <Button type="button" variant={tone === 'dark' ? 'secondary' : 'primary'} disabled>
+                      <Button type="button" variant="primary" disabled>
                         Coming soon
                       </Button>
                       <p className={s('upgradeHint')}>Checkout is not available yet.</p>

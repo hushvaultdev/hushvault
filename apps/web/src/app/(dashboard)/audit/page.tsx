@@ -111,8 +111,8 @@ export default function AuditPage() {
           <tbody>
             {entries.map((entry) => (
               <tr key={entry.id}>
-                <td className={s('action')}>{entry.action}</td>
-                <td>
+                <td data-label="Action" className={s('action')}>{entry.action}</td>
+                <td data-label="Resource">
                   {entry.resource_type ? (
                     <span>
                       <span className={s('resourceType')}>{entry.resource_type}</span>
@@ -124,14 +124,14 @@ export default function AuditPage() {
                     <span className={s('muted')}>—</span>
                   )}
                 </td>
-                <td>
+                <td data-label="Actor">
                   <span className={s('actor')}>
                     <Badge tone={actorTone(entry.actor_type)}>{entry.actor_type}</Badge>
                     {entry.actor_id ? <span className={s('actorId')}>{shortId(entry.actor_id)}</span> : null}
                   </span>
                 </td>
-                <td className={s('ip')}>{entry.ip ?? '—'}</td>
-                <td className={s('time')}>{formatTime(entry.timestamp)}</td>
+                <td data-label="IP address" className={s('ip')}>{entry.ip ?? '—'}</td>
+                <td data-label="Time" className={s('time')}>{formatTime(entry.timestamp)}</td>
               </tr>
             ))}
           </tbody>

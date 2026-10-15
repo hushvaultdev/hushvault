@@ -20,6 +20,10 @@
   margin-bottom: 28px;
 }
 
+.stepButton {
+  min-height: 44px;
+}
+
 .step {
   display: flex;
   align-items: center;
@@ -95,6 +99,10 @@
   display: grid;
   gap: 16px;
   margin-bottom: 24px;
+  padding: clamp(18px, 3vw, 28px);
+  border: 1px solid var(--border);
+  background: #fff;
+  box-shadow: none;
 }
 
 .panelTitle {
@@ -124,7 +132,7 @@
   padding: 18px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--surface);
+  background: #f7faf8;
 }
 
 .subPanelTitle {
@@ -156,4 +164,55 @@
   margin: 0 0 4px;
   color: var(--text-muted);
   font-size: 0.92rem;
+}
+
+@media (max-width: 600px) {
+  .pageTitle {
+    font-size: 1.65rem;
+  }
+
+  .stepper {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: start;
+    gap: 6px;
+    padding: 14px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: #fff;
+  }
+
+  .step {
+    justify-content: center;
+    gap: 0;
+  }
+
+  .stepButton {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    text-align: center;
+  }
+
+  .stepConnector {
+    display: none;
+  }
+
+  .stepLabel {
+    font-size: 0.72rem;
+  }
+
+  .panel {
+    padding: 18px;
+  }
+
+  .formActions,
+  .doneActions {
+    display: grid;
+  }
+
+  .formActions > *,
+  .doneActions > * {
+    width: 100%;
+  }
 }
