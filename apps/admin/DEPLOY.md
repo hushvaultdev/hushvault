@@ -63,6 +63,7 @@ Until all five steps are done, this Worker should not have a public route at all
 | `hushvault-admin` | `production` | `main` | `https://api.hushvault.dev` |
 
 Worker names must match `apps/admin/wrangler.toml` exactly. Root directory: `apps/admin`.
+The production Worker (`hushvault-admin`, branch `main`) will fail until `apps/admin/` is merged from `dev` to `main`.
 
 **Build watch paths**: this Worker also depends on `packages/web-kit/**` and
 `packages/shared/**` (it imports both as TypeScript source via `transpilePackages` — see
