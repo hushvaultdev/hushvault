@@ -193,12 +193,12 @@ enabled = true
 [env.production.triggers]
 crons = ["* * * * *"]
 
-# Cloudflare Email Service send binding (issue #26, #76). DISABLED until the sending domain is
-# onboarded (issue #75): uncomment, then deploy. Without it the code sends nothing and the auth
-# endpoints still respond normally. `allowed_sender_addresses` pins the binding to MAIL_FROM.
-# [[env.production.send_email]]
-# name = "EMAIL"
-# allowed_sender_addresses = ["no-reply@hushvault.dev"]
+# Cloudflare Email Service send binding (issue #26, #76). Enabled 2026-10-16 after #75 confirmed
+# hushvault.dev is onboarded for sending. `allowed_sender_addresses` pins the binding to
+# MAIL_FROM so a code bug cannot send from an unverified address.
+[[env.production.send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["no-reply@hushvault.dev"]
 
 # Custom domain: Cloudflare creates the DNS record + certificate on deploy. The
 # zone must be in the same account and the deploy token needs Zone > Workers
