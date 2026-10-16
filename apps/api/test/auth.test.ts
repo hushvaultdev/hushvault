@@ -61,6 +61,72 @@ describe('register / login', () => {
   })
 })
 
+describe('PBKDF2 iteration-count transparent upgrade (issue #89)', () => {
+  it('a pre-migration user (100k) signs in and the row is upgraded to current (600k)', async () => {
+    const env = createTestEnv()
+    // Seed a user with a legacy 100k-derived hash — mirrors every row that existed before
+    // migration 0022 shipped. seedUser overrides passwordIterations so the stored column and
+    // the stored hash agree.
+    const { email } = await seedUser(env, { email: 'legacy@x.com', password: PASSWORD, passwordIterations: 100000 })
+
+    const before = await userRow(env, email)
+    expect(before?.['password_iterations']).toBe(100000)
+    const legacyHash = before?.['password_hash'] as string
+    const legacySalt = before?.['salt'] as string
+
+    const res = await call(env, 'POST', '/api/auth/login', { json: { email, password: PASSWORD } })
+    expect(res.status).toBe(200)
+
+    const after = await userRow(env, email)
+    expect(after?.['password_iterations']).toBe(600000)
+    expect(after?.['password_hash']).not.toBe(legacyHash)
+    expect(after?.['salt']).not.toBe(legacySalt)
+
+    // The upgraded user can still sign in with the SAME password — a different hash under the
+    // new iteration count, same credential.
+    const again = await call(env, 'POST', '/api/auth/login', { json: { email, password: PASSWORD } })
+    expect(again.status).toBe(200)
+  })
+
+  it('a user already at current iteration count is NOT re-hashed on sign-in', async () => {
+    const env = createTestEnv()
+    const { email } = await seedUser(env, { email: 'current@x.com', password: PASSWORD, passwordIterations: 600000 })
+    const before = await userRow(env, email)
+
+    const res = await call(env, 'POST', '/api/auth/login', { json: { email, password: PASSWORD } })
+    expect(res.status).toBe(200)
+
+    const after = await userRow(env, email)
+    expect(after?.['password_hash']).toBe(before?.['password_hash'])
+    expect(after?.['salt']).toBe(before?.['salt'])
+    expect(after?.['password_iterations']).toBe(600000)
+  })
+
+  it('a failed sign-in with the wrong password does NOT upgrade the row', async () => {
+    const env = createTestEnv()
+    const { email } = await seedUser(env, { email: 'wrong@x.com', password: PASSWORD, passwordIterations: 100000 })
+    const before = await userRow(env, email)
+
+    const res = await call(env, 'POST', '/api/auth/login', { json: { email, password: 'definitely-not-the-password' } })
+    expect(res.status).toBe(401)
+
+    const after = await userRow(env, email)
+    expect(after?.['password_hash']).toBe(before?.['password_hash'])
+    expect(after?.['salt']).toBe(before?.['salt'])
+    expect(after?.['password_iterations']).toBe(100000)
+  })
+
+  it('sign-up writes the current iteration count (600k)', async () => {
+    const env = createTestEnv()
+    const res = await call(env, 'POST', '/api/auth/register', {
+      json: { email: 'fresh@x.com', password: PASSWORD, organisationName: 'Fresh' },
+    })
+    expect(res.status).toBe(201)
+    const row = await userRow(env, 'fresh@x.com')
+    expect(row?.['password_iterations']).toBe(600000)
+  })
+})
+
 describe('OAuth account linking', () => {
   it('ATTACK: a pre-registered unverified account is claimed by the real owner and the attacker is locked out', async () => {
     const env = createTestEnv()

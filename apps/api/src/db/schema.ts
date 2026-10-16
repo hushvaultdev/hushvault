@@ -22,6 +22,11 @@ export const users = sqliteTable('users', {
   email: text('email').notNull().unique(),
   passwordHash: text('password_hash').notNull(), // empty string for OAuth-only users
   salt: text('salt').notNull(), // PBKDF2 salt for key derivation
+  // PBKDF2 iteration count the stored hash was derived at (issue #89, migration 0022). Current
+  // code writes PASSWORD_ITERATIONS (600,000, OWASP) for new sign-ups and password resets;
+  // existing rows at 100,000 are transparently upgraded in verifyPassword's caller on next
+  // successful login.
+  passwordIterations: integer('password_iterations').notNull().default(100000),
   provider: text('provider'), // 'github' | 'google' | null (password)
   providerId: text('provider_id'), // provider's stable user id
   emailVerified: integer('email_verified', { mode: 'boolean' }).notNull().default(false),

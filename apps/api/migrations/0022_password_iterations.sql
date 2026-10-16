@@ -1,0 +1,17 @@
+-- 0022: PBKDF2 iteration count per user, 100,000 → 600,000 (OWASP). Issue #89.
+--
+-- The historical reason to stay at 100,000 iterations of PBKDF2-HMAC-SHA256 was the Workers
+-- CPU budget. That was asserted, never measured, until apps/api/scripts/bench-pbkdf2.mjs
+-- (see docs/ENCRYPTION.md "PBKDF2 iteration count") showed 600,000 iterations costs ~278ms
+-- on local workerd — well under 1% of the Workers Paid plan's default 30s per-request CPU
+-- budget. Logins are rare, so this fits with ~100x of headroom.
+--
+-- Default 100000 is correct for every row that exists at migration time: those hashes were
+-- derived at 100k with the previous constant. New sign-ups and password resets write 600000
+-- via application code (apps/api/src/routes/auth.ts). Existing users are transparently
+-- upgraded in the sign-in path (verifyPassword's caller re-hashes at the current count and
+-- UPDATEs the row in ctx.waitUntil, so login latency is unchanged).
+--
+-- SQLite ALTER TABLE ADD COLUMN with a NOT NULL constraint requires a DEFAULT, which is
+-- how we backfill every existing row atomically in one statement without a rebuild.
+ALTER TABLE users ADD COLUMN password_iterations INTEGER NOT NULL DEFAULT 100000;

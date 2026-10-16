@@ -69,8 +69,8 @@ accountRoutes.delete(
     const db = c.env.DB
     const { password, confirmEmail } = c.req.valid('json')
 
-    const user = await db.prepare('SELECT email, password_hash, salt FROM users WHERE id = ? LIMIT 1')
-      .bind(auth.userId).first<{ email: string; password_hash: string; salt: string }>()
+    const user = await db.prepare('SELECT email, password_hash, salt, password_iterations FROM users WHERE id = ? LIMIT 1')
+      .bind(auth.userId).first<{ email: string; password_hash: string; salt: string; password_iterations: number }>()
     if (!user) {
       // requireAuth proved the user exists this request; a row that vanished between the two reads
       // is not a state to invent an answer for.
@@ -84,7 +84,7 @@ accountRoutes.delete(
       if (!password) {
         return c.json({ error: 'REAUTH_REQUIRED', message: 'Re-enter your current password to delete your account' }, 403)
       }
-      if (!(await verifyPassword(password, user.salt, user.password_hash))) {
+      if (!(await verifyPassword(password, user.salt, user.password_hash, user.password_iterations))) {
         // Opaque: it says the confirmation failed, never anything about the stored hash.
         return c.json({ error: 'REAUTH_FAILED', message: 'Password is incorrect' }, 403)
       }

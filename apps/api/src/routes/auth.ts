@@ -7,7 +7,7 @@ import type { Env } from '../index'
 import { githubOidcConfig, ruleMatches, type GitHubOidcClaims } from '../integrations/github-oidc'
 import { verifyOidcToken } from '../lib/oidc-verify'
 import { signCiToken } from '../lib/ci-tokens'
-import { createApiKey, createPrefixedId, hashPassword, timingSafeEqual, verifyPassword } from '../lib/auth'
+import { PASSWORD_ITERATIONS, createApiKey, createPrefixedId, hashPassword, timingSafeEqual, verifyPassword } from '../lib/auth'
 import type { OAuthIdentity } from '../lib/oauth'
 import {
   clearRefreshCookie,
@@ -149,18 +149,19 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
 
   const userId = createPrefixedId('usr')
   const orgId = createPrefixedId('org')
-  const { salt, passwordHash } = await hashPassword(password)
+  const { salt, passwordHash, iterations } = await hashPassword(password)
   const slugBase = organisationName.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48) || `org-${userId.slice(-8)}`
   const slug = `${slugBase}-${orgId.slice(-6)}`
 
   await db.batch([
-    db.prepare('INSERT INTO users (id, email, password_hash, salt, created_at, email_verified) VALUES (?, ?, ?, ?, ?, 0)').bind(
+    db.prepare('INSERT INTO users (id, email, password_hash, salt, password_iterations, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, 0)').bind(
       userId,
       email.toLowerCase(),
       passwordHash,
       salt,
+      iterations,
       new Date().toISOString(),
     ),
     db.prepare('INSERT INTO organisations (id, name, slug, plan, created_at) VALUES (?, ?, ?, ?, ?)').bind(
@@ -228,23 +229,40 @@ authRoutes.post('/login', loginRateLimit, zValidator('json', loginSchema, valida
   const { email, password } = c.req.valid('json')
   const db = c.env.DB
 
-  const user = await db.prepare('SELECT id, password_hash, salt, email_verified FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<{
+  const user = await db.prepare('SELECT id, password_hash, salt, password_iterations, email_verified FROM users WHERE email = ? LIMIT 1').bind(email.toLowerCase()).first<{
     id: string
     password_hash: string
     salt: string
+    password_iterations: number
     email_verified: number
   }>()
 
   // Burn the same PBKDF2 cost for unknown users and OAuth-only users (empty
   // hash) so response time does not reveal whether an email is registered.
+  // Uses the default (current) iteration count — a real user's cost may differ by their stored
+  // count, but once every pre-migration user upgrades on their next login the two converge; the
+  // enumeration-timing guarantee was never about matching the victim's exact count, only about
+  // not short-circuiting to "unknown user".
   if (!user || !user.password_hash || !user.salt) {
     await hashPassword(password)
     return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
   }
 
-  const isValid = await verifyPassword(password, user.salt, user.password_hash)
+  const isValid = await verifyPassword(password, user.salt, user.password_hash, user.password_iterations)
   if (!isValid) {
     return c.json({ error: 'UNAUTHORIZED', message: 'Invalid credentials' }, 401)
+  }
+
+  // Transparent PBKDF2 upgrade (issue #89): if this user's stored hash was derived at a count
+  // below the current PASSWORD_ITERATIONS, re-hash and persist in the background. Login already
+  // succeeded — the upgrade must not fail the request or add latency, and a transient D1 write
+  // failure is fine because the next login will try again.
+  if (user.password_iterations < PASSWORD_ITERATIONS) {
+    await runBackground(c, (async () => {
+      const upgraded = await hashPassword(password)
+      await c.env.DB.prepare('UPDATE users SET password_hash = ?, salt = ?, password_iterations = ? WHERE id = ? AND password_iterations = ?')
+        .bind(upgraded.passwordHash, upgraded.salt, upgraded.iterations, user.id, user.password_iterations).run()
+    })())
   }
 
   // Sign-in picks the starting org once (the earliest membership) and the session then carries it.
@@ -480,7 +498,7 @@ authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', rese
     return c.json({ error: 'INVALID_TOKEN', message: 'This link is invalid or has expired' }, 400)
   }
 
-  const { salt, passwordHash } = await hashPassword(password)
+  const { salt, passwordHash, iterations } = await hashPassword(password)
   const nowSeconds = Math.floor(Date.now() / 1000)
   const cutoff = nowSeconds + 1 // JWT iat is whole seconds: tokens minted this second must die too
   await c.env.DB.batch([
@@ -488,8 +506,8 @@ authRoutes.post('/reset-password', tokenSubmitRateLimit, zValidator('json', rese
     c.env.DB.prepare(
       'UPDATE api_keys SET revoked_at = ?, revoked_reason = ? WHERE user_id = ? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM users WHERE id = ? AND email_verified = 0)',
     ).bind(nowSeconds, 'password_reset', consumed.userId, consumed.userId),
-    c.env.DB.prepare('UPDATE users SET password_hash = ?, salt = ?, email_verified = 1, sessions_valid_after = ? WHERE id = ?')
-      .bind(passwordHash, salt, cutoff, consumed.userId),
+    c.env.DB.prepare('UPDATE users SET password_hash = ?, salt = ?, password_iterations = ?, email_verified = 1, sessions_valid_after = ? WHERE id = ?')
+      .bind(passwordHash, salt, iterations, cutoff, consumed.userId),
     c.env.DB.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND purpose = 'reset_password'").bind(consumed.userId),
     c.env.DB.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').bind(consumed.userId),
   ])

@@ -130,18 +130,27 @@ export function createTestEnv(overrides: Record<string, unknown> = {}): TestEnv 
 
 export type Role = 'owner' | 'admin' | 'member' | 'viewer'
 
-/** Insert a user (+ optionally a brand new org, or membership in `orgId`) and return a signed JWT. */
+/**
+ * Insert a user (+ optionally a brand new org, or membership in `orgId`) and return a signed JWT.
+ *
+ * Seeds the password hash at a CHEAP iteration count by default (1,000, not production's
+ * 600,000) so tests that seed dozens of users do not spend seconds in PBKDF2. verifyPassword
+ * reads the iteration count from the stored column, so the hash still verifies cleanly when a
+ * test exercises sign-in — it just verifies at the cheap count. Tests that need to exercise the
+ * production cost (e.g. the issue #89 transparent-upgrade test) pass `passwordIterations`
+ * explicitly.
+ */
 export async function seedUser(
   env: TestEnv,
-  opts: { role?: Role; orgId?: string; email?: string; password?: string; emailVerified?: boolean } = {},
+  opts: { role?: Role; orgId?: string; email?: string; password?: string; emailVerified?: boolean; passwordIterations?: number } = {},
 ) {
   const role = opts.role ?? 'owner'
   const userId = createPrefixedId('usr')
   const email = opts.email ?? `${userId}@example.test`
   const now = new Date().toISOString()
-  const { salt, passwordHash } = await hashPassword(opts.password ?? 'correct horse battery staple')
-  await env.DB.prepare('INSERT INTO users (id, email, password_hash, salt, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(userId, email, passwordHash, salt, now, opts.emailVerified ? 1 : 0).run()
+  const { salt, passwordHash, iterations } = await hashPassword(opts.password ?? 'correct horse battery staple', { iterations: opts.passwordIterations ?? 1000 })
+  await env.DB.prepare('INSERT INTO users (id, email, password_hash, salt, password_iterations, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(userId, email, passwordHash, salt, iterations, now, opts.emailVerified ? 1 : 0).run()
   let orgId = opts.orgId
   if (!orgId) {
     orgId = createPrefixedId('org')

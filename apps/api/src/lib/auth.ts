@@ -90,11 +90,25 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
   return payload
 }
 
-export async function hashPassword(password: string, saltBase64?: string): Promise<{ salt: string; passwordHash: string }> {
-  const salt = saltBase64 ? decodeBase64Url(saltBase64) : crypto.getRandomValues(new Uint8Array(16))
+/**
+ * PBKDF2-HMAC-SHA256 iteration count for NEW hashes (sign-up, password reset) — OWASP
+ * Password Storage Cheat Sheet's current recommendation. Measured cost on local workerd:
+ * ~278ms (see docs/ENCRYPTION.md "PBKDF2 iteration count"), well under 1% of the Workers
+ * Paid plan's default 30s per-request CPU budget. Raised from the historical 100,000 in
+ * issue #89; migration 0022 added `users.password_iterations` so existing hashes keep
+ * verifying at their original count and upgrade transparently on next sign-in.
+ */
+export const PASSWORD_ITERATIONS = 600_000
+
+export async function hashPassword(
+  password: string,
+  options: { saltBase64?: string; iterations?: number } = {},
+): Promise<{ salt: string; passwordHash: string; iterations: number }> {
+  const salt = options.saltBase64 ? decodeBase64Url(options.saltBase64) : crypto.getRandomValues(new Uint8Array(16))
+  const iterations = options.iterations ?? PASSWORD_ITERATIONS
   const baseKey = await crypto.subtle.importKey('raw', textEncoder.encode(password), 'PBKDF2', false, ['deriveBits'])
   const derivedBits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
     baseKey,
     256,
   )
@@ -102,11 +116,19 @@ export async function hashPassword(password: string, saltBase64?: string): Promi
   return {
     salt: createBase64Url(salt),
     passwordHash: createBase64Url(derivedBits),
+    iterations,
   }
 }
 
-export async function verifyPassword(password: string, saltBase64: string, expectedHash: string): Promise<boolean> {
-  const { passwordHash } = await hashPassword(password, saltBase64)
+/**
+ * Verify a password at the EXACT iteration count the stored hash was derived with. The caller
+ * must pass the user's `password_iterations` column, never let it default: a drift between
+ * stored and asserted count silently breaks every pre-migration user's login. On a successful
+ * verify where `iterations < PASSWORD_ITERATIONS`, the caller should re-hash and UPDATE the row
+ * (the transparent-upgrade path — see routes/auth.ts).
+ */
+export async function verifyPassword(password: string, saltBase64: string, expectedHash: string, iterations: number): Promise<boolean> {
+  const { passwordHash } = await hashPassword(password, { saltBase64, iterations })
   return timingSafeEqual(passwordHash, expectedHash)
 }
 
