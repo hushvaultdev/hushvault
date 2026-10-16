@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { Env } from '../index'
 import { encryptCredentialWithRing } from '../crypto/envelope'
 import { enqueueSyncForTarget } from '../integrations/sync-scheduler'
-import { getProvider, connectableProviderIds } from '../integrations/provider'
+import { getProvider, getConnectableProvider, connectableProviderIds } from '../integrations/provider'
 import { isDeniedAccount, isTargetDenied } from '../integrations/target-denylist'
 import { SyncEngineError, type SyncTargetRow, listSyncTargets, loadSyncRun, loadSyncTarget, newFingerprintSalt, previewSync, runSync, toSyncRunDto, toSyncTargetDto } from '../integrations/sync-engine'
 import type { SyncResourceSpec, SyncTargetDto } from '@hushvault/shared/integrations'
@@ -75,7 +75,9 @@ integrationsRouter.post('/connections', ...adminOnly, integrationWriteRateLimit,
   const auth = c.get('auth')
   const body = c.req.valid('json')
 
-  const provider = getProvider(body.provider)
+  // Gate on registry status (issue #110 root-cause fix): a `planned` provider — even if its
+  // module is registered — is not reachable through this public write boundary.
+  const provider = getConnectableProvider(body.provider)
   if (!provider) {
     return c.json({ error: 'UNSUPPORTED_PROVIDER', message: 'This integration is not available yet' }, 400)
   }
