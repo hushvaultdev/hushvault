@@ -1,4 +1,5 @@
 import { registerProvider } from '../provider'
+import { cloudflarePagesProvider } from './cloudflare-pages'
 import { cloudflareWorkersProvider } from './cloudflare-workers'
 import { githubActionsProvider } from './github-actions'
 import { gitlabProvider } from './gitlab'
@@ -8,10 +9,12 @@ export function registerProviders(): void {
   registerProvider(cloudflareWorkersProvider)
   registerProvider(gitlabProvider)
   registerProvider(githubActionsProvider)
-  // cloudflare-pages is deliberately NOT registered or imported here (issue #110, found during the #108 review).
-  // The registry marks Pages as `planned`, but nothing in the connect/run path reads that status field — so any
-  // registered provider is fully connectable, and cloudflare-pages.ts's own header admits its PATCH behavior
-  // against deployment_configs is unverified against a live project and could wipe a project's bindings if PATCH
-  // replaces instead of merges. The module and its tests stay for #45's live e2e drill; re-register it once that
-  // drill records real evidence.
+  // cloudflare-pages is registered so the module loads and its sync-engine wiring compiles, but it
+  // stays `planned` in packages/shared/src/integrations.ts and the connect-path gate in
+  // getConnectableProvider refuses it. This is the full #110 fix (b0874d4 only unregistered it):
+  // the status field is now a real gate, so promoting Pages to `beta` after #45's live e2e drill
+  // records PATCH's merge-vs-replace behavior opens the gate automatically. Any future `planned`
+  // provider (webhooks, slack) can be registered the same way for internal drills without being
+  // publicly reachable.
+  registerProvider(cloudflarePagesProvider)
 }

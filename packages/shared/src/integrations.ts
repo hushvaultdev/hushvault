@@ -81,6 +81,17 @@ export function integrationsWithStatus(status: IntegrationStatus): IntegrationIn
   return INTEGRATIONS.filter((i) => i.status === status)
 }
 
+/**
+ * A provider is connectable (POST /api/integrations/connections accepts it) iff its registry
+ * status is NOT `planned`. The API uses this to refuse `planned` providers even if their module
+ * is registered — so a provider can be registered for internal e2e drills or benchmarks without
+ * being publicly reachable. Promoting `planned` → `beta` in this file makes it connectable, no
+ * API code change needed. Fix for issue #110's root cause (b0874d4 only unregistered Pages).
+ */
+export function isConnectableStatus(status: IntegrationStatus): boolean {
+  return status !== 'planned'
+}
+
 /** "A, B and C" over the integrations that are not available yet, for copy that must stay honest. */
 export function plannedNamesPhrase(): string {
   const names = INTEGRATIONS.filter((i) => i.status !== 'available').map((i) => i.name)

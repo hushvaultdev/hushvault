@@ -96,9 +96,11 @@ describe('connections: create / list / rotate / revoke', () => {
   it('rejects unknown providers, invalid config, duplicates and over-long input without echoing it', async () => {
     await setupAdmin()
     expect((await post(admin.token, { provider: 'slack', label: 'x', credential: CANARY })).body.error).toBe('UNSUPPORTED_PROVIDER')
-    // cloudflare-pages is deliberately unregistered (issue #110 — its PATCH behavior is unverified
-    // against a live Pages project and could wipe bindings). Lock in that it stays unreachable
-    // through this route until #45's live e2e drill records evidence and the module is re-registered.
+    // cloudflare-pages is registered (so its module compiles and its sync-engine wiring is live for
+    // the eventual #45 e2e drill) but its registry status is `planned`, so the connect-path gate in
+    // getConnectableProvider refuses it. Issue #110 root-cause fix: the registry status is now a
+    // real gate, not just a display hint. Pages, and any other `planned` provider, cannot be
+    // reached through this public write boundary until promoted to `beta`.
     expect((await post(admin.token, { provider: 'cloudflare-pages', label: 'x', credential: CANARY })).body.error).toBe('UNSUPPORTED_PROVIDER')
     expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'x', credential: CANARY, config: { accountId: 5 } })).status).toBe(400)
     expect((await post(admin.token, { provider: 'cloudflare-workers', label: 'x', credential: 'short' })).status).toBe(400)
@@ -158,6 +160,11 @@ describe('access control', () => {
     expect(byId['cloudflare-workers'].connectable).toBe(true)
     expect(byId['slack'].connectable).toBe(false)
     expect(byId['slack'].status).toBe('planned')
+    // Issue #110 root-cause fix: cloudflare-pages is registered (the module loads) but its
+    // registry status is `planned`, so the /providers endpoint reports it as not connectable,
+    // mirroring the gate POST /connections enforces.
+    expect(byId['cloudflare-pages'].status).toBe('planned')
+    expect(byId['cloudflare-pages'].connectable).toBe(false)
   })
 
   it('the secret-scanner callback stays reachable without auth', async () => {
