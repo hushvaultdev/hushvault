@@ -142,6 +142,40 @@ not a tested failure. Two ways to handle it:
 2. Use the `*:code-only` deploy commands and run migrations by hand:
    `pnpm --filter @hushvault/api db:migrate:dev` (after `wrangler login`).
 
+### Migration-drift gate (issue #119)
+
+Because Workers Builds runs `wrangler deploy` but **not** `wrangler d1 migrations
+apply`, the deployed code can reference a column the live D1 does not have yet. This
+happened twice in one session (2026-10-19): migration `0022` was unapplied on both
+dev and prod, and `/api/auth/register` returned 500 for everyone. Nothing warned.
+
+`apps/api/scripts/check-migrations.mjs` closes that gap. It counts the `.sql` files
+in `apps/api/migrations/` and compares to `SELECT COUNT(*) FROM d1_migrations` on the
+target database (read-only D1 REST query; needs only `CLOUDFLARE_API_TOKEN` +
+`CLOUDFLARE_ACCOUNT_ID` with D1 read). Exit codes: `0` in sync, `1` drift (names the
+fix), `2` a usage/auth problem.
+
+```bash
+pnpm --filter @hushvault/api migrations:check:dev
+pnpm --filter @hushvault/api migrations:check:production
+```
+
+Wire it into the Workers Builds **build command** (dashboard → the Worker → Settings →
+Build) *before* the deploy step, so a drifted database fails the build instead of
+shipping a 500:
+
+```
+pnpm --filter @hushvault/api migrations:check:dev && <existing build command>
+```
+
+The build token needs D1 read for this (the default deploy token does not include D1 —
+see above). Either add D1 read to the build token, or provide `CLOUDFLARE_API_TOKEN` +
+`CLOUDFLARE_ACCOUNT_ID` as build environment variables scoped to D1 read only.
+
+Deliberately **not** a Worker-runtime self-check: a startup probe that 503s on a missing
+migration is one bug away from taking the whole API down, which is worse than the drift
+it guards. The pre-deploy gate catches the same problem without that blast radius.
+
 ## First-time setup checklist
 
 ### 1. Cloudflare resources
