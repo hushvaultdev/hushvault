@@ -10,6 +10,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
+    exclude: ['test/e2e/**', 'node_modules/**', 'dist/**'],
     passWithNoTests: true,
     // The app emits structured request/error log lines; keep test output clean
     // (console spies in tests still capture them).

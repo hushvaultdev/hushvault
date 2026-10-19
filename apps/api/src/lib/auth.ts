@@ -91,14 +91,24 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
 }
 
 /**
- * PBKDF2-HMAC-SHA256 iteration count for NEW hashes (sign-up, password reset) — OWASP
- * Password Storage Cheat Sheet's current recommendation. Measured cost on local workerd:
- * ~278ms (see docs/ENCRYPTION.md "PBKDF2 iteration count"), well under 1% of the Workers
- * Paid plan's default 30s per-request CPU budget. Raised from the historical 100,000 in
- * issue #89; migration 0022 added `users.password_iterations` so existing hashes keep
- * verifying at their original count and upgrade transparently on next sign-in.
+ * PBKDF2-HMAC-SHA256 iteration count for NEW hashes (sign-up, password reset).
+ *
+ * CEILING: the deployed Cloudflare Workers runtime rejects iteration counts above 100,000
+ * with `NotSupportedError: Pbkdf2 failed: iteration counts above 100000 are not supported`.
+ * Local `workerd` (via `wrangler dev`) and Node's `node:crypto` do NOT enforce that cap,
+ * which is why #89 shipped at 600,000 and the regression (#118) only surfaced on live dev.
+ * `scripts/bench-pbkdf2.mjs` cannot catch this — it runs under those uncapped runtimes.
+ *
+ * This is BELOW OWASP's current recommendation of 600,000. The real OWASP target is tracked
+ * as a follow-up: move KDF off WebCrypto to `@noble/hashes` scrypt or pbkdf2 (which have no
+ * runtime cap and no WebCrypto dependency), with a `password_algorithm` column and the
+ * existing per-row `password_iterations` already in place.
+ *
+ * Migration 0022 added `users.password_iterations` so existing hashes keep verifying at
+ * their original count and the transparent-upgrade path (routes/auth.ts) lifts them when
+ * this constant is raised.
  */
-export const PASSWORD_ITERATIONS = 600_000
+export const PASSWORD_ITERATIONS = 100_000
 
 export async function hashPassword(
   password: string,

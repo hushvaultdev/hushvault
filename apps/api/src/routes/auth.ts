@@ -155,14 +155,21 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
     .slice(0, 48) || `org-${userId.slice(-8)}`
   const slug = `${slugBase}-${orgId.slice(-6)}`
 
+  // Dev-only auto-verify for the automated e2e lane. Prod is strictly denied by the
+  // ENVIRONMENT guard, and the local-part tag means a real user cannot opt into this
+  // by accident. See apps/api/test/e2e/*.
+  const isE2eTag = /\+e2e-/.test(email)
+  const autoVerify = c.env.ENVIRONMENT !== 'production' && isE2eTag ? 1 : 0
+
   await db.batch([
-    db.prepare('INSERT INTO users (id, email, password_hash, salt, password_iterations, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, 0)').bind(
+    db.prepare('INSERT INTO users (id, email, password_hash, salt, password_iterations, created_at, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(
       userId,
       email.toLowerCase(),
       passwordHash,
       salt,
       iterations,
       new Date().toISOString(),
+      autoVerify,
     ),
     db.prepare('INSERT INTO organisations (id, name, slug, plan, created_at) VALUES (?, ?, ?, ?, ?)').bind(
       orgId,
@@ -183,14 +190,17 @@ authRoutes.post('/register', registerRateLimit, zValidator('json', registerSchem
   const session = await issueSession(c.env, { userId, orgId, role: 'owner' })
   setRefreshCookie(c, session.refreshToken)
   // Verification mail: in the background, so a failed or slow send never fails registration.
-  await runBackground(c, sendVerificationEmail(c.env, { userId, email: email.toLowerCase(), orgId }, 'registration'))
+  // Skipped when the dev auto-verify path has already marked the row verified.
+  if (!autoVerify) {
+    await runBackground(c, sendVerificationEmail(c.env, { userId, email: email.toLowerCase(), orgId }, 'registration'))
+  }
   return c.json({
     data: {
       userId,
       orgId,
       token: session.accessToken,
       expiresIn: session.expiresIn,
-      emailVerified: false,
+      emailVerified: autoVerify === 1,
       // Exactly one org here, by construction; sent in the same shape as login and refresh so the
       // dashboard's switcher has one code path.
       orgs: [{ id: orgId, name: organisationName, slug, plan: 'free', role: 'owner' as const }],
