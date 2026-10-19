@@ -567,3 +567,54 @@ wrangler d1 execute DB --remote --env production \
 
 A raw-D1 change like this writes **no audit row** — note it explicitly in the client's onboarding
 ticket, since the admin app's audit trail above will otherwise look like the only history there is.
+
+## 9. Dogfood setup and status (issue #126)
+
+HushVault manages its own operational secrets — we are client zero. `scripts/dogfood-setup.mjs`
+is the one tool for that: it idempotently ensures the `dogfood` project, its `ci` environment, the
+`OIDC_SELFTEST_CANARY` secret and a GitHub OIDC repo rule exist, then prints the non-secret values
+the self-test repo needs.
+
+**It is operator-run, by design.** Creating a CI-access rule is gated by `requireHuman`, so an
+`hv_live_*` API key cannot do it — a leaked credential must never be able to mint access to an
+environment. That means a password login, which means this script runs on an operator's own
+machine: credentials never pass through a chat transcript, a ticket, or a file anyone else reads.
+Login and every subsequent call happen inside one process, because a session token lives ~15
+minutes. Do **not** stage session tokens in `env.local` or anywhere else.
+
+```bash
+# Set the password without shell echo first:
+#   PowerShell: $env:HUSHVAULT_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+#                 [Runtime.InteropServices.Marshal]::SecureStringToBSTR((Read-Host -AsSecureString)))
+#   bash:       read -rs HUSHVAULT_PASSWORD && export HUSHVAULT_PASSWORD
+export HUSHVAULT_EMAIL=ops@hushvault.dev
+
+# Ensure the fixture (default --target dev; production requires typing the org slug to confirm)
+node scripts/dogfood-setup.mjs --target dev \
+  --repo <owner/name> --ref refs/heads/main
+
+# Read back what is deployed, including when CI last used the rule
+node scripts/dogfood-setup.mjs --target dev --repo <owner/name> --ref refs/heads/main --status
+```
+
+Flags: `--org <slug>` to act in a non-default org (login binds your earliest membership);
+`--rotate-canary` to issue a new canary value (then update the self-test repo variables).
+
+**Exit codes are the diagnostic contract** — they distinguish the three failures that otherwise
+look identical from the outside:
+
+| Code | Meaning | Action |
+|-----:|---------|--------|
+| 0 | Fixture ensured (or status printed) | Paste the printed `gh variable set` lines into the self-test repo |
+| 1 | Ordinary failure (bad flag, HTTP error, role too low) | Read the message |
+| 2 | Login rejected | Wrong email or password |
+| 3 | Login succeeded but the deployment rejected the token it just issued | **Stop.** A `JWT_SECRET` inconsistency on that deployment; no session can be trusted until it is explained |
+
+The printed canary value is non-secret by design (it proves a pull happened; it guards nothing), so
+it is safe in CI variables and logs. The session token is never printed.
+
+**After a self-test run**, `--status` shows the rule's `lastUsedAt`. A green workflow plus a stamped
+`lastUsedAt` is the proof the exchange actually reached the API rather than passing on stale state.
+
+Rotating `JWT_SECRET` invalidates every live session, including any token this script holds — see
+`docs/ENCRYPTION.md` "API token rotation" and issue #71 (previous-secret fallback) before rotating.
