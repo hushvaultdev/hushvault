@@ -21,6 +21,7 @@ import { globalApiRateLimit } from './middleware/auth'
 import { RateLimiter } from './lib/rate-limiter-do'
 import { SecretTooLargeError, logEvent, redactPath } from './lib/security'
 import { housekeepingTick } from './lib/housekeeping'
+import { evaluateAbsence, evaluateTickOutcome, recordHeartbeat } from './lib/alerts'
 import { rotationTick } from './lib/key-rotation'
 import { syncTick } from './integrations/sync-scheduler'
 import type { EmailBinding } from './lib/email'
@@ -48,6 +49,9 @@ export type Env = {
   // Daily cap on verification/reset mail (default 200); REQUIRE_VERIFIED_EMAIL=1 gates sensitive actions.
   EMAIL_DAILY_BUDGET?: string
   REQUIRE_VERIFIED_EMAIL?: string
+  // Operator alert destination (issue #83). Unset = alerting off, logged once per condition
+  // as `alerts.unconfigured`. Alerts carry event names, codes and counts only — never secrets.
+  ALERT_EMAIL_TO?: string
   JWT_SECRET: string
   STRIPE_SECRET_KEY?: string
   STRIPE_WEBHOOK_SECRET?: string
@@ -215,14 +219,25 @@ export default {
       // trigger, a deploy that dropped it, a Cloudflare incident — produces no signal of any
       // kind, so the ONLY way to see it is to alert on the absence of this line. It is also the
       // first place a thrown tick becomes visible: all three were swallowed outright before.
-      logEvent('cron.tick', {
+      const outcome = {
         rotation: rotation ? rotation.state : 'threw',
         // `state: 'error'` carries the code that says which control is broken; the other states
         // have no code and report null rather than inventing one.
         rotationCode: rotation && 'code' in rotation ? rotation.code : null,
         sync,
         housekeeping,
-      })
+      }
+      logEvent('cron.tick', outcome)
+
+      // Alerting (issue #83). Deliberately after the heartbeat log and individually guarded:
+      // observability must never be able to break the ticks it reports on. Absence is
+      // evaluated BEFORE this tick's own heartbeats are written, so a stale timestamp is
+      // still visible rather than being overwritten by the run that is about to check it.
+      const nowIso = new Date().toISOString()
+      await evaluateAbsence(env, Date.now()).catch(() => {})
+      await evaluateTickOutcome(env, outcome).catch(() => {})
+      await recordHeartbeat(env, 'cron', nowIso).catch(() => {})
+      if (sync === 'ok') await recordHeartbeat(env, 'sync', nowIso).catch(() => {})
     })())
   },
 }

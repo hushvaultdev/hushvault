@@ -196,9 +196,56 @@ Watch:
 
 Every event HushVault emits that means "a control just stopped working", and what to alert on.
 All of them are structured JSON lines in Workers Logs with an `event` field; none of them ever
-carries a secret value, a key, a DEK, a token or an address. **No alert destination is wired up
-yet** (issue #83) — this table is what to configure, and it is also the list of names a query
-can be built from today.
+carries a secret value, a key, a DEK, a token or an address.
+
+**An email alert destination is now wired** (issue #83) — see "Email alerting" immediately below
+for exactly which of the conditions in this table it covers (a subset) and which still need an
+external monitor. The table remains the full catalogue, and the list of names to build log
+queries from.
+
+#### Email alerting (what is and is not covered)
+
+`apps/api/src/lib/alerts.ts` sends operator email through the existing `send_email` binding.
+It runs **from the cron**, because `logEvent` cannot do I/O (it takes no binding) and because an
+absence condition is only detectable from something scheduled that remembers the last heartbeat.
+
+Configure with `ALERT_EMAIL_TO` in `wrangler.toml` (set per environment). Unset means alerting is
+off, logged as `alerts.unconfigured`. The address **must be a verified destination** in Cloudflare
+Email Service, or every send maps to `SENDER_NOT_VERIFIED` and the alerting is silently useless —
+send a test alert after changing it.
+
+Covered today, emitted from the cron's own tick outcomes:
+
+| Alert key | Severity | Condition |
+|---|---|---|
+| `key_rotation.tick_failed` | critical | `rotation` came back `threw` or `error` (carries `rotationCode`) |
+| `sync.tick_failed` | warning | the sync tick threw |
+| `housekeeping.tick_failed` | warning | the housekeeping tick threw |
+| `sync.tick.absent` | critical | no sync heartbeat for 10 minutes |
+
+Noise control, because an alerting path that floods is an alerting path people filter away:
+
+- **Dedupe** — one email per alert key per hour (`system_state` marker, written only *after* a
+  successful send, so a failed send retries next tick instead of suppressing itself).
+- **Budget** — 50 alert emails/day via `consumeIdentityLimit` on a **separate** bucket
+  (`email-send-alert`) from transactional mail, so an alert storm can never consume the budget
+  that carries password-reset and verification mail.
+- **Fail-soft** — `sendEmail` never throws, `system_state` swallows its errors, and every entry
+  point is wrapped. Alerting cannot break the cron it rides on. Covered by
+  `apps/api/test/alerts.test.ts`, including the case where D1 *and* the mail binding are both down.
+
+> **NOT covered — the cron stopping entirely.** Nothing inside the Worker can detect its own
+> total absence: if `scheduled` never fires, no code runs to notice. The cron heartbeat is written
+> to `system_state` (`alerts.last_cron_tick_at`) so an **external** watchdog can read it, but that
+> watchdog does not exist yet. Until it does, a removed trigger, a deploy that dropped it, or a
+> Cloudflare incident is still silent. Options: an uptime monitor on `/health`, or Cloudflare's own
+> notification on Worker cron failures. **This is the remaining gap in #83** and it is the one that
+> matters most, because it is the failure that hides every other failure.
+>
+> Also still uncovered, per "What is still not observable" below: the presence conditions emitted
+> from inside the ticks (`key_rotation.stalled`, `secret.decrypt_failed`, `rate_limit.*`, and the
+> rest of the table) are logged but not yet mailed — they need either a log-based query/alert in
+> Cloudflare, or a follow-up that routes them through `raiseAlert`.
 
 The **Alert on** column distinguishes three shapes, and the difference matters:
 
