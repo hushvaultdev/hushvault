@@ -273,6 +273,10 @@ wrangler secret put ENCRYPTION_MASTER_KEY
 
 **Never** put the master key in `wrangler.toml`, source code, or `.dev.vars` that gets committed.
 
+Back the key up offline at generation time and **verify the backup** against the live
+`encryption_keys` canary with `scripts/verify-key.mjs` — see OPERATIONS.md §1 "Verify a
+master-key backup" for the exact steps and cadence.
+
 ## Key Rotation
 
 Rotation replaces the key (KEK) that wraps each secret's DEK. It is operator-driven (a deploy), not an API call, and it never decrypts or rewrites secret values: only the wrapped DEKs in D1 are re-wrapped, so KV is untouched. Issue #27.

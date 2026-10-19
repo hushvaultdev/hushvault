@@ -26,6 +26,56 @@ Back it up offline, at the moment you generate it:
 
 Never paste the key into issues, logs or terminals with shared history.
 
+### Verify a master-key backup (issue #117)
+
+A backup you have never restored is a guess. `encryption_keys.check_value` is an
+encryption of the fixed, non-secret canary string `hushvault-key-check-v1` under the
+live key (migration `0006`; nothing secret is stored in that column). `scripts/verify-key.mjs`
+decrypts it with a backed-up key **offline** and tells you PASS/FAIL. No key material is
+ever printed, and it makes no network call.
+
+Run it at least:
+- once per key rotation (prove the new key's backup before retiring the old key), and
+- once per release train, as a standing "our backup still opens production" check.
+
+**Step 1 — read the canary from the live database.** Needs D1 read (the token in
+`env.local`, or `wrangler login`). The `active` row is the current KEK:
+
+```bash
+pnpm --filter @hushvault/api exec wrangler d1 execute DB --remote --env production \
+  --command "SELECT version, check_value, status FROM encryption_keys"
+```
+
+**Step 2 — verify your backed-up key against that canary (offline).** Type the key at a
+prompt so it never lands in shell history; paste the `check_value` from the `active` row:
+
+```powershell
+# PowerShell
+$sec = Read-Host "Paste base64 master key" -AsSecureString
+$env:PROD_KEY = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+$env:CHECK_VALUE = "<iv:ct from the active row>"
+node scripts/verify-key.mjs
+Remove-Item Env:PROD_KEY
+```
+
+```bash
+# bash
+read -rs PROD_KEY; export PROD_KEY
+export CHECK_VALUE="<iv:ct from the active row>"
+node scripts/verify-key.mjs
+unset PROD_KEY
+```
+
+Expected output:
+- `PASS — backed-up key IS the production master key.` (exit 0) — the backup opens production.
+- `FAIL — backed-up key does NOT decrypt production check_value.` (exit 1) — the backup is
+  wrong or you copied the wrong `check_value`. Do **not** retire any key or proceed with a
+  rotation until a backup verifies. Find the correct offline copy; if none verifies, treat it
+  as "master key at risk" under section 5.
+
+The same procedure runs against dev by swapping `--env production` for `--env dev`.
+
 ### Rotation
 
 Master-key rotation is implemented as a versioned key ring plus a cron-driven DEK re-wrap
