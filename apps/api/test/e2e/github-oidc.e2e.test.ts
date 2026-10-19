@@ -23,13 +23,12 @@ describe('[github-oidc] authorise a CI pull against a HushVault environment', ()
   })
 
   it('registers a repo rule for a dummy repo + ref', async () => {
-    const repo = process.env.HUSHVAULT_E2E_GITHUB_REPO ?? 'hushvaultdev/hushvault'
+    const repository = process.env.HUSHVAULT_E2E_GITHUB_REPO ?? 'hushvaultdev/hushvault'
     const res = await api('/api/ci-access/github/rules', {
       method: 'POST',
       token: user.token,
-      json: { repo, envId, ref: 'refs/heads/main' },
+      json: { repository, envId, ref: 'refs/heads/main' },
     })
-    // Some older deploys use 201; some 200. Accept either.
     expect([200, 201]).toContain(res.status)
     expect(res.body).toBeTruthy()
     // Keep projectId referenced so the test shape stays stable if we add more assertions.

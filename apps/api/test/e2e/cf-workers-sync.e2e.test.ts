@@ -4,7 +4,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { api, cfApi, CF_ACCOUNT_ID, CF_SCRIPT, CF_TOKEN, createProjectAndEnv, makeRunId, registerThrowawayUser, teardownAccount, waitFor } from './_helpers'
 
-describe('[cf-workers-sync] push a HushVault secret to a real Worker and verify independently', () => {
+// SKIPPED until a separate CF account is provisioned for e2e sinks.
+// `HUSHVAULT_SYNC_DENY_ACCOUNT_IDS` (apps/api/wrangler.toml) deliberately bans the HushVault
+// account itself from being a sync target — a security control from #41 so a connection in a
+// customer's HushVault org can never overwrite HushVault's own Worker secrets. The sink Worker
+// we provisioned lives in the same account the API runs in, so every POST /connections against
+// it correctly returns 422 TARGET_NOT_ALLOWED. To unblock, the sink needs to be in a dedicated
+// Cloudflare account and env.local needs a separate token scoped to it. Tracked as follow-up.
+describe.skip('[cf-workers-sync] push a HushVault secret to a real Worker and verify independently', () => {
   const runId = makeRunId()
   let user: Awaited<ReturnType<typeof registerThrowawayUser>>
   let projectId = ''
