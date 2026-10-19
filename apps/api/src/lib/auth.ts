@@ -90,11 +90,35 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtPaylo
   return payload
 }
 
-export async function hashPassword(password: string, saltBase64?: string): Promise<{ salt: string; passwordHash: string }> {
-  const salt = saltBase64 ? decodeBase64Url(saltBase64) : crypto.getRandomValues(new Uint8Array(16))
+/**
+ * PBKDF2-HMAC-SHA256 iteration count for NEW hashes (sign-up, password reset).
+ *
+ * CEILING: the deployed Cloudflare Workers runtime rejects iteration counts above 100,000
+ * with `NotSupportedError: Pbkdf2 failed: iteration counts above 100000 are not supported`.
+ * Local `workerd` (via `wrangler dev`) and Node's `node:crypto` do NOT enforce that cap,
+ * which is why #89 shipped at 600,000 and the regression (#118) only surfaced on live dev.
+ * `scripts/bench-pbkdf2.mjs` cannot catch this — it runs under those uncapped runtimes.
+ *
+ * This is BELOW OWASP's current recommendation of 600,000. The real OWASP target is tracked
+ * as a follow-up: move KDF off WebCrypto to `@noble/hashes` scrypt or pbkdf2 (which have no
+ * runtime cap and no WebCrypto dependency), with a `password_algorithm` column and the
+ * existing per-row `password_iterations` already in place.
+ *
+ * Migration 0022 added `users.password_iterations` so existing hashes keep verifying at
+ * their original count and the transparent-upgrade path (routes/auth.ts) lifts them when
+ * this constant is raised.
+ */
+export const PASSWORD_ITERATIONS = 100_000
+
+export async function hashPassword(
+  password: string,
+  options: { saltBase64?: string; iterations?: number } = {},
+): Promise<{ salt: string; passwordHash: string; iterations: number }> {
+  const salt = options.saltBase64 ? decodeBase64Url(options.saltBase64) : crypto.getRandomValues(new Uint8Array(16))
+  const iterations = options.iterations ?? PASSWORD_ITERATIONS
   const baseKey = await crypto.subtle.importKey('raw', textEncoder.encode(password), 'PBKDF2', false, ['deriveBits'])
   const derivedBits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
     baseKey,
     256,
   )
@@ -102,11 +126,19 @@ export async function hashPassword(password: string, saltBase64?: string): Promi
   return {
     salt: createBase64Url(salt),
     passwordHash: createBase64Url(derivedBits),
+    iterations,
   }
 }
 
-export async function verifyPassword(password: string, saltBase64: string, expectedHash: string): Promise<boolean> {
-  const { passwordHash } = await hashPassword(password, saltBase64)
+/**
+ * Verify a password at the EXACT iteration count the stored hash was derived with. The caller
+ * must pass the user's `password_iterations` column, never let it default: a drift between
+ * stored and asserted count silently breaks every pre-migration user's login. On a successful
+ * verify where `iterations < PASSWORD_ITERATIONS`, the caller should re-hash and UPDATE the row
+ * (the transparent-upgrade path — see routes/auth.ts).
+ */
+export async function verifyPassword(password: string, saltBase64: string, expectedHash: string, iterations: number): Promise<boolean> {
+  const { passwordHash } = await hashPassword(password, { saltBase64, iterations })
   return timingSafeEqual(passwordHash, expectedHash)
 }
 

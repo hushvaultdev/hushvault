@@ -71,8 +71,10 @@ hushvault/
   `no_nodejs_compat` + `no_nodejs_compat_v2`, because at a compatibility date of 2026-08-04 or
   later Workers would otherwise enable Node compat by default; an accidental `node:*` import
   therefore warns at build time and fails at runtime rather than quietly working.
-- **No** Argon2 — CPU time limits; use PBKDF2-SHA256. Currently 100,000 iterations, which is
-  below OWASP's current recommendation of 600,000 for PBKDF2-HMAC-SHA256; see docs/ENCRYPTION.md
+- **No** Argon2 — CPU time limits; use PBKDF2-SHA256 at **600,000 iterations** (OWASP's current
+  recommendation for PBKDF2-HMAC-SHA256). Pre-migration users at 100,000 are transparently
+  upgraded on their next successful sign-in (issue #89, migration 0022); see docs/ENCRYPTION.md
+  for the Workers CPU-time measurement that justified raising it from the historical 100,000.
 - **Use** `Env` type for all Cloudflare bindings (D1Database, KVNamespace)
 - The web Worker does use `nodejs_compat` (OpenNext requires it); the API Worker does not
 

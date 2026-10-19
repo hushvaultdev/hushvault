@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { PASSWORD_ITERATIONS } from '../src/lib/auth'
 import { call, createTestEnv, seedApiKey, seedUser } from './helpers/env'
 import { beginGithub, githubCallback } from './helpers/auth-oauth'
 
@@ -58,6 +59,72 @@ describe('register / login', () => {
     expect(oauthOnly.status).toBe(401)
     expect(unknown.body).toEqual(wrong.body)
     expect(oauthOnly.body).toEqual(wrong.body)
+  })
+})
+
+describe('PBKDF2 iteration-count transparent upgrade (issue #89, revised #118)', () => {
+  // The constant is 100,000 (Workers runtime cap, see src/lib/auth.ts). These tests use a
+  // smaller legacy value as the "pre-migration" fixture so the upgrade path can still fire
+  // whatever the current constant is set to. Phase 2 will raise it off WebCrypto.
+  const LEGACY_ITERATIONS = 50_000
+
+  it('a pre-migration user signs in and the row is upgraded to PASSWORD_ITERATIONS', async () => {
+    const env = createTestEnv()
+    const { email } = await seedUser(env, { email: 'legacy@x.com', password: PASSWORD, passwordIterations: LEGACY_ITERATIONS })
+
+    const before = await userRow(env, email)
+    expect(before?.['password_iterations']).toBe(LEGACY_ITERATIONS)
+    const legacyHash = before?.['password_hash'] as string
+    const legacySalt = before?.['salt'] as string
+
+    const res = await call(env, 'POST', '/api/auth/login', { json: { email, password: PASSWORD } })
+    expect(res.status).toBe(200)
+
+    const after = await userRow(env, email)
+    expect(after?.['password_iterations']).toBe(PASSWORD_ITERATIONS)
+    expect(after?.['password_hash']).not.toBe(legacyHash)
+    expect(after?.['salt']).not.toBe(legacySalt)
+
+    const again = await call(env, 'POST', '/api/auth/login', { json: { email, password: PASSWORD } })
+    expect(again.status).toBe(200)
+  })
+
+  it('a user already at current iteration count is NOT re-hashed on sign-in', async () => {
+    const env = createTestEnv()
+    const { email } = await seedUser(env, { email: 'current@x.com', password: PASSWORD, passwordIterations: PASSWORD_ITERATIONS })
+    const before = await userRow(env, email)
+
+    const res = await call(env, 'POST', '/api/auth/login', { json: { email, password: PASSWORD } })
+    expect(res.status).toBe(200)
+
+    const after = await userRow(env, email)
+    expect(after?.['password_hash']).toBe(before?.['password_hash'])
+    expect(after?.['salt']).toBe(before?.['salt'])
+    expect(after?.['password_iterations']).toBe(PASSWORD_ITERATIONS)
+  })
+
+  it('a failed sign-in with the wrong password does NOT upgrade the row', async () => {
+    const env = createTestEnv()
+    const { email } = await seedUser(env, { email: 'wrong@x.com', password: PASSWORD, passwordIterations: LEGACY_ITERATIONS })
+    const before = await userRow(env, email)
+
+    const res = await call(env, 'POST', '/api/auth/login', { json: { email, password: 'definitely-not-the-password' } })
+    expect(res.status).toBe(401)
+
+    const after = await userRow(env, email)
+    expect(after?.['password_hash']).toBe(before?.['password_hash'])
+    expect(after?.['salt']).toBe(before?.['salt'])
+    expect(after?.['password_iterations']).toBe(LEGACY_ITERATIONS)
+  })
+
+  it('sign-up writes the current iteration count', async () => {
+    const env = createTestEnv()
+    const res = await call(env, 'POST', '/api/auth/register', {
+      json: { email: 'fresh@x.com', password: PASSWORD, organisationName: 'Fresh' },
+    })
+    expect(res.status).toBe(201)
+    const row = await userRow(env, 'fresh@x.com')
+    expect(row?.['password_iterations']).toBe(PASSWORD_ITERATIONS)
   })
 })
 

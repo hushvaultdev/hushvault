@@ -87,6 +87,11 @@ ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
 # Sender address for transactional mail (issue #26). Must belong to a domain onboarded to
 # Cloudflare Email Service (issue #75).
 MAIL_FROM = "no-reply@hushvault.dev"
+# Operator alert destination (issue #83). Alerts carry event names, opaque codes and counts
+# only — never a secret. MUST be a verified destination address in Cloudflare Email Service,
+# or every send maps to SENDER_NOT_VERIFIED and the alerting is silently useless: send a test
+# alert after changing this. Unset = alerting off (logged as `alerts.unconfigured`).
+ALERT_EMAIL_TO = "alerts@hushvault.dev"
 # Used for OAuth redirects, share-link URLs and as an allowed CORS origin.
 WEB_APP_URL = "https://beta.hushvault.dev"
 # This deployment's own API origin. It is the default GitHub OIDC audience, and the Action
@@ -156,6 +161,9 @@ ENVIRONMENT = "production"
 # See [env.dev.vars]: active KEK version for new writes.
 ENCRYPTION_ACTIVE_KEY_VERSION = "v1"
 MAIL_FROM = "no-reply@hushvault.dev"
+# See [env.dev.vars]: operator alert destination (issue #83). Must be a VERIFIED destination
+# address in Cloudflare Email Service, else alerts silently fail as SENDER_NOT_VERIFIED.
+ALERT_EMAIL_TO = "alerts@hushvault.dev"
 WEB_APP_URL = "https://hushvault.dev"
 # See the note in [env.dev.vars]: this is the default GitHub OIDC audience.
 API_PUBLIC_URL = "https://api.hushvault.dev"

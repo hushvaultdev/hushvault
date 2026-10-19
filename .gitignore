@@ -15,6 +15,11 @@ out/
 .env.*.local
 .dev.vars
 .hushvault.local.json
+env
+env.local
+
+# Local operator how-to drafts (kept on disk only; promote to docs/ when ready)
+*.howto.html
 
 # Cloudflare
 wrangler.toml.bak
