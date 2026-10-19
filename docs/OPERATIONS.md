@@ -196,9 +196,56 @@ Watch:
 
 Every event HushVault emits that means "a control just stopped working", and what to alert on.
 All of them are structured JSON lines in Workers Logs with an `event` field; none of them ever
-carries a secret value, a key, a DEK, a token or an address. **No alert destination is wired up
-yet** (issue #83) — this table is what to configure, and it is also the list of names a query
-can be built from today.
+carries a secret value, a key, a DEK, a token or an address.
+
+**An email alert destination is now wired** (issue #83) — see "Email alerting" immediately below
+for exactly which of the conditions in this table it covers (a subset) and which still need an
+external monitor. The table remains the full catalogue, and the list of names to build log
+queries from.
+
+#### Email alerting (what is and is not covered)
+
+`apps/api/src/lib/alerts.ts` sends operator email through the existing `send_email` binding.
+It runs **from the cron**, because `logEvent` cannot do I/O (it takes no binding) and because an
+absence condition is only detectable from something scheduled that remembers the last heartbeat.
+
+Configure with `ALERT_EMAIL_TO` in `wrangler.toml` (set per environment). Unset means alerting is
+off, logged as `alerts.unconfigured`. The address **must be a verified destination** in Cloudflare
+Email Service, or every send maps to `SENDER_NOT_VERIFIED` and the alerting is silently useless —
+send a test alert after changing it.
+
+Covered today, emitted from the cron's own tick outcomes:
+
+| Alert key | Severity | Condition |
+|---|---|---|
+| `key_rotation.tick_failed` | critical | `rotation` came back `threw` or `error` (carries `rotationCode`) |
+| `sync.tick_failed` | warning | the sync tick threw |
+| `housekeeping.tick_failed` | warning | the housekeeping tick threw |
+| `sync.tick.absent` | critical | no sync heartbeat for 10 minutes |
+
+Noise control, because an alerting path that floods is an alerting path people filter away:
+
+- **Dedupe** — one email per alert key per hour (`system_state` marker, written only *after* a
+  successful send, so a failed send retries next tick instead of suppressing itself).
+- **Budget** — 50 alert emails/day via `consumeIdentityLimit` on a **separate** bucket
+  (`email-send-alert`) from transactional mail, so an alert storm can never consume the budget
+  that carries password-reset and verification mail.
+- **Fail-soft** — `sendEmail` never throws, `system_state` swallows its errors, and every entry
+  point is wrapped. Alerting cannot break the cron it rides on. Covered by
+  `apps/api/test/alerts.test.ts`, including the case where D1 *and* the mail binding are both down.
+
+> **NOT covered — the cron stopping entirely.** Nothing inside the Worker can detect its own
+> total absence: if `scheduled` never fires, no code runs to notice. The cron heartbeat is written
+> to `system_state` (`alerts.last_cron_tick_at`) so an **external** watchdog can read it, but that
+> watchdog does not exist yet. Until it does, a removed trigger, a deploy that dropped it, or a
+> Cloudflare incident is still silent. Options: an uptime monitor on `/health`, or Cloudflare's own
+> notification on Worker cron failures. **This is the remaining gap in #83** and it is the one that
+> matters most, because it is the failure that hides every other failure.
+>
+> Also still uncovered, per "What is still not observable" below: the presence conditions emitted
+> from inside the ticks (`key_rotation.stalled`, `secret.decrypt_failed`, `rate_limit.*`, and the
+> rest of the table) are logged but not yet mailed — they need either a log-based query/alert in
+> Cloudflare, or a follow-up that routes them through `raiseAlert`.
 
 The **Alert on** column distinguishes three shapes, and the difference matters:
 
@@ -567,3 +614,54 @@ wrangler d1 execute DB --remote --env production \
 
 A raw-D1 change like this writes **no audit row** — note it explicitly in the client's onboarding
 ticket, since the admin app's audit trail above will otherwise look like the only history there is.
+
+## 9. Dogfood setup and status (issue #126)
+
+HushVault manages its own operational secrets — we are client zero. `scripts/dogfood-setup.mjs`
+is the one tool for that: it idempotently ensures the `dogfood` project, its `ci` environment, the
+`OIDC_SELFTEST_CANARY` secret and a GitHub OIDC repo rule exist, then prints the non-secret values
+the self-test repo needs.
+
+**It is operator-run, by design.** Creating a CI-access rule is gated by `requireHuman`, so an
+`hv_live_*` API key cannot do it — a leaked credential must never be able to mint access to an
+environment. That means a password login, which means this script runs on an operator's own
+machine: credentials never pass through a chat transcript, a ticket, or a file anyone else reads.
+Login and every subsequent call happen inside one process, because a session token lives ~15
+minutes. Do **not** stage session tokens in `env.local` or anywhere else.
+
+```bash
+# Set the password without shell echo first:
+#   PowerShell: $env:HUSHVAULT_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+#                 [Runtime.InteropServices.Marshal]::SecureStringToBSTR((Read-Host -AsSecureString)))
+#   bash:       read -rs HUSHVAULT_PASSWORD && export HUSHVAULT_PASSWORD
+export HUSHVAULT_EMAIL=ops@hushvault.dev
+
+# Ensure the fixture (default --target dev; production requires typing the org slug to confirm)
+node scripts/dogfood-setup.mjs --target dev \
+  --repo <owner/name> --ref refs/heads/main
+
+# Read back what is deployed, including when CI last used the rule
+node scripts/dogfood-setup.mjs --target dev --repo <owner/name> --ref refs/heads/main --status
+```
+
+Flags: `--org <slug>` to act in a non-default org (login binds your earliest membership);
+`--rotate-canary` to issue a new canary value (then update the self-test repo variables).
+
+**Exit codes are the diagnostic contract** — they distinguish the three failures that otherwise
+look identical from the outside:
+
+| Code | Meaning | Action |
+|-----:|---------|--------|
+| 0 | Fixture ensured (or status printed) | Paste the printed `gh variable set` lines into the self-test repo |
+| 1 | Ordinary failure (bad flag, HTTP error, role too low) | Read the message |
+| 2 | Login rejected | Wrong email or password |
+| 3 | Login succeeded but the deployment rejected the token it just issued | **Stop.** A `JWT_SECRET` inconsistency on that deployment; no session can be trusted until it is explained |
+
+The printed canary value is non-secret by design (it proves a pull happened; it guards nothing), so
+it is safe in CI variables and logs. The session token is never printed.
+
+**After a self-test run**, `--status` shows the rule's `lastUsedAt`. A green workflow plus a stamped
+`lastUsedAt` is the proof the exchange actually reached the API rather than passing on stale state.
+
+Rotating `JWT_SECRET` invalidates every live session, including any token this script holds — see
+`docs/ENCRYPTION.md` "API token rotation" and issue #71 (previous-secret fallback) before rotating.
